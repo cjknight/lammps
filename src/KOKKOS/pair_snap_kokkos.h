@@ -98,6 +98,18 @@ class PairSNAPKokkos : public PairSNAP {
   static constexpr int tile_size_compute_yi = 2;
   static constexpr int team_size_compute_fused_deidrj = 2;
 #else
+#if defined(CHRIS_TILE)
+  static constexpr int team_size_compute_neigh = CHRIS_TILE;
+  static constexpr int tile_size_compute_ck = CHRIS_TILE;
+  static constexpr int tile_size_pre_ui = CHRIS_TILE;
+  static constexpr int team_size_compute_ui = CHRIS_TILE;
+  static constexpr int tile_size_transform_ui = CHRIS_TILE;
+  static constexpr int tile_size_compute_zi = CHRIS_TILE;
+  static constexpr int tile_size_compute_bi = CHRIS_TILE;
+  static constexpr int tile_size_transform_bi = CHRIS_TILE;
+  static constexpr int tile_size_compute_yi = CHRIS_TILE;
+  static constexpr int team_size_compute_fused_deidrj = CHRIS_TILE;
+#else
   static constexpr int team_size_compute_neigh = 4;
   static constexpr int tile_size_compute_ck = 4;
   static constexpr int tile_size_pre_ui = 4;
@@ -108,6 +120,7 @@ class PairSNAPKokkos : public PairSNAP {
   static constexpr int tile_size_transform_bi = 4;
   static constexpr int tile_size_compute_yi = 8;
   static constexpr int team_size_compute_fused_deidrj = sizeof(real_type) == 4 ? 4 : 2;
+#endif
 #endif
 
   // Custom MDRangePolicy, Rank3, to reduce verbosity of kernel launches

@@ -15,7 +15,8 @@ SHLIB =  liblammps_$@.so
 ARLINK = liblammps.a
 SHLINK = liblammps.so
 TMPNAME= tmp_$@_name
-LMPLINK= -L. -llammps_$@
+#LMPLINK= -L. -llammps_$@
+LMPLINK= $(PWD)/$(Obj_$@)/liblammps_$@.a
 
 OBJDIR =   Obj_$@
 OBJSHDIR = Obj_shared_$@
