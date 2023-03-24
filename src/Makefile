@@ -56,7 +56,7 @@ PACKAGE = \
 	awpmd \
 	bocs \
 	body \
-        bpm \
+	bpm \
 	brownian \
 	cg-dna \
 	cg-spica \
@@ -89,6 +89,7 @@ PACKAGE = \
 	kspace \
 	latboltz \
 	latte \
+	lepton \
 	machdyn \
 	manifold \
 	manybody \
@@ -100,6 +101,7 @@ PACKAGE = \
 	misc \
 	ml-hdnnp \
 	ml-pace \
+	ml-pod \
 	ml-quip \
 	ml-rann \
 	ml-snap \
@@ -153,7 +155,7 @@ PACKMOST = \
 	bocs \
 	body \
 	bpm \
-        brownian \
+	brownian \
 	cg-dna \
 	cg-spica \
 	class2 \
@@ -179,6 +181,7 @@ PACKMOST = \
 	manybody \
 	mc \
 	meam \
+	mesont \
 	misc \
 	ml-snap \
 	mofff \
@@ -212,6 +215,7 @@ PACKLIB = \
 	kim \
 	kokkos \
 	latte \
+	lepton \
 	mpiio \
 	mscg \
 	poems \
@@ -224,11 +228,12 @@ PACKLIB = \
 	h5md \
 	ml-hdnnp \
 	latboltz \
+	lepton \
 	mdi \
-	mesont \
 	molfile \
 	netcdf \
 	ml-pace \
+	ml-pod \
 	plumed \
 	qmmm \
 	ml-quip \
@@ -239,7 +244,7 @@ PACKLIB = \
 
 PACKSYS = compress latboltz mpiio python
 
-PACKINT = atc awpmd colvars electrode gpu kokkos mesont poems
+PACKINT = atc awpmd colvars electrode gpu kokkos lepton ml-pod poems
 
 PACKEXT = \
 	adios \
@@ -634,6 +639,8 @@ lib-%:
 	else \
 	  echo "Install script for lib $(@:lib-%=%) does not exist"; \
 	fi; touch main.cpp
+
+lib-colvars: lib-lepton
 
 # status = list src files that differ from package files
 # installed = list of installed packages
