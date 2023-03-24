@@ -202,7 +202,11 @@ void PairSNAPKokkos<DeviceType, real_type, vector_length>::compute(int eflag_in,
 
   int team_size_default = 1;
   if (!host_flag)
-    team_size_default = 32;//max_neighs;
+#if defined(CHRIS_TEAM)
+     team_size_default = CHRIS_TEAM;
+#else
+     team_size_default = 32;//max_neighs;
+#endif
 
   if (beta_max < inum) {
     beta_max = inum;

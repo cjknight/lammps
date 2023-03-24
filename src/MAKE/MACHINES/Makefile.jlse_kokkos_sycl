@@ -38,19 +38,21 @@ endif
 
 ifeq ($(COMPILER),IntelSDK)
 
-KOKKOS_ARCH =   "XeHP"
-KOKKOS_HOME = /home/knightc/kokkos/build_icpx_sycl
+KOKKOS_ARCH =   "PVC"
+KOKKOS_HOME = $(HOME)/kokkos/build_icpx_sycl
 #KOKKOS_HOME = /home/knightc/kokkos20220527/build_icpx_sycl
 COMMON_FLAGS =  -O3 -std=c++17 -ansi-alias
 COMMON_FLAGS += -fiopenmp --intel -fsycl -fsycl-unnamed-lambda
+COMMON_FLAGS += -ffast-math -ffp-contract=fast
+COMMON_FLAGS += $(CHRIS_EXTRA)
 
 COMMON_FLAGS += -I$(KOKKOS_HOME)/include
 
 #comment out recursive function kf_work in kissfft_kokkos.h near line 360 
-COMMON_FLAGS += -D_NO_SYCL_RECURSION
+#COMMON_FLAGS += -D_NO_SYCL_RECURSION
 
 #comment out atomics to speed up ATS
-COMMON_FLAGS +=      -D_CHRIS_INTEL_TEST
+#COMMON_FLAGS +=      -D_CHRIS_INTEL_TEST
 
 #vtune
 #COMMON_FLAGS += -fPIC
@@ -66,7 +68,6 @@ LINKFLAGS =     $(COMMON_FLAGS)
 LIB =           -L$(TBBROOT)/lib/intel64/gcc4.8 -ltbbmalloc -lstdc++
 LIB +=          ${KOKKOS_HOME}/lib64/libkokkoscore.a
 LIB +=          ${KOKKOS_HOME}/lib64/libkokkoscontainers.a
-#LIB +=          -L$(KOKKOS_HOME)/lib64 -lkokkoscore
 SIZE =          size
 endif
 
@@ -168,6 +169,6 @@ depend : fastdep.exe $(SRC)
 	@./fastdep.exe $(EXTRA_INC) -- $^ > .depend || exit 1
 
 fastdep.exe: ../DEPEND/fastdep.c
-	icc -O -o $@ $<
+	icx -O -o $@ $<
 
 sinclude .depend

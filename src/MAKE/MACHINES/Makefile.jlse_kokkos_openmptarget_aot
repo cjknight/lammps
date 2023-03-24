@@ -65,7 +65,7 @@ LINK =          time $(CC)
 #LINKFLAGS =     $(COMMON_FLAGS) -Xopenmp-target-backend "-device gen9"
 #LINKFLAGS =     $(COMMON_FLAGS) -Xopenmp-target-backend "-device xehp"
 #LINKFLAGS =     $(COMMON_FLAGS) -Xopenmp-target-backend "-device pvc"
-LINKFLAGS =     $(COMMON_FLAGS) -Xopenmp-target-backend=spir64_gen "-device 12.50.4,12.60.7"
+LINKFLAGS =     $(COMMON_FLAGS) -Xopenmp-target-backend=spir64_gen "-device 12.60.7"
 #LINKFLAGS +=    -norpath
 #LIB =           -L$(KOKKOS_HOME)/lib64 -lkokkoscore -lkokkoscontainers
 LIB =           $(KOKKOS_HOME)/lib64/libkokkoscore.a
