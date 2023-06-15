@@ -100,8 +100,8 @@ action comm_tiled_kokkos.h
 #action compute_orientorder_atom_kokkos.h
 #action compute_temp_deform_kokkos.cpp
 #action compute_temp_deform_kokkos.h
-action compute_temp_kokkos.cpp
-action compute_temp_kokkos.h
+#action compute_temp_kokkos.cpp
+#action compute_temp_kokkos.h
 #action dihedral_charmm_kokkos.cpp dihedral_charmm.cpp
 #action dihedral_charmm_kokkos.h dihedral_charmm.h
 #action dihedral_class2_kokkos.cpp dihedral_class2.cpp
@@ -194,8 +194,8 @@ action kokkos_few.h
 action kokkos_type.h
 action kokkos.cpp
 action kokkos.h
-action math_special_kokkos.cpp
-action math_special_kokkos.h
+#action math_special_kokkos.cpp
+#action math_special_kokkos.h
 #action meam_dens_final_kokkos.h meam_dens_final.cpp
 #action meam_dens_init_kokkos.h meam_dens_init.cpp
 #action meam_force_kokkos.h meam_force.cpp
@@ -236,10 +236,10 @@ action neigh_list_kokkos.cpp
 action neigh_list_kokkos.h
 action neighbor_kokkos.cpp
 action neighbor_kokkos.h
-action npair_copy_kokkos.cpp
-action npair_copy_kokkos.h
-action npair_halffull_kokkos.cpp
-action npair_halffull_kokkos.h
+#action npair_copy_kokkos.cpp
+#action npair_copy_kokkos.h
+#action npair_halffull_kokkos.cpp
+#action npair_halffull_kokkos.h
 action npair_kokkos.cpp
 action npair_kokkos.h
 #action npair_skip_kokkos.cpp
@@ -287,10 +287,10 @@ action npair_kokkos.h
 #action pair_exp6_rx_kokkos.h pair_exp6_rx.h
 #action pair_gran_hooke_history_kokkos.cpp pair_gran_hooke_history.cpp
 #action pair_gran_hooke_history_kokkos.h pair_gran_hooke_history.h
-action pair_hybrid_kokkos.cpp
-action pair_hybrid_kokkos.h
-action pair_hybrid_overlay_kokkos.cpp
-action pair_hybrid_overlay_kokkos.h
+#action pair_hybrid_kokkos.cpp
+#action pair_hybrid_kokkos.h
+#action pair_hybrid_overlay_kokkos.cpp
+#action pair_hybrid_overlay_kokkos.h
 action pair_kokkos.h
 #action pair_lj_charmm_coul_charmm_implicit_kokkos.cpp pair_lj_charmm_coul_charmm_implicit.cpp
 #action pair_lj_charmm_coul_charmm_implicit_kokkos.h pair_lj_charmm_coul_charmm_implicit.h
@@ -342,9 +342,9 @@ action pair_lj_cut_kokkos.h
 #action pair_pace_kokkos.h pair_pace.h
 #action pair_reaxff_kokkos.cpp pair_reaxff.cpp
 #action pair_reaxff_kokkos.h pair_reaxff.h
-action pair_snap_kokkos_impl.h pair_snap.cpp
-action pair_snap_kokkos.cpp pair_snap.cpp
-action pair_snap_kokkos.h pair_snap.h
+#action pair_snap_kokkos_impl.h pair_snap.cpp
+#action pair_snap_kokkos.cpp pair_snap.cpp
+#action pair_snap_kokkos.h pair_snap.h
 #action pair_sw_kokkos.cpp pair_sw.cpp
 #action pair_sw_kokkos.h pair_sw.h
 #action pair_table_kokkos.cpp
@@ -361,18 +361,18 @@ action pair_snap_kokkos.h pair_snap.h
 #action pair_vashishta_kokkos.h pair_vashishta.h
 #action pair_yukawa_kokkos.cpp
 #action pair_yukawa_kokkos.h
-action pair_zbl_kokkos.cpp
-action pair_zbl_kokkos.h
+#action pair_zbl_kokkos.cpp
+#action pair_zbl_kokkos.h
 #action pppm_kokkos.cpp pppm.cpp
 #action pppm_kokkos.h pppm.h
 #action rand_pool_wrap_kokkos.cpp
 #action rand_pool_wrap_kokkos.h
 #action region_block_kokkos.cpp
 #action region_block_kokkos.h
-action remap_kokkos.cpp remap.cpp
-action remap_kokkos.h remap.h
-action sna_kokkos_impl.h sna.cpp
-action sna_kokkos.h sna.h
+#action remap_kokkos.cpp remap.cpp
+#action remap_kokkos.h remap.h
+#action sna_kokkos_impl.h sna.cpp
+#action sna_kokkos.h sna.h
 #action third_order_kokkos.cpp dynamical_matrix.cpp
 #action third_order_kokkos.h dynamical_matrix.h
 action transpose_helper_kokkos.h

@@ -1,10 +1,5 @@
 # jlse = Intel compiler w/ OpenMPTarget backend using external version of Kokkos
 #
-# module load oneapi
-# module switch -f kokkos kokkos/openmptarget_intel_aot
-# module switch -f intel_compute_runtime intel_compute_runtime/release/agama-prerelease-122
-# #cd src
-# #make yes-KOKKOS-INTELSDK
 # #make jlse_kokkos_openmptarget -j 8
 #
 SHELL = /bin/sh
@@ -43,19 +38,20 @@ SIZE =          size
 endif
 
 ifeq ($(COMPILER),IntelSDK)
-#export MPICH_CXX=icpx
 
-KOKKOS_ARCH =   "BDW"
-COMMON_FLAGS =  -g -O3 -std=c++17 -ansi-alias 
+KOKKOS_HOME=/home/knight/kokkos/build_icpx_openmptarget
+
+COMMON_FLAGS =  -O3 -std=c++17 -ansi-alias 
 #COMMON_FLAGS += -fiopenmp -fopenmp-targets=spir64="-fno-exceptions" -D__STRICT_ANSI__
 COMMON_FLAGS += -fiopenmp -fopenmp-targets=spir64_gen -D__STRICT_ANSI__
 #COMMON_FLAGS += -fiopenmp -fopenmp-targets=spir64_gen="-mllvm -vpo-paropt-enable-64bit-opencl-atomics=true" -D__STRICT_ANSI__
+#COMMON_FLAGS += -g
 COMMON_FLAGS += -Wno-openmp-mapping
 COMMON_FLAGS += -I$(KOKKOS_HOME)/include
 
 COMMON_FLAGS += -D_OMPTARGET_WORKAROUND
+COMMON_FLAGS += $(CHRIS_EXTRA)
 
-#CC =            mpigxx
 CC =            mpicxx
 CCFLAGS =       $(COMMON_FLAGS)
 SHFLAGS =       -fPIC
@@ -178,6 +174,6 @@ depend : fastdep.exe $(SRC)
 	@./fastdep.exe $(EXTRA_INC) -- $^ > .depend || exit 1
 
 fastdep.exe: ../DEPEND/fastdep.c
-	icc -O -o $@ $<
+	icx -O -o $@ $<
 
 sinclude .depend

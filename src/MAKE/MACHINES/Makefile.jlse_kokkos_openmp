@@ -1,27 +1,29 @@
-# jlse = Intel compiler w/ OpenMP backend using Kokkos distributed with LAMMPS
+# jlse = Intel compiler w/ OpenMPTarget backend using external version of Kokkos
 #
-# module load oneapi mpi
-# #cd src
-# #make yes-KOKKOS
-# #make jlse_kokkos_openmp -j 8
 #
 SHELL = /bin/sh
 
-#COMPILER = Production
-COMPILER = SDK
+#COMPILER = Clang
+COMPILER = IntelSDK
 
 # ---------------------------------------------------------------------
 # compiler/linker settings
 # specify flags and libraries needed for your compiler
 
-KOKKOS_DEVICES = OpenMP
-KOKKOS_ARCH =    BDW
+KOKKOS_DEVICES = "OpenMPTarget"
 
-ifeq ($(COMPILER),Production)
-export MPICH_CXX=icpc
+ifeq ($(COMPILER),Clang)
+export MPICH_CXX=clang++
 
-COMMON_FLAGS = -g -O3 -std=c++11 -ansi-alias -restrict -fopenmp
-#COMMON_FLAGS += -DLAMMPS_OMP_COMPAT=5
+KOKKOS_HOME=/home/knightc/kokkos/build_clang_cuda_v100
+
+KOKKOS_ARCH =   Volta70
+COMMON_FLAGS =  -g -O3 -std=c++17 -ansi-alias -fopenmp
+COMMON_FLAGS += -fopenmp-targets=nvptx64
+COMMON_FLAGS += -Wno-openmp-mapping
+COMMON_FLAGS += -I$(KOKKOS_HOME)/include
+
+COMMON_FLAGS += -D_OMPTARGET_WORKAROUND
 
 CC =            mpigxx
 CCFLAGS =       $(COMMON_FLAGS)
@@ -31,25 +33,34 @@ DEPFLAGS =      -M
 
 LINK =          $(CC)
 LINKFLAGS =     $(COMMON_FLAGS)
-LIB =           -L$(TBBROOT)/lib/intel64/gcc4.8 -ltbbmalloc -lstdc++
+LIB +=          $(KOKKOS_HOME)/lib64/libkokkoscore.a
+LIB +=          $(KOKKOS_HOME)/lib64/libkokkoscontainers.a
+LIB +=          -L$(TBBROOT)/lib/intel64/gcc4.8 -ltbbmalloc -lstdc++
 SIZE =          size
 endif
 
-ifeq ($(COMPILER),SDK)
+ifeq ($(COMPILER),IntelSDK)
 
-KOKKOS_ARCH =   "BDW"
-COMMON_FLAGS =  -g -O3 -std=c++17 -ansi-alias
-COMMON_FLAGS += -fopenmp -D__STRICT_ANSI__
+KOKKOS_DEVICES = "OpenMP"
+KOKKOS_ARCH =   "SPR"
+KOKKOS_HOME = $(HOME)/kokkos/build_icpx_openmp
+COMMON_FLAGS =  -g -O3 -std=c++17 -ansi-alias 
+COMMON_FLAGS += -fiopenmp -D__STRICT_ANSI__
+
+#KOKKOS_CXX_STANDARD = c++17
+COMMON_FLAGS += -I$(KOKKOS_HOME)/include
 
 CC =            mpicxx
 CCFLAGS =       $(COMMON_FLAGS)
-CCFLAGS +=      -DLAMMPS_MEMALIGN=64
 SHFLAGS =       -fPIC
 DEPFLAGS =      -M
 
 LINK =          $(CC)
 LINKFLAGS =     $(COMMON_FLAGS)
-LIB =           -L$(TBBROOT)/lib/intel64/gcc4.8 -ltbbmalloc -lstdc++
+LIB = 
+LIB +=           $(KOKKOS_HOME)/lib64/libkokkoscore.a
+LIB +=          $(KOKKOS_HOME)/lib64/libkokkoscontainers.a
+LIB +=          -L$(TBBROOT)/lib/intel64/gcc4.8 -ltbbmalloc -lstdc++
 SIZE =          size
 endif
 
@@ -122,13 +133,15 @@ vpath %.h ..
 
 # Link target
 
-#$(EXE): main.o $(LMPLIB) $(EXTRA_LINK_DEPENDS)
-#	$(LINK) $(LINKFLAGS) main.o $(EXTRA_PATH) $(LMPLINK) $(EXTRA_LIB) $(LIB) -o $@
-#	$(SIZE) $@
+# -- original command
+$(EXE): main.o $(LMPLIB) $(EXTRA_LINK_DEPENDS)
+	$(LINK) $(LINKFLAGS) main.o $(EXTRA_PATH) $(LMPLINK) $(EXTRA_LIB) $(LIB) -o $@
+	$(SIZE) $@
 
-$(EXE): main.o $(OBJ) $(EXTRA_LINK_DEPENDS)
-	$(LINK) $(LINKFLAGS) $(EXTRA_PATH) main.o $(OBJ) $(EXTRA_LIB) $(LIB) -o $(EXE)
-	$(SIZE) $(EXE)
+# -- command in prior versions that does not first build liblammps_<version>
+#$(EXE): main.o $(OBJ) $(EXTRA_LINK_DEPENDS)
+#	$(LINK) $(LINKFLAGS) $(EXTRA_PATH) main.o $(OBJ) $(EXTRA_LIB) $(LIB) -o $(EXE)
+#	$(SIZE) $(EXE)
 
 # Library targets
 

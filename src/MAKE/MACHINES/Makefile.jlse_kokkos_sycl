@@ -43,6 +43,7 @@ KOKKOS_HOME = $(HOME)/kokkos/build_icpx_sycl
 #KOKKOS_HOME = /home/knightc/kokkos20220527/build_icpx_sycl
 COMMON_FLAGS =  -O3 -std=c++17 -ansi-alias
 COMMON_FLAGS += -fiopenmp --intel -fsycl -fsycl-unnamed-lambda
+COMMON_FLAGS += -fsycl-targets=spir64
 COMMON_FLAGS += -ffast-math -ffp-contract=fast
 COMMON_FLAGS += $(CHRIS_EXTRA)
 

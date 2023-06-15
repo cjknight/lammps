@@ -100,8 +100,8 @@ action comm_tiled_kokkos.h
 #action compute_orientorder_atom_kokkos.h
 #action compute_temp_deform_kokkos.cpp
 #action compute_temp_deform_kokkos.h
-action compute_temp_kokkos.cpp
-action compute_temp_kokkos.h
+#action compute_temp_kokkos.cpp
+#action compute_temp_kokkos.h
 #action dihedral_charmm_kokkos.cpp dihedral_charmm.cpp
 #action dihedral_charmm_kokkos.h dihedral_charmm.h
 #action dihedral_class2_kokkos.cpp dihedral_class2.cpp
@@ -194,8 +194,8 @@ action kokkos_few.h
 action kokkos_type.h
 action kokkos.cpp
 action kokkos.h
-action math_special_kokkos.cpp
-action math_special_kokkos.h
+#action math_special_kokkos.cpp
+#action math_special_kokkos.h
 #action meam_dens_final_kokkos.h meam_dens_final.cpp
 #action meam_dens_init_kokkos.h meam_dens_init.cpp
 #action meam_force_kokkos.h meam_force.cpp
@@ -369,8 +369,8 @@ action pair_zbl_kokkos.h
 #action rand_pool_wrap_kokkos.h
 #action region_block_kokkos.cpp
 #action region_block_kokkos.h
-action remap_kokkos.cpp remap.cpp
-action remap_kokkos.h remap.h
+#action remap_kokkos.cpp remap.cpp
+#action remap_kokkos.h remap.h
 action sna_kokkos_impl.h sna.cpp
 action sna_kokkos.h sna.h
 #action third_order_kokkos.cpp dynamical_matrix.cpp
