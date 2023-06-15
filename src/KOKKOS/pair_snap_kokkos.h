@@ -99,16 +99,16 @@ class PairSNAPKokkos : public PairSNAP {
   static constexpr int team_size_compute_fused_deidrj = 2;
 #elif defined(KOKKOS_ENABLE_SYCL)
 #if defined(CHRIS_TILE)
-  static constexpr int team_size_compute_neigh = CHRIS_TILE;
-  static constexpr int tile_size_compute_ck = CHRIS_TILE;
-  static constexpr int tile_size_pre_ui = 8; //CHRIS_TILE;
-  static constexpr int team_size_compute_ui = 8; //CHRIS_TILE;
-  static constexpr int tile_size_transform_ui = 8; //CHRIS_TILE;
-  static constexpr int tile_size_compute_zi = CHRIS_TILE;
-  static constexpr int tile_size_compute_bi = CHRIS_TILE;
-  static constexpr int tile_size_transform_bi = CHRIS_TILE;
-  static constexpr int tile_size_compute_yi = 8; //CHRIS_TILE;
-  static constexpr int team_size_compute_fused_deidrj = 4; //CHRIS_TILE;
+  static constexpr int team_size_compute_neigh = 4; //CHRIS_TILE;
+  static constexpr int tile_size_compute_ck = 4; //CHRIS_TILE;
+  static constexpr int tile_size_pre_ui = 8;
+  static constexpr int team_size_compute_ui = 8;
+  static constexpr int tile_size_transform_ui = 8;
+  static constexpr int tile_size_compute_zi = 4; //CHRIS_TILE;
+  static constexpr int tile_size_compute_bi = 4; //CHRIS_TILE;
+  static constexpr int tile_size_transform_bi = 4; //CHRIS_TILE;
+  static constexpr int tile_size_compute_yi = 8;
+  static constexpr int team_size_compute_fused_deidrj = 4;
 #else
   static constexpr int team_size_compute_neigh = 4;
   static constexpr int tile_size_compute_ck = 4;
