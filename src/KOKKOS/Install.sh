@@ -369,8 +369,8 @@ action pair_zbl_kokkos.h
 #action rand_pool_wrap_kokkos.h
 #action region_block_kokkos.cpp
 #action region_block_kokkos.h
-action remap_kokkos.cpp remap.cpp
-action remap_kokkos.h remap.h
+#action remap_kokkos.cpp remap.cpp
+#action remap_kokkos.h remap.h
 action sna_kokkos_impl.h sna.cpp
 action sna_kokkos.h sna.h
 #action third_order_kokkos.cpp dynamical_matrix.cpp
