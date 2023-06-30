@@ -111,6 +111,14 @@ void PairSNAPKokkos<DeviceType, real_type, vector_length>::init_style()
   request->set_kokkos_device(std::is_same<DeviceType,LMPDeviceType>::value);
   if (neighflag == FULL)
     error->all(FLERR,"Must use half neighbor list style with pair snap/kk");
+
+#ifdef _WORK_HARDER
+  num_overtime = 2;
+  int hard_working_ranks[6] = {0, 2, 4, 6, 8, 10};
+  work_harder = 0;
+  for(int i=0; i<6; ++i) if(comm->me == hard_working_ranks[i]) work_harder = 1;
+  if(work_harder) printf("MOD:: Rank %i is working harder w/ num_overtime= %i\n",comm->me,num_overtime);
+#endif
 }
 
 /* ---------------------------------------------------------------------- */
@@ -412,8 +420,11 @@ void PairSNAPKokkos<DeviceType, real_type, vector_length>::compute(int eflag_in,
         } else {
           Snap3DRangePolicy<DeviceType, tile_size_compute_yi, TagPairSNAPComputeYi>
               policy_compute_yi({0,0,0},{vector_length,idxz_max,chunk_size_div},{vector_length,tile_size_compute_yi,1});
-          Kokkos::parallel_for("ComputeYi",policy_compute_yi,*this);
-        }
+	  Kokkos::parallel_for("ComputeYi",policy_compute_yi,*this);
+#ifdef _WORK_HARDER
+	  if(work_harder) for(int i=0; i<num_overtime; ++i) Kokkos::parallel_for("ComputeYi",policy_compute_yi,*this);
+#endif
+	}
       }
 
       // Fused ComputeDuidrj, ComputeDeidrj

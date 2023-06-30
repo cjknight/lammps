@@ -66,6 +66,11 @@ class PairSNAP : public Pair {
   double rfac0, rmin0, wj1, wj2;
   int rcutfacflag, twojmaxflag;    // flags for required parameters
   int beta_max;                    // length of beta
+
+#ifdef _WORK_HARDER
+  int work_harder;
+  int num_overtime;
+#endif
 };
 
 }    // namespace LAMMPS_NS
