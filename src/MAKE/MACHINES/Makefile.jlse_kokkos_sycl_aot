@@ -59,6 +59,8 @@ COMMON_FLAGS += -fsycl-targets=spir64_gen -Xsycl-target-backend "-device 12.60.7
 #COMMON_FLAGS += -fsycl-early-optimizations
 COMMON_FLAGS += -fsycl-default-sub-group-size=16 
 #COMMON_FLAGS += -Xs "-options -ze-opt-large-register-file"
+COMMON_FLAGS += -D_EVALUATEZ_INDEX
+COMMON_FLAGS += -D_SWITCH_ULISTTOT_PACK
 #COMMON_FLAGS += -g
 #COMMON_FLAGS += -fdebug-info-for-profiling -gline-tables-only
 COMMON_FLAGS += -I$(KOKKOS_HOME)/include

@@ -872,9 +872,11 @@ void PairSNAPKokkos<DeviceType, real_type, vector_length>::operator() (TagPairSN
     } else if (mapper.flip_sign == -1) {
       utot_re = -utot_re;
     }
-
+#ifdef _SWITCH_ULISTTOT_PACK
+    my_sna.ulisttot_pack(idxu, iatom_mod, ielem, iatom_div) = { utot_re, utot_im };
+#else
     my_sna.ulisttot_pack(iatom_mod, idxu, ielem, iatom_div) = { utot_re, utot_im };
-
+#endif
     if (mapper.flip_sign == 0) {
       my_sna.ylist_pack_re(iatom_mod, mapper.idxu_half, ielem, iatom_div) = 0.;
       my_sna.ylist_pack_im(iatom_mod, mapper.idxu_half, ielem, iatom_div) = 0.;

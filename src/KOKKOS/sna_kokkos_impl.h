@@ -325,7 +325,11 @@ void SNAKokkos<DeviceType, real_type, vector_length>::grow_rij(int newnatom, int
     MemKK::realloc_kokkos(ulisttot_full,"sna:ulisttot",1,1,1);
     MemKK::realloc_kokkos(ulisttot_re_pack,"sna:ulisttot_re_pack",vector_length,idxu_half_max,nelements,natom_div);
     MemKK::realloc_kokkos(ulisttot_im_pack,"sna:ulisttot_im_pack",vector_length,idxu_half_max,nelements,natom_div);
+#ifdef _SWITCH_ULISTTOT_PACK
+    MemKK::realloc_kokkos(ulisttot_pack,"sna:ulisttot_pack",idxu_max,vector_length,nelements,natom_div);
+#else
     MemKK::realloc_kokkos(ulisttot_pack,"sna:ulisttot_pack",vector_length,idxu_max,nelements,natom_div);
+#endif
     MemKK::realloc_kokkos(ulist,"sna:ulist",1,1,1);
     MemKK::realloc_kokkos(zlist,"sna:zlist",1,1,1);
     MemKK::realloc_kokkos(zlist_pack,"sna:zlist_pack",vector_length,idxz_max,ndoubles,natom_div);
@@ -728,8 +732,12 @@ void SNAKokkos<DeviceType, real_type, vector_length>::compute_bi(const int& iato
             const int jju_index = jju+mb*(j+1)+ma;
             const int jjz_index = jjz+mb*(j+1)+ma;
             if (2*mb == j) return; // I think we can remove this?
+#ifdef _SWITCH_ULISTTOT_PACK
+	    const complex utot = ulisttot_pack(jju_index, iatom_mod, elem3, iatom_div);
+#else
             const complex utot = ulisttot_pack(iatom_mod, jju_index, elem3, iatom_div);
-            const complex zloc = zlist_pack(iatom_mod, jjz_index, idouble, iatom_div);
+#endif
+	    const complex zloc = zlist_pack(iatom_mod, jjz_index, idouble, iatom_div);
             sumzu_temp += utot.re * zloc.re + utot.im * zloc.im;
           }
         }
@@ -743,9 +751,12 @@ void SNAKokkos<DeviceType, real_type, vector_length>::compute_bi(const int& iato
           for (int ma = 0; ma < mb; ma++) {
             const int jju_index = jju+(mb-1)*(j+1)+(j+1)+ma;
             const int jjz_index = jjz+(mb-1)*(j+1)+(j+1)+ma;
-
+#ifdef _SWITCH_ULISTTOT_PACK
+            const complex utot = ulisttot_pack(jju_index, iatom_mod, elem3, iatom_div);
+#else
             const complex utot = ulisttot_pack(iatom_mod, jju_index, elem3, iatom_div);
-            const complex zloc = zlist_pack(iatom_mod, jjz_index, idouble, iatom_div);
+#endif
+	    const complex zloc = zlist_pack(iatom_mod, jjz_index, idouble, iatom_div);
             sumzu_temp += utot.re * zloc.re + utot.im * zloc.im;
 
           }
@@ -754,8 +765,11 @@ void SNAKokkos<DeviceType, real_type, vector_length>::compute_bi(const int& iato
           const int ma = mb;
           const int jju_index = jju+(mb-1)*(j+1)+(j+1)+ma;
           const int jjz_index = jjz+(mb-1)*(j+1)+(j+1)+ma;
-
+#ifdef _SWITCH_ULISTTOT_PACK
+          const complex utot = ulisttot_pack(jju_index, iatom_mod, elem3, iatom_div);
+#else
           const complex utot = ulisttot_pack(iatom_mod, jju_index, elem3, iatom_div);
+#endif
           const complex zloc = zlist_pack(iatom_mod, jjz_index, idouble, iatom_div);
           sumzu += static_cast<real_type>(0.5) * (utot.re * zloc.re + utot.im * zloc.im);
         } // end if jeven
@@ -871,9 +885,21 @@ typename SNAKokkos<DeviceType, real_type, vector_length>::complex SNAKokkos<Devi
   int jju2 = idxu_block[j2] + (j2+1)*mb2max;
   int icgb = mb1min*(j2+1) + mb2max;
 
+#ifdef _EVALUATEZ_INDEX
+    const int e0 = ulisttot_pack.extent(0);
+    const int e1 = ulisttot_pack.extent(1);
+    const int e2 = ulisttot_pack.extent(2);
+    const complex * ptr_ulisttot_pack = ulisttot_pack.data();
+
+#ifdef _SWITCH_ULISTTOT_PACK
+    const size_t indx_01 = e0 * (iatom_mod + e1 * (elem1 + e2 * iatom_div));
+    const size_t indx_02 = e0 * (iatom_mod + e1 * (elem2 + e2 * iatom_div));
+#endif
+#endif
+
 #ifndef KOKKOS_ENABLE_SYCL
   #ifdef LMP_KK_DEVICE_COMPILE
-  #pragma unroll
+  #pragma unroll(8)
   #endif
 #endif
   for (int ib = 0; ib < nb; ib++) {
@@ -882,14 +908,41 @@ typename SNAKokkos<DeviceType, real_type, vector_length>::complex SNAKokkos<Devi
     int ma2 = ma2max;
     int icga = ma1min*(j2+1) + ma2max;
 
+    // do index calculation ourselves
+#if defined(_EVALUATEZ_INDEX) && !defined(_SWITCH_ULISTTOT_PACK)
+    const size_t indx_01 = iatom_mod + e0 * (jju1 + e1 * (elem1 + e2 * iatom_div));
+    const size_t indx_02 = iatom_mod + e0 * (jju2 + e1 * (elem1 + e2 * iatom_div));
+#endif
+
 #ifndef KOKKOS_ENABLE_SYCL
     #ifdef LMP_KK_DEVICE_COMPILE
-    #pragma unroll
+    #pragma unroll(8)
     #endif
 #endif
     for (int ia = 0; ia < na; ia++) {
+
+#ifdef _EVALUATEZ_INDEX
+
+#ifdef _SWITCH_ULISTTOT_PACK
+      const complex utot1 = ptr_ulisttot_pack[indx_01 + jju1+ma1];
+      const complex utot2 = ptr_ulisttot_pack[indx_02 + jju2+ma2];
+#else
+      const complex utot1 = ptr_ulisttot_pack[indx_01 + e0*ma1];
+      const complex utot2 = ptr_ulisttot_pack[indx_02 + e0*ma2];
+#endif
+
+#else
+
+#ifdef _SWITCH_ULISTTOT_PACK
+      const complex utot1 = ulisttot_pack(jju1+ma1, iatom_mod, elem1, iatom_div);
+      const complex utot2 = ulisttot_pack(jju2+ma2, iatom_mod, elem2, iatom_div);
+#else
       const complex utot1 = ulisttot_pack(iatom_mod, jju1+ma1, elem1, iatom_div);
       const complex utot2 = ulisttot_pack(iatom_mod, jju2+ma2, elem2, iatom_div);
+#endif
+
+#endif
+
       const real_type cgcoeff_a = cgblock[icga];
       const real_type cgcoeff_b = cgblock[icgb];
       ztmp.re += cgcoeff_a * cgcoeff_b * (utot1.re * utot2.re - utot1.im * utot2.im);
