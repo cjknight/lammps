@@ -45,10 +45,11 @@ KOKKOS_DEVICES = "SYCL"
 KOKKOS_ARCH =   "BDW"
 KOKKOS_HOME = $(HOME)/kokkos/build_icpx_sycl
 #KOKKOS_HOME = $(KOKKOS_ROOT)
-COMMON_FLAGS =  -O3 -fiopenmp -std=c++17 -ansi-alias
+COMMON_FLAGS =  -fiopenmp -std=c++17 -ansi-alias
+#COMMON_FLAGS += -O3
 COMMON_FLAGS += --intel -fsycl -fsycl-unnamed-lambda
 COMMON_FLAGS += -ffast-math -ffp-contract=fast
-COMMON_FLAGS += -funsafe-math-optimizations
+#COMMON_FLAGS += -funsafe-math-optimizations
 #COMMON_FLAGS += -fsycl-targets=spir64_gen-unknown-unknown-sycldevice -Xsycl-target-backend "-device xehp"
 #COMMON_FLAGS += -fsycl-targets=spir64_gen -Xsycl-target-backend "-device 12.1.0,12.4.1"
 #COMMON_FLAGS += -fsycl-targets=spir64_gen -Xsycl-target-backend "-device 12.50.4"
@@ -59,7 +60,7 @@ COMMON_FLAGS += -fsycl-targets=spir64_gen -Xsycl-target-backend "-device 12.60.7
 #COMMON_FLAGS += -fsycl-early-optimizations
 COMMON_FLAGS += -fsycl-default-sub-group-size=16 
 #COMMON_FLAGS += -Xs "-options -ze-opt-large-register-file"
-COMMON_FLAGS += -D_EVALUATEZ_INDEX
+#COMMON_FLAGS += -D_EVALUATEZ_INDEX
 COMMON_FLAGS += -D_SWITCH_ULISTTOT_PACK
 #COMMON_FLAGS += -g
 #COMMON_FLAGS += -fdebug-info-for-profiling -gline-tables-only

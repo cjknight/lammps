@@ -814,26 +814,67 @@ void SNAKokkos<DeviceType, real_type, vector_length>::compute_yi(int iatom_mod, 
   //int mb = (2 * (mb1min+mb2max) - j1 - j2 + j) / 2;
   //int ma = (2 * (ma1min+ma2max) - j1 - j2 + j) / 2;
 
-  for (int elem1 = 0; elem1 < nelements; elem1++) {
-    for (int elem2 = 0; elem2 < nelements; elem2++) {
-
+//  for (int elem1 = 0; elem1 < nelements; elem1++) {
+//    for (int elem2 = 0; elem2 < nelements; elem2++) {
+      const int elem1 = 0;
+      const int elem2 = 0;
+#if 0
       const complex ztmp = evaluate_zi(j1, j2, j, ma1min, ma2max, mb1min, mb2max, na, nb, iatom_mod, elem1, elem2, iatom_div, cgblock);
+#else
+      double ztmp_r = 0.0;
+      double ztmp_i = 0.0;
 
+      int jju1 = idxu_block[j1] + (j1+1)*mb1min;
+      int jju2 = idxu_block[j2] + (j2+1)*mb2max;
+      int icgb = mb1min*(j2+1) + mb2max;
+      
+      for (int ib = 0; ib < nb; ib++) {
+        double suma1_r = 0.0;
+        double suma1_i = 0.0;
+
+        int ma1 = ma1min;
+        int ma2 = ma2max;
+        int icga = ma1min*(j2+1) + ma2max;
+
+        // do index calculation ourselves
+	for (int ia = 0; ia < na; ia++) {
+            const complex utot1 = ulisttot_pack(jju1+ma1, iatom_mod, elem1, iatom_div);
+            const complex utot2 = ulisttot_pack(jju2+ma2, iatom_mod, elem2, iatom_div);
+            suma1_r += cgblock[icga] * (utot1.re * utot2.re - utot1.im * utot2.im);
+            suma1_i += cgblock[icga] * (utot1.re * utot2.im + utot1.im * utot2.re);
+            ma1++;
+            ma2--;
+            icga += j2;
+        } // end loop over ia
+
+        ztmp_r += cgblock[icgb] * suma1_r;
+        ztmp_i += cgblock[icgb] * suma1_i;
+        jju1 += j1 + 1;
+        jju2 -= j2 + 1;
+        icgb += j2;
+      } // end loop over ib
+
+      if (bnorm_flag) {
+        const real_type scale = static_cast<real_type>(1) / static_cast<real_type>(j + 1);
+        ztmp_r *= scale;
+        ztmp_i *= scale;
+      }
+#endif
       // apply to z(j1,j2,j,ma,mb) to unique element of y(j)
       // find right y_list[jju] and beta(iatom,jjb) entries
       // multiply and divide by j+1 factors
       // account for multiplicity of 1, 2, or 3
 
       // pick out right beta value
-      for (int elem3 = 0; elem3 < nelements; elem3++) {
-
+      //for (int elem3 = 0; elem3 < nelements; elem3++) {
+        const int elem3 = 0;
         const real_type betaj = evaluate_beta_scaled(j1, j2, j, iatom_mod, elem1, elem2, elem3, iatom_div, beta_pack);
 
-        Kokkos::atomic_add(&(ylist_pack_re(iatom_mod, jju_half, elem3, iatom_div)), betaj * ztmp.re);
-        Kokkos::atomic_add(&(ylist_pack_im(iatom_mod, jju_half, elem3, iatom_div)), betaj * ztmp.im);
-      } // end loop over elem3
-    } // end loop over elem2
-  } // end loop over elem1
+        Kokkos::atomic_add(&(ylist_pack_re(iatom_mod, jju_half, elem3, iatom_div)), betaj * ztmp_r);
+        Kokkos::atomic_add(&(ylist_pack_im(iatom_mod, jju_half, elem3, iatom_div)), betaj * ztmp_i);
+    //  } // end loop over elem3
+   // } // end loop over elem2
+  //} // end loop over elem1
 }
 
 /* ----------------------------------------------------------------------

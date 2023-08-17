@@ -43,18 +43,25 @@ ITT = /soft/restricted/CNDA/updates/2022.12.30.001/oneapi/vtune/2023.0.0_624810_
 
 KOKKOS_DEVICES = "SYCL"
 KOKKOS_ARCH =   "BDW"
-KOKKOS_HOME = $(HOME)/kokkos/build_icpx_sycl_vtune
+KOKKOS_HOME = $(HOME)/kokkos/build_icpx_sycl
 #KOKKOS_HOME = $(KOKKOS_ROOT)
-COMMON_FLAGS =  -O3 -fiopenmp -std=c++17 -ansi-alias
+COMMON_FLAGS =  -fiopenmp -std=c++17 -ansi-alias
+#COMMON_FLAGS += -O3
 COMMON_FLAGS += --intel -fsycl -fsycl-unnamed-lambda
-COMMON_FLAGS += -ffast-math -ffp-contract=fast
+#COMMON_FLAGS += -ffast-math -ffp-contract=fast
+#COMMON_FLAGS += -funsafe-math-optimizations
 #COMMON_FLAGS += -fsycl-targets=spir64_gen-unknown-unknown-sycldevice -Xsycl-target-backend "-device xehp"
 #COMMON_FLAGS += -fsycl-targets=spir64_gen -Xsycl-target-backend "-device 12.1.0,12.4.1"
 #COMMON_FLAGS += -fsycl-targets=spir64_gen -Xsycl-target-backend "-device 12.50.4"
 COMMON_FLAGS += -fsycl-targets=spir64_gen -Xsycl-target-backend "-device 12.60.7"
+#COMMON_FLAGS += -fsycl-targets=spir64_gen -Xsycl-target-backend "-device 12.60.7 -internal_options -cl-intel-compile-one-at-time"
 #COMMON_FLAGS += -fsycl-id-queries-fit-in-int
-COMMON_FLAGS += -fsycl-early-optimizations
+#COMMON_FLAGS += -fno-sycl-early-optimizations
+#COMMON_FLAGS += -fsycl-early-optimizations
+COMMON_FLAGS += -fsycl-default-sub-group-size=16 
 #COMMON_FLAGS += -Xs "-options -ze-opt-large-register-file"
+#COMMON_FLAGS += -D_EVALUATEZ_INDEX
+COMMON_FLAGS += -D_SWITCH_ULISTTOT_PACK
 #COMMON_FLAGS += -g
 COMMON_FLAGS += -fdebug-info-for-profiling -gline-tables-only
 COMMON_FLAGS += -I$(KOKKOS_HOME)/include
@@ -69,7 +76,7 @@ DEPFLAGS =      -M
 
 LINK =          $(CC)
 LINKFLAGS =     $(COMMON_FLAGS)
-LINKFLAGS +=    -fsycl-max-parallel-link-jobs=5
+#LINKFLAGS +=    -fsycl-max-parallel-link-jobs=5
 LIB =           -L$(TBBROOT)/lib/intel64/gcc4.8 -ltbbmalloc -lstdc++
 LIB +=          ${KOKKOS_HOME}/lib64/libkokkoscore.a
 LIB +=          ${KOKKOS_HOME}/lib64/libkokkoscontainers.a
