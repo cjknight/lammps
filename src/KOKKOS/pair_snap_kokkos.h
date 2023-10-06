@@ -107,7 +107,7 @@ class PairSNAPKokkos : public PairSNAP {
   static constexpr int tile_size_compute_bi = 4;
   static constexpr int tile_size_transform_bi = 4;
   static constexpr int tile_size_compute_yi = 8;
-  static constexpr int team_size_compute_fused_deidrj = 4;
+  static constexpr int team_size_compute_fused_deidrj = 2; //4;
 #else
   static constexpr int team_size_compute_neigh = 4;
   static constexpr int tile_size_compute_ck = 4;
