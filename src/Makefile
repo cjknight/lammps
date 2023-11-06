@@ -45,7 +45,7 @@ endif
 # PACKLIB    = all packages that require an additional lib
 #              should be PACKSYS + PACKINT + PACKEXT
 # PACKSYS    = subset that reqiure a common system library
-#              include MPIIO and LB b/c require full MPI, not just STUBS
+#              include LATBOLTZ b/c it requires a full MPI, not just STUBS
 # PACKINT    = subset that require an internal (provided) library
 # PACKEXT    = subset that require an external (downloaded) library
 
@@ -107,8 +107,6 @@ PACKAGE = \
 	mofff \
 	molecule \
 	molfile \
-	mpiio \
-	mscg \
 	netcdf \
 	openmp \
 	opt \
@@ -214,8 +212,6 @@ PACKLIB = \
 	kim \
 	kokkos \
 	lepton \
-	mpiio \
-	mscg \
 	poems \
 	python \
 	voronoi \
@@ -240,7 +236,7 @@ PACKLIB = \
 	vtk \
 	electrode
 
-PACKSYS = compress latboltz mpiio python
+PACKSYS = compress latboltz python
 
 PACKINT = atc awpmd colvars electrode gpu kokkos lepton ml-pod poems
 
@@ -253,7 +249,6 @@ PACKEXT = \
 	ml-pace \
 	ml-quip \
 	molfile \
-	mscg \
 	netcdf \
 	plumed \
 	qmmm \

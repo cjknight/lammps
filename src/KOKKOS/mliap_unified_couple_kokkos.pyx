@@ -59,6 +59,7 @@ cdef extern from "mliap_data_kokkos.h" namespace "LAMMPS_NS":
 
         int ntotal              # total number of owned and ghost atoms on this proc
         int nlistatoms          # current number of atoms in local atom lists
+        int nlocal
         int natomneigh          # current number of atoms and ghosts in atom neighbor arrays
         int * numneighs         # neighbors count for each atom
         int * iatoms            # index of each atom
@@ -290,6 +291,10 @@ cdef class MLIAPDataPy:
     @property
     def nlistatoms(self):
         return self.data.nlistatoms
+
+    @property
+    def nlocal(self):
+        return self.data.nlocal
     
     @property
     def natomneigh(self):
@@ -345,6 +350,16 @@ cdef class MLIAPDataPy:
         if self.data.rij is NULL:
             return None
         return create_array(self.data.dev, self.data.rij, [self.npairs,3],False)
+
+    @property
+    def rij_max(self):
+        if self.data.rij is NULL:
+            return None
+        return create_array(self.data.dev, self.data.rij, [self.nneigh_max,3], False)
+
+    @property
+    def nneigh_max(self):
+        return self.data.nneigh_max
 
     @write_only_property
     def graddesc(self, value):

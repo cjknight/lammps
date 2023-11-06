@@ -38,6 +38,8 @@
 #include "universe.h"
 #include "update.h"
 
+#include "fmt/ranges.h"
+
 #include <cctype>
 #include <cmath>
 #include <cstring>
@@ -72,10 +74,10 @@ enum{DONE,ADD,SUBTRACT,MULTIPLY,DIVIDE,CARAT,MODULO,UNARY,
 
 enum{SUM,XMIN,XMAX,AVE,TRAP,SLOPE};
 
-
 static constexpr double BIG = 1.0e20;
 
-// INT64_MAX cannot be represented with a double. reduce to avoid overflow when casting back.
+// INT64_MAX cannot be represented with a double. reduce to avoid overflow when casting back
+
 #if defined(LAMMPS_SMALLBIG) || defined(LAMMPS_BIGBIG)
 static constexpr double MAXBIGINT_DOUBLE = (double) (MAXBIGINT-512);
 #else
@@ -222,7 +224,7 @@ void Variable::set(int narg, char **arg)
       if (narg == 5 && strcmp(arg[4],"pad") == 0) {
         pad[nvar] = fmt::format("{}",nlast).size();
       } else pad[nvar] = 0;
-    } else error->all(FLERR,"Illegal variable loop command: too much arguments");
+    } else error->all(FLERR,"Illegal variable loop command: too many arguments");
     num[nvar] = nlast;
     which[nvar] = nfirst-1;
     data[nvar] = new char*[1];
@@ -477,8 +479,10 @@ void Variable::set(int narg, char **arg)
 
   // VECTOR
   // replace pre-existing var if also style VECTOR (allows it to be reset)
-  // num = 1, which = 1st value
-  // data = 1 value, string to eval
+  // num = 2, which = 1st value
+  // data = 2 values, 1st is string to eval, 2nd is formatted output string [1,2,3]
+  // if formula string is [value,value,...] then
+  //   immediately store it as N-length vector and set dynamic flag to 0
 
   } else if (strcmp(arg[1],"vector") == 0) {
     if (narg != 3) error->all(FLERR,"Illegal variable command: expected 3 arguments but found {}", narg);
@@ -487,16 +491,34 @@ void Variable::set(int narg, char **arg)
       if (style[ivar] != VECTOR)
         error->all(FLERR,"Cannot redefine variable as a different style");
       delete[] data[ivar][0];
+      delete[] data[ivar][1];
       data[ivar][0] = utils::strdup(arg[2]);
+      if (data[ivar][0][0] != '[')
+        vecs[ivar].dynamic = 1;
+      else {
+        vecs[ivar].dynamic = 0;
+        parse_vector(ivar,data[ivar][0]);
+        std::vector <double> vec(vecs[ivar].values,vecs[ivar].values + vecs[ivar].n);
+        data[ivar][1] = utils::strdup(fmt::format("[{}]", fmt::join(vec,",")));
+      }
       replaceflag = 1;
     } else {
       if (nvar == maxvar) grow();
       style[nvar] = VECTOR;
-      num[nvar] = 1;
+      num[nvar] = 2;
       which[nvar] = 0;
       pad[nvar] = 0;
       data[nvar] = new char*[num[nvar]];
       data[nvar][0] = utils::strdup(arg[2]);
+      if (data[nvar][0][0] != '[') {
+        vecs[nvar].dynamic = 1;
+        data[nvar][1] = nullptr;
+      } else {
+        vecs[nvar].dynamic = 0;
+        parse_vector(nvar,data[nvar][0]);
+        std::vector <double> vec(vecs[nvar].values,vecs[nvar].values + vecs[nvar].n);
+        data[nvar][1] = utils::strdup(fmt::format("[{}]", fmt::join(vec,",")));
+      }
     }
 
   // PYTHON
@@ -935,8 +957,9 @@ int Variable::internalstyle(int ivar)
    if GETENV, query environment and put result in str
    if PYTHON, evaluate Python function, it will put result in str
    if INTERNAL, convert dvalue and put result in str
-   if ATOM or ATOMFILE or VECTOR, return nullptr
-   return nullptr if no variable with name, or which value is bad,
+   if VECTOR, return str = [value,value,...]
+   if ATOM or ATOMFILE, return nullptr
+   return nullptr if no variable with name or if which value is bad,
      caller must respond
 ------------------------------------------------------------------------- */
 
@@ -956,17 +979,21 @@ char *Variable::retrieve(const char *name)
       style[ivar] == UNIVERSE || style[ivar] == STRING ||
       style[ivar] == SCALARFILE) {
     str = data[ivar][which[ivar]];
+
   } else if (style[ivar] == LOOP || style[ivar] == ULOOP) {
+
     std::string result;
     if (pad[ivar] == 0) result = std::to_string(which[ivar]+1);
     else result = fmt::format("{:0>{}d}",which[ivar]+1, pad[ivar]);
     delete[] data[ivar][0];
     str = data[ivar][0] = utils::strdup(result);
+
   } else if (style[ivar] == EQUAL) {
     double answer = evaluate(data[ivar][0],nullptr,ivar);
     delete[] data[ivar][1];
     data[ivar][1] = utils::strdup(fmt::format("{:.15g}",answer));
     str = data[ivar][1];
+
   } else if (style[ivar] == FORMAT) {
     int jvar = find(data[ivar][0]);
     if (jvar < 0)
@@ -977,11 +1004,13 @@ char *Variable::retrieve(const char *name)
     double answer = compute_equal(jvar);
     sprintf(data[ivar][2],data[ivar][1],answer);
     str = data[ivar][2];
+
   } else if (style[ivar] == GETENV) {
     const char *result = getenv(data[ivar][0]);
     if (result == nullptr) result = (const char *) "";
     delete[] data[ivar][1];
     str = data[ivar][1] = utils::strdup(result);
+
   } else if (style[ivar] == PYTHON) {
     int ifunc = python->variable_match(data[ivar][0],name,0);
     if (ifunc < 0) {
@@ -1001,16 +1030,39 @@ char *Variable::retrieve(const char *name)
     }
     python->invoke_function(ifunc,data[ivar][1]);
     str = data[ivar][1];
+
     // if Python func returns a string longer than VALUELENGTH
     // then the Python class stores the result, query it via long_string()
+
     char *strlong = python->long_string(ifunc);
     if (strlong) str = strlong;
+
   } else if (style[ivar] == TIMER || style[ivar] == INTERNAL) {
     delete[] data[ivar][0];
     data[ivar][0] = utils::strdup(fmt::format("{:.15g}",dvalue[ivar]));
     str = data[ivar][0];
-  } else if (style[ivar] == ATOM || style[ivar] == ATOMFILE ||
-             style[ivar] == VECTOR) return nullptr;
+
+  } else if (style[ivar] == VECTOR) {
+
+    // check if vector variable needs to be re-computed
+    // if no, just return previously formatted string in data[ivar][1]
+    // if yes, invoke compute_vector() and convert vector to formatted string
+    //   must also turn off eval_in_progress b/c compute_vector() checks it
+
+    if (vecs[ivar].dynamic || vecs[ivar].currentstep != update->ntimestep) {
+      eval_in_progress[ivar] = 0;
+      double *result;
+      compute_vector(ivar,&result);
+      delete[] data[ivar][1];
+      std::vector <double> vectmp(vecs[ivar].values,vecs[ivar].values + vecs[ivar].n);
+      std::string str = fmt::format("[{}]", fmt::join(vectmp,","));
+      data[ivar][1] = utils::strdup(str);
+    }
+
+    str = data[ivar][1];
+
+  } else if (style[ivar] == ATOM || style[ivar] == ATOMFILE)
+    return nullptr;
 
   eval_in_progress[ivar] = 0;
 
@@ -1137,17 +1189,29 @@ void Variable::compute_atom(int ivar, int igroup, double *result, int stride, in
    compute result of vector-style variable evaluation
    return length of vector and result pointer to vector values
      if length == 0 or -1 (mismatch), generate an error
-   if variable already computed on this timestep, just return
-   else evaluate the formula and its length, store results in VecVar entry
+   if necessary, evaluate the formula and its length,
+     store results in VecVar entry and return them
 ------------------------------------------------------------------------- */
 
 int Variable::compute_vector(int ivar, double **result)
 {
   Tree *tree = nullptr;
+
+  // if vector is not dynamic, just return stored values
+
+  if (!vecs[ivar].dynamic) {
+    *result = vecs[ivar].values;
+    return vecs[ivar].n;
+  }
+
+  // if vector already computed on this timestep, just return stored values
+
   if (vecs[ivar].currentstep == update->ntimestep) {
     *result = vecs[ivar].values;
     return vecs[ivar].n;
   }
+
+  // evaluate vector variable afresh
 
   if (eval_in_progress[ivar])
     print_var_error(FLERR,"has a circular dependency",ivar);
@@ -1246,7 +1310,8 @@ void Variable::grow()
 
   vecs = (VecVar *) memory->srealloc(vecs,maxvar*sizeof(VecVar),"var:vecvar");
   for (int i = old; i < maxvar; i++) {
-    vecs[i].nmax = 0;
+    vecs[i].n = vecs[i].nmax = 0;
+    vecs[i].dynamic = 1;
     vecs[i].currentstep = -1;
     vecs[i].values = nullptr;
   }
@@ -1404,8 +1469,7 @@ double Variable::evaluate(char *str, Tree **tree, int ivar)
         if (domain->box_exist == 0)
           print_var_error(FLERR,"Variable evaluation before simulation box is defined",ivar);
 
-        // uppercase used to force access of
-        // global vector vs global scalar, and global array vs global vector
+        // uppercase used to access of peratom data by equal-style var
 
         int lowercase = 1;
         if (word[0] == 'C') lowercase = 0;
@@ -1413,7 +1477,6 @@ double Variable::evaluate(char *str, Tree **tree, int ivar)
         Compute *compute = modify->get_compute_by_id(word+2);
         if (!compute)
           print_var_error(FLERR,fmt::format("Invalid compute ID '{}' in variable formula", word+2),ivar);
-
 
         // parse zero or one or two trailing brackets
         // point i beyond last bracket
@@ -1436,218 +1499,234 @@ double Variable::evaluate(char *str, Tree **tree, int ivar)
           }
         }
 
-        // c_ID = scalar from global scalar, must be lowercase
+        // equal-style variable is being evaluated
 
-        if (nbracket == 0 && compute->scalar_flag && lowercase) {
+        if (style[ivar] == EQUAL) {
 
-          if (update->whichflag == 0) {
-            if (compute->invoked_scalar != update->ntimestep)
-              print_var_error(FLERR,"Compute used in variable between runs is not current",ivar);
-          } else if (!(compute->invoked_flag & Compute::INVOKED_SCALAR)) {
-            compute->compute_scalar();
-            compute->invoked_flag |= Compute::INVOKED_SCALAR;
-          }
+          // c_ID = scalar from global scalar
 
-          value1 = compute->scalar;
-          if (tree) {
-            auto newtree = new Tree();
-            newtree->type = VALUE;
-            newtree->value = value1;
-            treestack[ntreestack++] = newtree;
-          } else argstack[nargstack++] = value1;
+          if (lowercase && nbracket == 0) {
 
-        // c_ID[i] = scalar from global vector, must be lowercase
+            if (!compute->scalar_flag)
+              print_var_error(FLERR,"Mismatched compute in variable formula",ivar);
+            if (!compute->is_initialized())
+              print_var_error(FLERR,"Variable formula compute cannot be invoked before "
+                              "initialization by a run",ivar);
+            if (!(compute->invoked_flag & Compute::INVOKED_SCALAR)) {
+              compute->compute_scalar();
+              compute->invoked_flag |= Compute::INVOKED_SCALAR;
+            }
 
-        } else if (nbracket == 1 && compute->vector_flag && lowercase) {
+            value1 = compute->scalar;
+            argstack[nargstack++] = value1;
 
-          if (index1 > compute->size_vector &&
-              compute->size_vector_variable == 0)
-            print_var_error(FLERR,"Variable formula compute vector is accessed out-of-range",ivar,0);
-          if (update->whichflag == 0) {
-            if (compute->invoked_vector != update->ntimestep)
-              print_var_error(FLERR,"Compute used in variable between runs is not current",ivar);
-          } else if (!(compute->invoked_flag & Compute::INVOKED_VECTOR)) {
-            compute->compute_vector();
-            compute->invoked_flag |= Compute::INVOKED_VECTOR;
-          }
+          // c_ID[i] = scalar from global vector
+
+          } else if (lowercase && nbracket == 1) {
+
+            if (!compute->vector_flag)
+              print_var_error(FLERR,"Mismatched compute in variable formula",ivar);
+            if (index1 > compute->size_vector &&
+                compute->size_vector_variable == 0)
+              print_var_error(FLERR,"Variable formula compute vector is accessed out-of-range",ivar,0);
+            if (!compute->is_initialized())
+              print_var_error(FLERR,"Variable formula compute cannot be invoked before "
+                              "initialization by a run",ivar);
+            if (!(compute->invoked_flag & Compute::INVOKED_VECTOR)) {
+              compute->compute_vector();
+              compute->invoked_flag |= Compute::INVOKED_VECTOR;
+            }
 
           if (compute->size_vector_variable &&
               index1 > compute->size_vector) value1 = 0.0;
           else value1 = compute->vector[index1-1];
-          if (tree) {
+          argstack[nargstack++] = value1;
+
+          // c_ID[i][j] = scalar from global array
+
+          } else if (lowercase && nbracket == 2) {
+
+            if (!compute->array_flag)
+              print_var_error(FLERR,"Mismatched compute in variable formula",ivar);
+            if (index1 > compute->size_array_rows &&
+                compute->size_array_rows_variable == 0)
+              print_var_error(FLERR,"Variable formula compute array is accessed out-of-range",ivar,0);
+            if (index2 > compute->size_array_cols)
+              print_var_error(FLERR,"Variable formula compute array is accessed out-of-range",ivar,0);
+            if (!compute->is_initialized())
+              print_var_error(FLERR,"Variable formula compute cannot be invoked before "
+                              "initialization by a run",ivar);
+            if (!(compute->invoked_flag & Compute::INVOKED_ARRAY)) {
+              compute->compute_array();
+              compute->invoked_flag |= Compute::INVOKED_ARRAY;
+            }
+
+            if (compute->size_array_rows_variable &&
+                index1 > compute->size_array_rows) value1 = 0.0;
+            else value1 = compute->array[index1-1][index2-1];
+            argstack[nargstack++] = value1;
+
+          // C_ID[i] = scalar element of per-atom vector, note uppercase "C"
+
+          } else if (!lowercase && nbracket == 1) {
+
+            if (!compute->peratom_flag)
+              print_var_error(FLERR,"Mismatched compute in variable formula",ivar);
+            if (compute->size_peratom_cols)
+              print_var_error(FLERR,"Mismatched compute in variable formula",ivar);
+            if (!compute->is_initialized())
+              print_var_error(FLERR,"Variable formula compute cannot be invoked before "
+                              "initialization by a run",ivar);
+            if (!(compute->invoked_flag & Compute::INVOKED_PERATOM)) {
+              compute->compute_peratom();
+              compute->invoked_flag |= Compute::INVOKED_PERATOM;
+            }
+
+            peratom2global(1,nullptr,compute->vector_atom,1,index1,tree,
+                           treestack,ntreestack,argstack,nargstack);
+
+          // C_ID[i][j] = scalar element of per-atom array, note uppercase "C"
+
+          } else if (!lowercase && nbracket == 2) {
+
+            if (!compute->peratom_flag)
+              print_var_error(FLERR,"Mismatched compute in variable formula",ivar);
+            if (!compute->size_peratom_cols)
+              print_var_error(FLERR,"Mismatched compute in variable formula",ivar);
+            if (index2 > compute->size_peratom_cols)
+              print_var_error(FLERR,"Variable formula compute array is accessed out-of-range",ivar,0);
+            if (!compute->is_initialized())
+              print_var_error(FLERR,"Variable formula compute cannot be invoked before "
+                              "initialization by a run",ivar);
+            if (!(compute->invoked_flag & Compute::INVOKED_PERATOM)) {
+              compute->compute_peratom();
+              compute->invoked_flag |= Compute::INVOKED_PERATOM;
+            }
+
+            if (compute->array_atom)
+              peratom2global(1,nullptr,&compute->array_atom[0][index2-1],
+                             compute->size_peratom_cols,index1,
+                             tree,treestack,ntreestack,argstack,nargstack);
+            else
+              peratom2global(1,nullptr,nullptr,compute->size_peratom_cols,index1,
+                             tree,treestack,ntreestack,argstack,nargstack);
+
+          // no other possibilities for equal-style variable, so error
+
+          } else print_var_error(FLERR,"Mismatched compute in variable formula",ivar);
+
+        // vector-style variable is being evaluated
+
+        } else if (style[ivar] == VECTOR) {
+
+          // c_ID = vector from global vector
+
+          if (lowercase && nbracket == 0) {
+
+            if (!compute->vector_flag)
+              print_var_error(FLERR,"Mismatched compute in variable formula",ivar);
+            if (compute->size_vector == 0)
+              print_var_error(FLERR,"Variable formula compute vector is zero length",ivar);
+            if (!compute->is_initialized())
+              print_var_error(FLERR,"Variable formula compute cannot be invoked before "
+                              "initialization by a run",ivar);
+            if (!(compute->invoked_flag & Compute::INVOKED_VECTOR)) {
+              compute->compute_vector();
+              compute->invoked_flag |= Compute::INVOKED_VECTOR;
+            }
+
             auto newtree = new Tree();
-            newtree->type = VALUE;
-            newtree->value = value1;
+            newtree->type = VECTORARRAY;
+            newtree->array = compute->vector;
+            newtree->nvector = compute->size_vector;
+            newtree->nstride = 1;
             treestack[ntreestack++] = newtree;
-          } else argstack[nargstack++] = value1;
 
-        // c_ID[i][j] = scalar from global array, must be lowercase
+          // c_ID[i] = vector from global array
 
-        } else if (nbracket == 2 && compute->array_flag && lowercase) {
+          } else if (lowercase && nbracket == 1) {
 
-          if (index1 > compute->size_array_rows &&
-              compute->size_array_rows_variable == 0)
-            print_var_error(FLERR,"Variable formula compute array is accessed out-of-range",ivar,0);
-          if (index2 > compute->size_array_cols)
-            print_var_error(FLERR,"Variable formula compute array is accessed out-of-range",ivar,0);
-          if (update->whichflag == 0) {
-            if (compute->invoked_array != update->ntimestep)
-              print_var_error(FLERR,"Compute used in variable between runs is not current",ivar);
-          } else if (!(compute->invoked_flag & Compute::INVOKED_ARRAY)) {
-            compute->compute_array();
-            compute->invoked_flag |= Compute::INVOKED_ARRAY;
-          }
+            if (!compute->array_flag)
+              print_var_error(FLERR,"Mismatched compute in variable formula",ivar);
+            if (compute->size_array_rows == 0)
+              print_var_error(FLERR,"Variable formula compute array is zero length",ivar);
+            if (index1 > compute->size_array_cols)
+              print_var_error(FLERR,"Variable formula compute array is accessed out-of-range",ivar,0);
+            if (!compute->is_initialized())
+              print_var_error(FLERR,"Variable formula compute cannot be invoked before "
+                              "initialization by a run",ivar);
+            if (!(compute->invoked_flag & Compute::INVOKED_ARRAY)) {
+              compute->compute_array();
+              compute->invoked_flag |= Compute::INVOKED_ARRAY;
+            }
 
-          if (compute->size_array_rows_variable &&
-              index1 > compute->size_array_rows) value1 = 0.0;
-          else value1 = compute->array[index1-1][index2-1];
-          if (tree) {
             auto newtree = new Tree();
-            newtree->type = VALUE;
-            newtree->value = value1;
+            newtree->type = VECTORARRAY;
+            newtree->array = &compute->array[0][index1-1];
+            newtree->nvector = compute->size_array_rows;
+            newtree->nstride = compute->size_array_cols;
             treestack[ntreestack++] = newtree;
-          } else argstack[nargstack++] = value1;
 
-        // c_ID = vector from global vector, lowercase or uppercase
+          // no other possibilities for vector-style variable, so error
 
-        } else if (nbracket == 0 && compute->vector_flag) {
+          } else print_var_error(FLERR,"Mismatched compute in variable formula",ivar);
 
-          if (tree == nullptr)
-            print_var_error(FLERR,"Compute global vector in equal-style variable formula",ivar);
-          if (treetype == ATOM)
-            print_var_error(FLERR,"Compute global vector in atom-style variable formula",ivar);
-          if (compute->size_vector == 0)
-            print_var_error(FLERR,"Variable formula compute vector is zero length",ivar);
-          if (update->whichflag == 0) {
-            if (compute->invoked_vector != update->ntimestep)
-              print_var_error(FLERR,"Compute used in variable between runs is not current",ivar);
-          } else if (!(compute->invoked_flag & Compute::INVOKED_VECTOR)) {
-            compute->compute_vector();
-            compute->invoked_flag |= Compute::INVOKED_VECTOR;
-          }
+        // atom-style variable is being evaluated
 
-          auto newtree = new Tree();
-          newtree->type = VECTORARRAY;
-          newtree->array = compute->vector;
-          newtree->nvector = compute->size_vector;
-          newtree->nstride = 1;
-          treestack[ntreestack++] = newtree;
+        } else if (style[ivar] == ATOM) {
 
-        // c_ID[i] = vector from global array, lowercase or uppercase
+          // c_ID = vector from per-atom vector
 
-        } else if (nbracket == 1 && compute->array_flag) {
+          if (lowercase && nbracket == 0) {
 
-          if (tree == nullptr)
-            print_var_error(FLERR,"Compute global vector in equal-style variable formula",ivar);
-          if (treetype == ATOM)
-            print_var_error(FLERR,"Compute global vector in atom-style variable formula",ivar);
-          if (compute->size_array_rows == 0)
-            print_var_error(FLERR,"Variable formula compute array is zero length",ivar);
-          if (update->whichflag == 0) {
-            if (compute->invoked_array != update->ntimestep)
-              print_var_error(FLERR,"Compute used in variable between runs is not current",ivar);
-          } else if (!(compute->invoked_flag & Compute::INVOKED_ARRAY)) {
-            compute->compute_array();
-            compute->invoked_flag |= Compute::INVOKED_ARRAY;
-          }
+            if (!compute->peratom_flag)
+              print_var_error(FLERR,"Mismatched compute in variable formula",ivar);
+            if (compute->size_peratom_cols)
+              print_var_error(FLERR,"Mismatched compute in variable formula",ivar);
+            if (!compute->is_initialized())
+              print_var_error(FLERR,"Variable formula compute cannot be invoked before "
+                              "initialization by a run",ivar);
+            if (!(compute->invoked_flag & Compute::INVOKED_PERATOM)) {
+              compute->compute_peratom();
+              compute->invoked_flag |= Compute::INVOKED_PERATOM;
+            }
 
-          auto newtree = new Tree();
-          newtree->type = VECTORARRAY;
-          newtree->array = &compute->array[0][index1-1];
-          newtree->nvector = compute->size_array_rows;
-          newtree->nstride = compute->size_array_cols;
-          treestack[ntreestack++] = newtree;
+            auto newtree = new Tree();
+            newtree->type = ATOMARRAY;
+            newtree->array = compute->vector_atom;
+            newtree->nstride = 1;
+            treestack[ntreestack++] = newtree;
 
-        // c_ID[i] = scalar from per-atom vector
+          // c_ID[i] = vector from per-atom array
 
-        } else if (nbracket == 1 && compute->peratom_flag &&
-                   compute->size_peratom_cols == 0) {
+          } else if (lowercase && nbracket == 1) {
 
-          if (update->whichflag == 0) {
-            if (compute->invoked_peratom != update->ntimestep)
-              print_var_error(FLERR,"Compute used in variable between runs is not current",ivar);
-          } else if (!(compute->invoked_flag & Compute::INVOKED_PERATOM)) {
-            compute->compute_peratom();
-            compute->invoked_flag |= Compute::INVOKED_PERATOM;
-          }
+            if (!compute->peratom_flag)
+              print_var_error(FLERR,"Mismatched compute in variable formula",ivar);
+            if (!compute->size_peratom_cols)
+              print_var_error(FLERR,"Mismatched compute in variable formula",ivar);
+            if (index1 > compute->size_peratom_cols)
+              print_var_error(FLERR,"Variable formula compute array is accessed out-of-range",ivar,0);
+            if (!compute->is_initialized())
+              print_var_error(FLERR,"Variable formula compute cannot be invoked before "
+                              "initialization by a run",ivar);
+            if (!(compute->invoked_flag & Compute::INVOKED_PERATOM)) {
+              compute->compute_peratom();
+              compute->invoked_flag |= Compute::INVOKED_PERATOM;
+            }
 
-          peratom2global(1,nullptr,compute->vector_atom,1,index1,tree,
-                         treestack,ntreestack,argstack,nargstack);
+            auto newtree = new Tree();
+            newtree->type = ATOMARRAY;
+            newtree->array = nullptr;
+            if (compute->array_atom)
+              newtree->array = &compute->array_atom[0][index1-1];
+            newtree->nstride = compute->size_peratom_cols;
+            treestack[ntreestack++] = newtree;
 
-        // c_ID[i][j] = scalar from per-atom array
+          // no other possibilities for atom-style variable, so error
 
-        } else if (nbracket == 2 && compute->peratom_flag &&
-                   compute->size_peratom_cols > 0) {
-
-          if (index2 > compute->size_peratom_cols)
-            print_var_error(FLERR,"Variable formula compute array is accessed out-of-range",ivar,0);
-          if (update->whichflag == 0) {
-            if (compute->invoked_peratom != update->ntimestep)
-              print_var_error(FLERR,"Compute used in variable between runs is not current",ivar);
-          } else if (!(compute->invoked_flag & Compute::INVOKED_PERATOM)) {
-            compute->compute_peratom();
-            compute->invoked_flag |= Compute::INVOKED_PERATOM;
-          }
-
-          if (compute->array_atom)
-            peratom2global(1,nullptr,&compute->array_atom[0][index2-1],compute->size_peratom_cols,index1,
-                           tree,treestack,ntreestack,argstack,nargstack);
-          else
-            peratom2global(1,nullptr,nullptr,compute->size_peratom_cols,index1,
-                           tree,treestack,ntreestack,argstack,nargstack);
-
-        // c_ID = vector from per-atom vector
-
-        } else if (nbracket == 0 && compute->peratom_flag &&
-                   compute->size_peratom_cols == 0) {
-
-          if (tree == nullptr)
-            print_var_error(FLERR,"Per-atom compute in equal-style variable formula",ivar);
-          if (treetype == VECTOR)
-            print_var_error(FLERR,"Per-atom compute in vector-style variable formula",ivar);
-          if (update->whichflag == 0) {
-            if (compute->invoked_peratom != update->ntimestep)
-              print_var_error(FLERR,"Compute used in variable between runs is not current",ivar);
-          } else if (!(compute->invoked_flag & Compute::INVOKED_PERATOM)) {
-            compute->compute_peratom();
-            compute->invoked_flag |= Compute::INVOKED_PERATOM;
-          }
-
-          auto newtree = new Tree();
-          newtree->type = ATOMARRAY;
-          newtree->array = compute->vector_atom;
-          newtree->nstride = 1;
-          treestack[ntreestack++] = newtree;
-
-        // c_ID[i] = vector from per-atom array
-
-        } else if (nbracket == 1 && compute->peratom_flag &&
-                   compute->size_peratom_cols > 0) {
-
-          if (tree == nullptr)
-            print_var_error(FLERR,"Per-atom compute in equal-style variable formula",ivar);
-          if (treetype == VECTOR)
-            print_var_error(FLERR,"Per-atom compute in vector-style variable formula",ivar);
-          if (index1 > compute->size_peratom_cols)
-            print_var_error(FLERR,"Variable formula compute array is accessed out-of-range",ivar,0);
-          if (update->whichflag == 0) {
-            if (compute->invoked_peratom != update->ntimestep)
-              print_var_error(FLERR,"Compute used in variable between runs is not current",ivar);
-          } else if (!(compute->invoked_flag & Compute::INVOKED_PERATOM)) {
-            compute->compute_peratom();
-            compute->invoked_flag |= Compute::INVOKED_PERATOM;
-          }
-
-          auto newtree = new Tree();
-          newtree->type = ATOMARRAY;
-          if (compute->array_atom)
-            newtree->array = &compute->array_atom[0][index1-1];
-          newtree->nstride = compute->size_peratom_cols;
-          treestack[ntreestack++] = newtree;
-
-        } else if (nbracket == 1 && compute->local_flag) {
-          print_var_error(FLERR,"Cannot access local data via indexing",ivar);
-        } else print_var_error(FLERR,"Mismatched compute in variable formula",ivar);
+          } else print_var_error(FLERR,"Mismatched compute in variable formula",ivar);
+        }
 
       // ----------------
       // fix
@@ -1667,7 +1746,6 @@ double Variable::evaluate(char *str, Tree **tree, int ivar)
         if (!fix)
           print_var_error(FLERR,fmt::format("Invalid fix ID '{}' in variable formula",word+2),ivar);
 
-
         // parse zero or one or two trailing brackets
         // point i beyond last bracket
         // nbracket = # of bracket pairs
@@ -1689,181 +1767,200 @@ double Variable::evaluate(char *str, Tree **tree, int ivar)
           }
         }
 
-        // f_ID = scalar from global scalar, must be lowercase
+        // equal-style variable is being evaluated
 
-        if (nbracket == 0 && fix->scalar_flag && lowercase) {
+        if (style[ivar] == EQUAL) {
 
-          if (update->whichflag > 0 && update->ntimestep % fix->global_freq)
-            print_var_error(FLERR,"Fix in variable not computed at a compatible time",ivar);
+          // f_ID = scalar from global scalar
 
-          value1 = fix->compute_scalar();
-          if (tree) {
+          if (lowercase && nbracket == 0) {
+
+            if (!fix->scalar_flag)
+              print_var_error(FLERR,"Mismatched fix in variable formula",ivar);
+            if (update->whichflag > 0 && update->ntimestep % fix->global_freq)
+              print_var_error(FLERR,"Fix in variable not computed at a compatible time",ivar);
+
+            value1 = fix->compute_scalar();
+            argstack[nargstack++] = value1;
+
+          // f_ID[i] = scalar from global vector
+
+          } else if (lowercase && nbracket == 1) {
+
+            if (!fix->vector_flag)
+              print_var_error(FLERR,"Mismatched fix in variable formula",ivar);
+            if (index1 > fix->size_vector &&
+                fix->size_vector_variable == 0)
+              print_var_error(FLERR,"Variable formula fix vector is accessed out-of-range",ivar,0);
+            if (update->whichflag > 0 && update->ntimestep % fix->global_freq)
+              print_var_error(FLERR,"Fix in variable not computed at a compatible time",ivar);
+
+            value1 = fix->compute_vector(index1-1);
+            argstack[nargstack++] = value1;
+
+          // f_ID[i][j] = scalar from global array
+
+          } else if (lowercase && nbracket == 2) {
+
+            if (!fix->array_flag)
+              print_var_error(FLERR,"Mismatched fix in variable formula",ivar);
+            if (index1 > fix->size_array_rows &&
+                fix->size_array_rows_variable == 0)
+              print_var_error(FLERR,"Variable formula fix array is accessed out-of-range",ivar,0);
+            if (index2 > fix->size_array_cols)
+              print_var_error(FLERR,"Variable formula fix array is accessed out-of-range",ivar,0);
+            if (update->whichflag > 0 && update->ntimestep % fix->global_freq)
+              print_var_error(FLERR,"Fix in variable not computed at a compatible time",ivar);
+
+            value1 = fix->compute_array(index1-1,index2-1);
+            argstack[nargstack++] = value1;
+
+          // F_ID[i] = scalar element of per-atom vector, note uppercase "F"
+
+          } else if (!lowercase && nbracket == 1) {
+
+            if (!fix->peratom_flag)
+              print_var_error(FLERR,"Mismatched fix in variable formula",ivar);
+            if (fix->size_peratom_cols)
+              print_var_error(FLERR,"Mismatched fix in variable formula",ivar);
+            if (update->whichflag > 0 &&
+                update->ntimestep % fix->peratom_freq)
+              print_var_error(FLERR,"Fix in variable not computed at a compatible time",ivar);
+
+            peratom2global(1,nullptr,fix->vector_atom,1,index1,tree,
+                           treestack,ntreestack,argstack,nargstack);
+
+          // F_ID[i][j] = scalar element of per-atom array, note uppercase "F"
+
+          } else if (!lowercase && nbracket == 2) {
+
+            if (!fix->peratom_flag)
+              print_var_error(FLERR,"Mismatched fix in variable formula",ivar);
+            if (!fix->size_peratom_cols)
+              print_var_error(FLERR,"Mismatched fix in variable formula",ivar);
+            if (index2 > fix->size_peratom_cols)
+              print_var_error(FLERR,"Variable formula fix array is accessed out-of-range",ivar,0);
+            if (update->whichflag > 0 && update->ntimestep % fix->peratom_freq)
+              print_var_error(FLERR,"Fix in variable not computed at a compatible time",ivar);
+
+            if (fix->array_atom)
+              peratom2global(1,nullptr,&fix->array_atom[0][index2-1],
+                             fix->size_peratom_cols,index1,
+                             tree,treestack,ntreestack,argstack,nargstack);
+            else
+              peratom2global(1,nullptr,nullptr,fix->size_peratom_cols,index1,
+                             tree,treestack,ntreestack,argstack,nargstack);
+
+          // no other possibilities for equal-style variable, so error
+
+          } else print_var_error(FLERR,"Mismatched fix in variable formula",ivar);
+
+        // vector-style variable is being evaluated
+
+        } else if (style[ivar] == VECTOR) {
+
+          // f_ID = vector from global vector
+
+          if (lowercase && nbracket == 0) {
+
+            if (!fix->vector_flag)
+              print_var_error(FLERR,"Mismatched fix in variable formula",ivar);
+            if (fix->size_vector == 0)
+              print_var_error(FLERR,"Variable formula fix vector is zero length",ivar);
+            if (update->whichflag > 0 && update->ntimestep % fix->global_freq)
+              print_var_error(FLERR,"Fix in variable not computed at compatible time",ivar);
+
+            int nvec = fix->size_vector;
+            double *vec;
+            memory->create(vec,nvec,"variable:values");
+            for (int m = 0; m < nvec; m++)
+              vec[m] = fix->compute_vector(m);
+
             auto newtree = new Tree();
-            newtree->type = VALUE;
-            newtree->value = value1;
+            newtree->type = VECTORARRAY;
+            newtree->array = vec;
+            newtree->nvector = nvec;
+            newtree->nstride = 1;
+            newtree->selfalloc = 1;
             treestack[ntreestack++] = newtree;
-          } else argstack[nargstack++] = value1;
 
-        // f_ID[i] = scalar from global vector, must be lowercase
+          // f_ID[i] = vector from global array
 
-        } else if (nbracket == 1 && fix->vector_flag && lowercase) {
+          } else if (lowercase && nbracket == 1) {
 
-          if (index1 > fix->size_vector &&
-              fix->size_vector_variable == 0)
-            print_var_error(FLERR,"Variable formula fix vector is accessed out-of-range",ivar,0);
-          if (update->whichflag > 0 && update->ntimestep % fix->global_freq)
-            print_var_error(FLERR,"Fix in variable not computed at a compatible time",ivar);
+            if (!fix->array_flag)
+              print_var_error(FLERR,"Mismatched fix in variable formula",ivar);
+            if (fix->size_array_rows == 0)
+              print_var_error(FLERR,"Variable formula fix array is zero length",ivar);
+            if (index1 > fix->size_array_cols)
+              print_var_error(FLERR,"Variable formula fix array is accessed out-of-range",ivar,0);
+            if (update->whichflag > 0 && update->ntimestep % fix->global_freq)
+              print_var_error(FLERR,"Fix in variable not computed at a compatible time",ivar);
 
-          value1 = fix->compute_vector(index1-1);
-          if (tree) {
+            int nvec = fix->size_array_rows;
+            double *vec;
+            memory->create(vec,nvec,"variable:values");
+            for (int m = 0; m < nvec; m++)
+              vec[m] = fix->compute_array(m,index1-1);
+
             auto newtree = new Tree();
-            newtree->type = VALUE;
-            newtree->value = value1;
+            newtree->type = VECTORARRAY;
+            newtree->array = vec;
+            newtree->nvector = nvec;
+            newtree->nstride = 1;
+            newtree->selfalloc = 1;
             treestack[ntreestack++] = newtree;
-          } else argstack[nargstack++] = value1;
 
-        // f_ID[i][j] = scalar from global array, must be lowercase
+          // no other possibilities for vector-style variable, so error
 
-        } else if (nbracket == 2 && fix->array_flag && lowercase) {
+          } else print_var_error(FLERR,"Mismatched fix in variable formula",ivar);
 
-          if (index1 > fix->size_array_rows &&
-              fix->size_array_rows_variable == 0)
-            print_var_error(FLERR,"Variable formula fix array is accessed out-of-range",ivar,0);
-          if (index2 > fix->size_array_cols)
-            print_var_error(FLERR,"Variable formula fix array is accessed out-of-range",ivar,0);
-          if (update->whichflag > 0 && update->ntimestep % fix->global_freq)
-            print_var_error(FLERR,"Fix in variable not computed at a compatible time",ivar);
+        // atom-style variable is being evaluated
 
-          value1 = fix->compute_array(index1-1,index2-1);
-          if (tree) {
+        } else if (style[ivar] == ATOM) {
+
+          // f_ID = vector from per-atom vector
+
+          if (lowercase && nbracket == 0) {
+
+            if (!fix->peratom_flag)
+              print_var_error(FLERR,"Mismatched fix in variable formula",ivar);
+            if (fix->size_peratom_cols)
+              print_var_error(FLERR,"Mismatched fix in variable formula",ivar);
+            if (update->whichflag > 0 && update->ntimestep % fix->peratom_freq)
+              print_var_error(FLERR,"Fix in variable not computed at compatible time",ivar);
+
             auto newtree = new Tree();
-            newtree->type = VALUE;
-            newtree->value = value1;
+            newtree->type = ATOMARRAY;
+            newtree->array = fix->vector_atom;
+            newtree->nstride = 1;
             treestack[ntreestack++] = newtree;
-          } else argstack[nargstack++] = value1;
 
-        // f_ID = vector from global vector, lowercase or uppercase
+          // f_ID[i] = vector from per-atom array
 
-        } else if (nbracket == 0 && fix->vector_flag) {
+          } else if (lowercase && nbracket == 1) {
 
-          if (update->whichflag > 0 && update->ntimestep % fix->global_freq)
-            print_var_error(FLERR,"Fix in variable not computed at compatible time",ivar);
-          if (tree == nullptr)
-            print_var_error(FLERR,"Fix global vector in equal-style variable formula",ivar);
-          if (treetype == ATOM)
-            print_var_error(FLERR,"Fix global vector in atom-style variable formula",ivar);
-          if (fix->size_vector == 0)
-            print_var_error(FLERR,"Variable formula fix vector is zero length",ivar);
+            if (!fix->peratom_flag)
+              print_var_error(FLERR,"Mismatched fix in variable formula",ivar);
+            if (!fix->size_peratom_cols)
+              print_var_error(FLERR,"Mismatched fix in variable formula",ivar);
+            if (index1 > fix->size_peratom_cols)
+              print_var_error(FLERR,"Variable formula fix array is accessed out-of-range",ivar,0);
+            if (update->whichflag > 0 && update->ntimestep % fix->peratom_freq)
+              print_var_error(FLERR,"Fix in variable not computed at compatible time",ivar);
 
-          int nvec = fix->size_vector;
-          double *vec;
-          memory->create(vec,nvec,"variable:values");
-          for (int m = 0; m < nvec; m++)
-            vec[m] = fix->compute_vector(m);
+            auto newtree = new Tree();
+            newtree->type = ATOMARRAY;
+            newtree->array = nullptr;
+            if (fix->array_atom)
+              newtree->array = &fix->array_atom[0][index1-1];
+            newtree->nstride = fix->size_peratom_cols;
+            treestack[ntreestack++] = newtree;
 
-          auto newtree = new Tree();
-          newtree->type = VECTORARRAY;
-          newtree->array = vec;
-          newtree->nvector = nvec;
-          newtree->nstride = 1;
-          newtree->selfalloc = 1;
-          treestack[ntreestack++] = newtree;
+          // no other possibilities for atom-style variable, so error
 
-        // f_ID[i] = vector from global array, lowercase or uppercase
-
-        } else if (nbracket == 1 && fix->array_flag) {
-
-          if (update->whichflag > 0 && update->ntimestep % fix->global_freq)
-            print_var_error(FLERR,"Fix in variable not computed at a compatible time",ivar);
-          if (tree == nullptr)
-            print_var_error(FLERR,"Fix global vector in equal-style variable formula",ivar);
-          if (treetype == ATOM)
-            print_var_error(FLERR,"Fix global vector in atom-style variable formula",ivar);
-          if (fix->size_array_rows == 0)
-            print_var_error(FLERR,"Variable formula fix array is zero length",ivar);
-
-          int nvec = fix->size_array_rows;
-          double *vec;
-          memory->create(vec,nvec,"variable:values");
-          for (int m = 0; m < nvec; m++)
-            vec[m] = fix->compute_array(m,index1-1);
-
-          auto newtree = new Tree();
-          newtree->type = VECTORARRAY;
-          newtree->array = vec;
-          newtree->nvector = nvec;
-          newtree->nstride = 1;
-          newtree->selfalloc = 1;
-          treestack[ntreestack++] = newtree;
-
-        // f_ID[i] = scalar from per-atom vector
-
-        } else if (nbracket == 1 && fix->peratom_flag &&
-                   fix->size_peratom_cols == 0) {
-
-          if (update->whichflag > 0 &&
-              update->ntimestep % fix->peratom_freq)
-            print_var_error(FLERR,"Fix in variable not computed at a compatible time",ivar);
-
-          peratom2global(1,nullptr,fix->vector_atom,1,index1,
-                         tree,treestack,ntreestack,argstack,nargstack);
-
-        // f_ID[i][j] = scalar from per-atom array
-
-        } else if (nbracket == 2 && fix->peratom_flag &&
-                   fix->size_peratom_cols > 0) {
-
-          if (index2 > fix->size_peratom_cols)
-            print_var_error(FLERR,"Variable formula fix array is accessed out-of-range",ivar,0);
-          if (update->whichflag > 0 &&
-              update->ntimestep % fix->peratom_freq)
-            print_var_error(FLERR,"Fix in variable not computed at a compatible time",ivar);
-
-          if (fix->array_atom)
-            peratom2global(1,nullptr,&fix->array_atom[0][index2-1],fix->size_peratom_cols,index1,
-                           tree,treestack,ntreestack,argstack,nargstack);
-          else
-            peratom2global(1,nullptr,nullptr,fix->size_peratom_cols,index1,
-                           tree,treestack,ntreestack,argstack,nargstack);
-
-        // f_ID = vector from per-atom vector
-
-        } else if (nbracket == 0 && fix->peratom_flag &&
-                   fix->size_peratom_cols == 0) {
-
-          if (tree == nullptr)
-            print_var_error(FLERR,"Per-atom fix in equal-style variable formula",ivar);
-          if (update->whichflag > 0 &&
-              update->ntimestep % fix->peratom_freq)
-            print_var_error(FLERR,"Fix in variable not computed at compatible time",ivar);
-
-          auto newtree = new Tree();
-          newtree->type = ATOMARRAY;
-          newtree->array = fix->vector_atom;
-          newtree->nstride = 1;
-          treestack[ntreestack++] = newtree;
-
-        // f_ID[i] = vector from per-atom array
-
-        } else if (nbracket == 1 && fix->peratom_flag &&
-                   fix->size_peratom_cols > 0) {
-
-          if (tree == nullptr)
-            print_var_error(FLERR,"Per-atom fix in equal-style variable formula",ivar);
-          if (index1 > fix->size_peratom_cols)
-            print_var_error(FLERR,"Variable formula fix array is accessed out-of-range",ivar,0);
-          if (update->whichflag > 0 &&
-              update->ntimestep % fix->peratom_freq)
-            print_var_error(FLERR,"Fix in variable not computed at compatible time",ivar);
-
-          auto newtree = new Tree();
-          newtree->type = ATOMARRAY;
-          if (fix->array_atom)
-            newtree->array = &fix->array_atom[0][index1-1];
-          newtree->nstride = fix->size_peratom_cols;
-          treestack[ntreestack++] = newtree;
-
-        } else print_var_error(FLERR,"Mismatched fix in variable formula",ivar);
+          } else print_var_error(FLERR,"Mismatched fix in variable formula",ivar);
+        }
 
       // ----------------
       // variable
@@ -1893,124 +1990,140 @@ double Variable::evaluate(char *str, Tree **tree, int ivar)
           i = ptr-str+1;
         }
 
-        // v_name = scalar from internal-style variable
-        // access value directly
+        // vname with no bracket
 
-        if (nbracket == 0 && style[ivar] == INTERNAL) {
+        if (nbracket == 0) {
 
-          value1 = dvalue[ivar];
-          if (tree) {
-            auto newtree = new Tree();
-            newtree->type = VALUE;
-            newtree->value = value1;
-            treestack[ntreestack++] = newtree;
-          } else argstack[nargstack++] = value1;
+          // scalar from internal-style variable
+          // access value directly
 
-        // v_name = scalar from non atom/atomfile & non vector-style variable
-        // access value via retrieve()
+          if (style[ivar] == INTERNAL) {
 
-        } else if (nbracket == 0 && style[ivar] != ATOM &&
-                   style[ivar] != ATOMFILE && style[ivar] != VECTOR) {
+            value1 = dvalue[ivar];
+            if (tree) {
+              auto newtree = new Tree();
+              newtree->type = VALUE;
+              newtree->value = value1;
+              treestack[ntreestack++] = newtree;
+            } else argstack[nargstack++] = value1;
 
-          char *var = retrieve(word+2);
-          if (var == nullptr)
-            print_var_error(FLERR,"Invalid variable evaluation in variable formula",ivar);
-          if (utils::is_double(var)) {
+            // scalar from any style variable except VECTOR, ATOM, ATOMFILE
+            // access value via retrieve()
+
+          } else if (style[ivar] != ATOM && style[ivar] != ATOMFILE && style[ivar] != VECTOR) {
+
+            char *var = retrieve(word+2);
+            if (var == nullptr)
+              print_var_error(FLERR,"Invalid variable evaluation in variable formula",ivar);
+            if (!utils::is_double(var))
+              print_var_error(FLERR,"Non-numeric variable value in variable formula",ivar);
             if (tree) {
               auto newtree = new Tree();
               newtree->type = VALUE;
               newtree->value = atof(var);
               treestack[ntreestack++] = newtree;
             } else argstack[nargstack++] = atof(var);
-          } else print_var_error(FLERR,"Non-numeric variable value in variable formula",ivar);
 
-        // v_name = per-atom vector from atom-style variable
-        // evaluate the atom-style variable as newtree
+          // vector from vector-style variable
+          // evaluate the vector-style variable, put result in newtree
 
-        } else if (nbracket == 0 && style[ivar] == ATOM) {
+          } else if (style[ivar] == VECTOR) {
 
-          if (tree == nullptr)
-            print_var_error(FLERR,"Atom-style variable in equal-style variable formula",ivar);
-          if (treetype == VECTOR)
-            print_var_error(FLERR,"Atom-style variable in vector-style variable formula",ivar);
+            if (tree == nullptr)
+              print_var_error(FLERR,"Vector-style variable in equal-style variable formula",ivar);
+            if (treetype == ATOM)
+              print_var_error(FLERR,"Vector-style variable in atom-style variable formula",ivar);
 
-          Tree *newtree = nullptr;
-          evaluate(data[ivar][0],&newtree,ivar);
-          treestack[ntreestack++] = newtree;
+            double *vec;
+            int nvec = compute_vector(ivar,&vec);
 
-        // v_name = per-atom vector from atomfile-style variable
-
-        } else if (nbracket == 0 && style[ivar] == ATOMFILE) {
-
-          if (tree == nullptr)
-            print_var_error(FLERR,"Atomfile-style variable in equal-style variable formula",ivar);
-          if (treetype == VECTOR)
-            print_var_error(FLERR,"Atomfile-style variable in vector-style variable formula",ivar);
-
-          auto newtree = new Tree();
-          newtree->type = ATOMARRAY;
-          newtree->array = reader[ivar]->fixstore->vstore;
-          newtree->nstride = 1;
-          treestack[ntreestack++] = newtree;
-
-        // v_name = vector from vector-style variable
-        // evaluate the vector-style variable, put result in newtree
-
-        } else if (nbracket == 0 && style[ivar] == VECTOR) {
-
-          if (tree == nullptr)
-            print_var_error(FLERR,"Vector-style variable in equal-style variable formula",ivar);
-          if (treetype == ATOM)
-            print_var_error(FLERR,"Vector-style variable in atom-style variable formula",ivar);
-
-          double *vec;
-          int nvec = compute_vector(ivar,&vec);
-
-          auto newtree = new Tree();
-          newtree->type = VECTORARRAY;
-          newtree->array = vec;
-          newtree->nvector = nvec;
-          newtree->nstride = 1;
-          treestack[ntreestack++] = newtree;
-
-        // v_name[N] = scalar from atom-style variable
-        // compute the per-atom variable in result
-        // use peratom2global to extract single value from result
-
-        } else if (nbracket && style[ivar] == ATOM) {
-
-          double *result;
-          memory->create(result,atom->nlocal,"variable:result");
-          compute_atom(ivar,0,result,1,0);
-          peratom2global(1,nullptr,result,1,index,tree,treestack,ntreestack,argstack,nargstack);
-          memory->destroy(result);
-
-        // v_name[N] = scalar from atomfile-style variable
-
-        } else if (nbracket && style[ivar] == ATOMFILE) {
-
-          peratom2global(1,nullptr,reader[ivar]->fixstore->vstore,1,index,
-                         tree,treestack,ntreestack,argstack,nargstack);
-
-        // v_name[N] = scalar from vector-style variable
-        // compute the vector-style variable, extract single value
-
-        } else if (nbracket && style[ivar] == VECTOR) {
-
-          double *vec;
-          int nvec = compute_vector(ivar,&vec);
-          if (index <= 0 || index > nvec)
-            print_var_error(FLERR,"Invalid index into vector-style variable",ivar);
-          int m = index;   // convert from tagint to int
-
-          if (tree) {
             auto newtree = new Tree();
-            newtree->type = VALUE;
-            newtree->value = vec[m-1];
+            newtree->type = VECTORARRAY;
+            newtree->array = vec;
+            newtree->nvector = nvec;
+            newtree->nstride = 1;
             treestack[ntreestack++] = newtree;
-          } else argstack[nargstack++] = vec[m-1];
 
-        } else print_var_error(FLERR,"Mismatched variable in variable formula",ivar);
+          // vector from atom-style variable
+          // evaluate the atom-style variable as newtree
+
+          } else if (style[ivar] == ATOM) {
+
+            if (tree == nullptr)
+              print_var_error(FLERR,"Atom-style variable in equal-style variable formula",ivar);
+            if (treetype == VECTOR)
+              print_var_error(FLERR,"Atom-style variable in vector-style variable formula",ivar);
+
+            Tree *newtree = nullptr;
+            evaluate(data[ivar][0],&newtree,ivar);
+            treestack[ntreestack++] = newtree;
+
+          // vector from atomfile-style variable
+          // point to the values in FixStore instance
+
+          } else if (style[ivar] == ATOMFILE) {
+
+            if (tree == nullptr)
+              print_var_error(FLERR,"Atomfile-style variable in equal-style variable formula",ivar);
+            if (treetype == VECTOR)
+              print_var_error(FLERR,"Atomfile-style variable in vector-style variable formula",ivar);
+
+            auto newtree = new Tree();
+            newtree->type = ATOMARRAY;
+            newtree->array = reader[ivar]->fixstore->vstore;
+            newtree->nstride = 1;
+            treestack[ntreestack++] = newtree;
+
+          // no other possibilities for variable with no bracket
+
+          } else print_var_error(FLERR,"Mismatched variable in variable formula",ivar);
+
+        // vname[i] with one bracket
+
+        } else if (nbracket == 1) {
+
+          // scalar from vector-style variable
+          // compute the vector-style variable, extract single value
+
+          if (style[ivar] == VECTOR) {
+
+            double *vec;
+            int nvec = compute_vector(ivar,&vec);
+            if (index <= 0 || index > nvec)
+              print_var_error(FLERR,"Invalid index into vector-style variable",ivar);
+            int m = index;   // convert from tagint to int
+
+            if (tree) {
+              auto newtree = new Tree();
+              newtree->type = VALUE;
+              newtree->value = vec[m-1];
+              treestack[ntreestack++] = newtree;
+            } else argstack[nargstack++] = vec[m-1];
+
+          // scalar from atom-style variable
+          // compute the per-atom variable in result
+          // use peratom2global to extract single value from result
+
+          } else if (style[ivar] == ATOM) {
+
+            double *result;
+            memory->create(result,atom->nlocal,"variable:result");
+            compute_atom(ivar,0,result,1,0);
+            peratom2global(1,nullptr,result,1,index,tree,treestack,ntreestack,argstack,nargstack);
+            memory->destroy(result);
+
+          // scalar from atomfile-style variable
+          // use peratom2global to extract single value from FixStore instance
+
+          } else if (style[ivar] == ATOMFILE) {
+
+            peratom2global(1,nullptr,reader[ivar]->fixstore->vstore,1,index,
+                           tree,treestack,ntreestack,argstack,nargstack);
+
+          // no other possibilities for variable with one bracket
+
+          } else print_var_error(FLERR,"Mismatched variable in variable formula",ivar);
+        }
 
       // ----------------
       // math/group/special/labelmap function or atom value/vector or
@@ -2031,7 +2144,8 @@ double Variable::evaluate(char *str, Tree **tree, int ivar)
           if (math_function(word,contents,tree,treestack,ntreestack,argstack,nargstack,ivar));
           else if (group_function(word,contents,tree,treestack,ntreestack,argstack,nargstack,ivar));
           else if (special_function(word,contents,tree,treestack,ntreestack,argstack,nargstack,ivar));
-          else print_var_error(FLERR,fmt::format("Invalid math/group/special function '{}()' "
+          else if (feature_function(word,contents,tree,treestack,ntreestack,argstack,nargstack,ivar));
+          else print_var_error(FLERR,fmt::format("Invalid math/group/special/feature function '{}()' "
                                                  "in variable formula", word),ivar);
           delete[] contents;
 
@@ -2247,7 +2361,7 @@ double Variable::evaluate(char *str, Tree **tree, int ivar)
 
   if (nopstack) print_var_error(FLERR,"Invalid syntax in variable formula",ivar);
 
-  // for atom-style variable, return remaining tree
+  // for atom-style and vector-style variable, return remaining tree
   // for equal-style variable, return remaining arg
 
   if (tree) {
@@ -2669,7 +2783,7 @@ double Variable::collapse_tree(Tree *tree)
     if (tree->first->type != VALUE || tree->second->type != VALUE ||
         tree->extra[0]->type != VALUE) return 0.0;
     tree->type = VALUE;
-    if (ivalue1 <= 0 || ivalue2 <= 0 || ivalue3 <= 0 )
+    if (ivalue1 <= 0 || ivalue2 <= 0 || ivalue3 <= 0)
       error->all(FLERR,"Invalid math function in variable formula");
     if (update->ntimestep < ivalue1) tree->value = ivalue1;
     else {
@@ -3040,7 +3154,7 @@ double Variable::eval_tree(Tree *tree, int i)
     auto  ivalue1 = static_cast<bigint> (eval_tree(tree->first,i));
     auto  ivalue2 = static_cast<bigint> (eval_tree(tree->second,i));
     auto  ivalue3 = static_cast<bigint> (eval_tree(tree->extra[0],i));
-    if (ivalue1 <= 0 || ivalue2 <= 0 || ivalue3 <= 0 )
+    if (ivalue1 <= 0 || ivalue2 <= 0 || ivalue3 <= 0)
       error->all(FLERR,"Invalid math function in variable formula");
     if (update->ntimestep < ivalue1) arg = ivalue1;
     else {
@@ -3571,7 +3685,7 @@ int Variable::math_function(char *word, char *contents, Tree **tree, Tree **tree
       auto  ivalue1 = static_cast<bigint> (value1);
       auto  ivalue2 = static_cast<bigint> (value2);
       auto  ivalue3 = static_cast<bigint> (values[0]);
-      if (ivalue1 <= 0 || ivalue2 <= 0 || ivalue3 <= 0 )
+      if (ivalue1 <= 0 || ivalue2 <= 0 || ivalue3 <= 0)
         print_var_error(FLERR,"Invalid math function in variable formula",ivar);
       double value;
       if (update->ntimestep < ivalue1) value = ivalue1;
@@ -3601,7 +3715,6 @@ int Variable::math_function(char *word, char *contents, Tree **tree, Tree **tree
         print_var_error(FLERR,"Invalid math function in variable formula",ivar);
       double value;
       if (update->ntimestep < ivalue1) value = ivalue1;
-      //else if (update->ntimestep <= ivalue3) {
       else {
         value = ivalue1;
         double logsp = ivalue1;
@@ -3979,11 +4092,12 @@ Region *Variable::region_function(char *id, int ivar)
    process a special function in formula
    push result onto tree or arg stack
    word = special function
-   contents = str between parentheses with one,two,three args
+   contents = str between parentheses with one or more args
    return 0 if not a match, 1 if successfully processed
    customize by adding a special function:
      sum(x),min(x),max(x),ave(x),trap(x),slope(x),
-     gmask(x),rmask(x),grmask(x,y),next(x)
+     gmask(x),rmask(x),grmask(x,y),next(x),is_file(x),is_ox(x),
+     extract_setting(x),label2type(x,y),is_typelabel(x,y)
 ------------------------------------------------------------------------- */
 
 int Variable::special_function(char *word, char *contents, Tree **tree, Tree **treestack,
@@ -3992,19 +4106,75 @@ int Variable::special_function(char *word, char *contents, Tree **tree, Tree **t
   double sx,sxx;
   double value,sy,sxy;
 
-  // word not a match to any special function
+  // word is not a match to any special function
 
-  if (strcmp(word,"sum") != 0 && strcmp(word,"min") && strcmp(word,"max") != 0 && strcmp(word,"ave") != 0 &&
-      strcmp(word,"trap") != 0 && strcmp(word,"slope") != 0 && strcmp(word,"gmask") != 0 && strcmp(word,"rmask") != 0 &&
-      strcmp(word,"grmask") != 0 && strcmp(word,"next") != 0 && strcmp(word,"is_active") != 0 &&
-      strcmp(word,"is_defined") != 0 && strcmp(word,"is_available") != 0 && strcmp(word,"is_file") != 0 &&
-      strcmp(word,"is_os") != 0 && strcmp(word,"extract_setting") != 0 && strcmp(word,"label2type") != 0)
+  if (strcmp(word,"sum") != 0 && strcmp(word,"min") && strcmp(word,"max") != 0 &&
+      strcmp(word,"ave") != 0 && strcmp(word,"trap") != 0 && strcmp(word,"slope") != 0 &&
+      strcmp(word,"gmask") != 0 && strcmp(word,"rmask") != 0 && strcmp(word,"grmask") != 0 &&
+      strcmp(word,"next") != 0 && strcmp(word,"is_file") != 0 && strcmp(word,"is_os") != 0 &&
+      strcmp(word,"extract_setting") != 0 && strcmp(word,"label2type") != 0 &&
+      strcmp(word,"is_typelabel") != 0)
     return 0;
 
+  // process label2type() separately b/c its label arg can have commas in it
+
+  if (strcmp(word,"label2type") == 0 || strcmp(word,"is_typelabel") == 0) {
+    if (!atom->labelmapflag)
+      print_var_error(FLERR,fmt::format("Cannot use {}() function without a labelmap",word),ivar);
+
+    std::string contents_copy(contents);
+    auto pos = contents_copy.find_first_of(',');
+    if (pos == std::string::npos) {
+      if (strcmp(word,"label2type") == 0) {
+        print_var_error(FLERR, fmt::format("Invalid label2type({}) function in variable formula",
+                                           contents_copy), ivar);
+      } else {
+        print_var_error(FLERR, fmt::format("Invalid is_typelabel({}) function in variable formula",
+                                           contents_copy), ivar);
+      }
+    }
+
+    std::string typestr = contents_copy.substr(pos+1);
+    std::string kind = contents_copy.substr(0, pos);
+
+    int value = -1;
+    if (kind == "atom") {
+      value = atom->lmap->find(typestr,Atom::ATOM);
+    } else if (kind == "bond") {
+      value = atom->lmap->find(typestr,Atom::BOND);
+    } else if (kind == "angle") {
+      value = atom->lmap->find(typestr,Atom::ANGLE);
+    } else if (kind == "dihedral") {
+      value = atom->lmap->find(typestr,Atom::DIHEDRAL);
+    } else if (kind == "improper") {
+      value = atom->lmap->find(typestr,Atom::IMPROPER);
+    } else {
+      print_var_error(FLERR, fmt::format("Invalid kind {} in {}() in variable", kind, word),ivar);
+    }
+
+    if (strcmp(word,"label2type") == 0) {
+      if (value == -1)
+        print_var_error(FLERR, fmt::format("Invalid {} type label {} in label2type() in variable",
+                                           kind, typestr), ivar);
+    } else value = (value == -1) ? 0.0 : 1.0;
+
+    // save value in tree or on argstack
+
+    if (tree) {
+      Tree *newtree = new Tree();
+      newtree->type = VALUE;
+      newtree->value = value;
+      newtree->first = newtree->second = nullptr;
+      newtree->nextra = 0;
+      treestack[ntreestack++] = newtree;
+    } else argstack[nargstack++] = value;
+
+    return 1;
+  }
+
+  // process other special functions
   // parse contents for comma-separated args
   // narg = number of args, args = strings between commas
-
-  std::string contents_copy(contents); // for label2type
 
   char *args[MAXFUNCARG];
   int narg = parse_args(contents,args);
@@ -4050,10 +4220,10 @@ int Variable::special_function(char *word, char *contents, Tree **tree, Tree **t
         print_var_error(FLERR,mesg,ivar);
       }
       if (index == 0 && compute->vector_flag) {
-        if (update->whichflag == 0) {
-          if (compute->invoked_vector != update->ntimestep)
-            print_var_error(FLERR,"Compute used in variable between runs is not current",ivar);
-        } else if (!(compute->invoked_flag & Compute::INVOKED_VECTOR)) {
+        if (!compute->is_initialized())
+          print_var_error(FLERR,"Variable formula compute cannot be invoked before "
+                          "initialization by a run",ivar);
+        if (!(compute->invoked_flag & Compute::INVOKED_VECTOR)) {
           compute->compute_vector();
           compute->invoked_flag |= Compute::INVOKED_VECTOR;
         }
@@ -4062,10 +4232,10 @@ int Variable::special_function(char *word, char *contents, Tree **tree, Tree **t
       } else if (index && compute->array_flag) {
         if (index > compute->size_array_cols)
           print_var_error(FLERR,"Variable formula compute array is accessed out-of-range",ivar,0);
-        if (update->whichflag == 0) {
-          if (compute->invoked_array != update->ntimestep)
-            print_var_error(FLERR,"Compute used in variable between runs is not current",ivar);
-        } else if (!(compute->invoked_flag & Compute::INVOKED_ARRAY)) {
+        if (!compute->is_initialized())
+          print_var_error(FLERR,"Variable formula compute cannot be invoked before "
+                          "initialization by a run",ivar);
+        if (!(compute->invoked_flag & Compute::INVOKED_ARRAY)) {
           compute->compute_array();
           compute->invoked_flag |= Compute::INVOKED_ARRAY;
         }
@@ -4333,54 +4503,6 @@ int Variable::special_function(char *word, char *contents, Tree **tree, Tree **t
 
     } else print_var_error(FLERR,"Invalid variable style in special function next",ivar);
 
-  } else if (strcmp(word,"is_active") == 0) {
-    if (narg != 2)
-      print_var_error(FLERR,"Invalid is_active() function in variable formula",ivar);
-
-    Info info(lmp);
-    value = (info.is_active(args[0],args[1])) ? 1.0 : 0.0;
-
-    // save value in tree or on argstack
-
-    if (tree) {
-      auto newtree = new Tree();
-      newtree->type = VALUE;
-      newtree->value = value;
-      treestack[ntreestack++] = newtree;
-    } else argstack[nargstack++] = value;
-
-  } else if (strcmp(word,"is_available") == 0) {
-    if (narg != 2)
-      print_var_error(FLERR,"Invalid is_available() function in variable formula",ivar);
-
-    Info info(lmp);
-    value = (info.is_available(args[0],args[1])) ? 1.0 : 0.0;
-
-    // save value in tree or on argstack
-
-    if (tree) {
-      auto newtree = new Tree();
-      newtree->type = VALUE;
-      newtree->value = value;
-      treestack[ntreestack++] = newtree;
-    } else argstack[nargstack++] = value;
-
-  } else if (strcmp(word,"is_defined") == 0) {
-    if (narg != 2)
-      print_var_error(FLERR,"Invalid is_defined() function in variable formula",ivar);
-
-    Info info(lmp);
-    value = (info.is_defined(args[0],args[1])) ? 1.0 : 0.0;
-
-    // save value in tree or on argstack
-
-    if (tree) {
-      auto newtree = new Tree();
-      newtree->type = VALUE;
-      newtree->value = value;
-      treestack[ntreestack++] = newtree;
-    } else argstack[nargstack++] = value;
-
   } else if (strcmp(word,"is_file") == 0) {
     if (narg != 1)
       print_var_error(FLERR,"Invalid is_file() function in variable formula",ivar);
@@ -4412,7 +4534,7 @@ int Variable::special_function(char *word, char *contents, Tree **tree, Tree **t
     } else argstack[nargstack++] = value;
 
   } else if (strcmp(word,"extract_setting") == 0) {
-    if (narg != 1) print_var_error(FLERR,"Invalid extract_setting() function syntax in variable formula",ivar);
+    if (narg != 1) print_var_error(FLERR,"Invalid extract_setting() function in variable formula",ivar);
 
     value = lammps_extract_setting(lmp, args[0]);
     if (value < 0) {
@@ -4428,45 +4550,87 @@ int Variable::special_function(char *word, char *contents, Tree **tree, Tree **t
       newtree->value = value;
       treestack[ntreestack++] = newtree;
     } else argstack[nargstack++] = value;
+  }
 
-  } else if (strcmp(word,"label2type") == 0) {
-    if (!atom->labelmapflag)
-      print_var_error(FLERR,"Cannot use label2type() function without a labelmap",ivar);
+  // delete stored args
 
-    auto pos = contents_copy.find_first_of(',');
-    if (pos == std::string::npos)
-      print_var_error(FLERR, fmt::format("Invalid label2type({}) function in variable formula",
-                                       contents_copy), ivar);
-    std::string typestr = contents_copy.substr(pos+1);
-    std::string kind = contents_copy.substr(0, pos);
+  for (int i = 0; i < narg; i++) delete[] args[i];
 
-    int value = -1;
-    if (kind == "atom") {
-      value = atom->lmap->find(typestr,Atom::ATOM);
-    } else if (kind == "bond") {
-      value = atom->lmap->find(typestr,Atom::BOND);
-    } else if (kind == "angle") {
-      value = atom->lmap->find(typestr,Atom::ANGLE);
-    } else if (kind == "dihedral") {
-      value = atom->lmap->find(typestr,Atom::DIHEDRAL);
-    } else if (kind == "improper") {
-      value = atom->lmap->find(typestr,Atom::IMPROPER);
-    } else {
-      print_var_error(FLERR, fmt::format("Invalid type kind {} in variable formula",kind), ivar);
-    }
+  return 1;
+}
 
-    if (value == -1)
-      print_var_error(FLERR, fmt::format("Invalid {} type label {} in variable formula",
-                                         kind, typestr), ivar);
+/* ----------------------------------------------------------------------
+   process a feature function in formula
+   push result onto tree or arg stack
+   word = special function
+   contents = str between parentheses with one or more args
+   return 0 if not a match, 1 if successfully processed
+   customize by adding a feature function:
+     is_available(x,y),is_active(x,y),is_defined(x,y),
+------------------------------------------------------------------------- */
+
+int Variable::feature_function(char *word, char *contents, Tree **tree, Tree **treestack,
+                               int &ntreestack, double *argstack, int &nargstack, int ivar)
+{
+  double value;
+
+  // word is not a match to any feature function
+
+  if (strcmp(word,"is_available") && strcmp(word,"is_active") && strcmp(word,"is_defined") != 0)
+    return 0;
+
+  // process feature functions
+  // parse contents for comma-separated args
+  // narg = number of args, args = strings between commas
+
+  char *args[MAXFUNCARG];
+  int narg = parse_args(contents,args);
+
+  if (strcmp(word,"is_available") == 0) {
+    if (narg != 2)
+      print_var_error(FLERR,"Invalid is_available() function in variable formula",ivar);
+
+    Info info(lmp);
+    value = (info.is_available(args[0],args[1])) ? 1.0 : 0.0;
 
     // save value in tree or on argstack
 
     if (tree) {
-      Tree *newtree = new Tree();
+      auto newtree = new Tree();
       newtree->type = VALUE;
       newtree->value = value;
-      newtree->first = newtree->second = nullptr;
-      newtree->nextra = 0;
+      treestack[ntreestack++] = newtree;
+    } else argstack[nargstack++] = value;
+
+  } else if (strcmp(word,"is_active") == 0) {
+    if (narg != 2)
+      print_var_error(FLERR,"Invalid is_active() function in variable formula",ivar);
+
+    Info info(lmp);
+    value = (info.is_active(args[0],args[1])) ? 1.0 : 0.0;
+
+    // save value in tree or on argstack
+
+    if (tree) {
+      auto newtree = new Tree();
+      newtree->type = VALUE;
+      newtree->value = value;
+      treestack[ntreestack++] = newtree;
+    } else argstack[nargstack++] = value;
+
+  } else if (strcmp(word,"is_defined") == 0) {
+    if (narg != 2)
+      print_var_error(FLERR,"Invalid is_defined() function in variable formula",ivar);
+
+    Info info(lmp);
+    value = (info.is_defined(args[0],args[1])) ? 1.0 : 0.0;
+
+    // save value in tree or on argstack
+
+    if (tree) {
+      auto newtree = new Tree();
+      newtree->type = VALUE;
+      newtree->value = value;
       treestack[ntreestack++] = newtree;
     } else argstack[nargstack++] = value;
   }
@@ -4657,6 +4821,30 @@ void Variable::atom_vector(char *word, Tree **tree, Tree **treestack, int &ntree
 }
 
 /* ----------------------------------------------------------------------
+   parse vector string with format [value,value,...] for vector-style variable
+   store numeric values in vecs[ivar]
+------------------------------------------------------------------------- */
+
+void Variable::parse_vector(int ivar, char *str)
+{
+  // check for square brackets, remove them, and split into vector
+  int nstr = strlen(str)-1;
+  if ((str[0] != '[') || (str[nstr] != ']'))
+    error->all(FLERR,"Vector variable formula lacks opening or closing brace: {}", str);
+  std::vector<std::string> args = Tokenizer(std::string(str+1, str+nstr), ",").as_vector();
+
+  int nvec = args.size();
+  vecs[ivar].n = nvec;
+  vecs[ivar].nmax = nvec;
+  vecs[ivar].currentstep = -1;
+  memory->destroy(vecs[ivar].values);
+  memory->create(vecs[ivar].values,vecs[ivar].nmax,"variable:values");
+
+  for (int i = 0; i < nvec; i++)
+    vecs[ivar].values[i] = utils::numeric(FLERR, utils::trim(args[i]), false, lmp);
+}
+
+/* ----------------------------------------------------------------------
    parse string for comma-separated args
    store copy of each arg in args array
    max allowed # of args = MAXFUNCARG
@@ -4697,7 +4885,6 @@ char *Variable::find_next_comma(char *str)
   }
   return nullptr;
 }
-
 
 /* ----------------------------------------------------------------------
    helper routine for printing variable name with error message

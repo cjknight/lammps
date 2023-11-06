@@ -221,6 +221,7 @@ void FixShakeKokkos<DeviceType>::pre_neighbor()
     k_map_array.template sync<DeviceType>();
   } else if (map_style == Atom::MAP_HASH) {
     k_map_hash = atomKK->k_map_hash;
+    k_map_hash.template sync<DeviceType>();
   }
 
   k_shake_flag.sync<DeviceType>();
@@ -248,6 +249,7 @@ void FixShakeKokkos<DeviceType>::pre_neighbor()
     k_map_array.template sync<DeviceType>();
   } else if (map_style == Atom::MAP_HASH) {
     k_map_hash = atomKK->k_map_hash;
+    k_map_hash.template sync<DeviceType>();
   }
 
   atomKK->k_sametag.sync<DeviceType>();
@@ -357,6 +359,7 @@ void FixShakeKokkos<DeviceType>::post_force(int vflag)
     k_map_array.template sync<DeviceType>();
   } else if (map_style == Atom::MAP_HASH) {
     k_map_hash = atomKK->k_map_hash;
+    k_map_hash.template sync<DeviceType>();
   }
 
   if (d_rmass.data())
@@ -404,7 +407,7 @@ void FixShakeKokkos<DeviceType>::post_force(int vflag)
 
   need_dup = 0;
   if (neighflag != HALF)
-    need_dup = std::is_same<typename NeedDup<HALFTHREAD,DeviceType>::value,Kokkos::Experimental::ScatterDuplicated>::value;
+    need_dup = std::is_same_v<NeedDup_v<HALFTHREAD,DeviceType>,Kokkos::Experimental::ScatterDuplicated>;
 
   // allocate duplicated memory
 

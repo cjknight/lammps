@@ -53,7 +53,8 @@ cdef extern from "mliap_data.h" namespace "LAMMPS_NS":
         # only neighbors strictly inside descriptor cutoff
 
         int ntotal              # total number of owned and ghost atoms on this proc
-        int nlistatoms          # current number of atoms in local atom lists
+        int nlistatoms          # current number of non-NULL atoms in local atom lists
+        int nlocal              # current number of NULL and normal atoms in local atom lists
         int natomneigh          # current number of atoms and ghosts in atom neighbor arrays
         int * numneighs         # neighbors count for each atom
         int * iatoms            # index of each atom
@@ -226,6 +227,10 @@ cdef class MLIAPDataPy:
     @property
     def nlistatoms(self):
         return self.data.nlistatoms
+
+    @property
+    def nlocal(self):
+        return self.data.nlocal
     
     @property
     def natomneigh(self):
@@ -280,6 +285,16 @@ cdef class MLIAPDataPy:
         if self.data.rij is NULL:
             return None
         return np.asarray(<double[:self.npairs, :3]> &self.data.rij[0][0])
+
+    @property
+    def rij_max(self):
+        if self.data.rij is NULL:
+            return None
+        return np.asarray(<double[:self.nneigh_max, :3]> &self.data.rij[0][0])
+
+    @property
+    def nneigh_max(self):
+        return self.data.nneigh_max
 
     @write_only_property
     def graddesc(self, value):
@@ -357,6 +372,7 @@ cdef public object mliap_unified_connect(char *fname, MLIAPDummyModel * model,
     unified_int.descriptor = descriptor
 
     unified.interface = unified_int
+    #print(unified_int)
 
     if unified.ndescriptors is None:
         raise ValueError("no descriptors set")
