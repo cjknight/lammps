@@ -57,6 +57,7 @@ template<int dir>
 struct TagPairSNAPComputeFusedDeidrjSmall{}; // more parallelism, more divergence
 template<int dir>
 struct TagPairSNAPComputeFusedDeidrjLarge{}; // less parallelism, no divergence
+struct TagPairSNAPComputeFusedX2DeidrjLarge{}; // less parallelism, no divergence
 
 // CPU backend only
 struct TagPairSNAPComputeNeighCPU{};
@@ -101,13 +102,13 @@ class PairSNAPKokkos : public PairSNAP {
   static constexpr int team_size_compute_neigh = 4;
   static constexpr int tile_size_compute_ck = 4;
   static constexpr int tile_size_pre_ui = 8;
-  static constexpr int team_size_compute_ui = 8;
+  static constexpr int team_size_compute_ui = 4;
   static constexpr int tile_size_transform_ui = 8;
   static constexpr int tile_size_compute_zi = 4;
   static constexpr int tile_size_compute_bi = 4;
   static constexpr int tile_size_transform_bi = 4;
   static constexpr int tile_size_compute_yi = 8;
-  static constexpr int team_size_compute_fused_deidrj = 2; //4;
+  static constexpr int team_size_compute_fused_deidrj = 2;
 #else
   static constexpr int team_size_compute_neigh = 4;
   static constexpr int tile_size_compute_ck = 4;
@@ -134,6 +135,9 @@ class PairSNAPKokkos : public PairSNAP {
   template <class Device, int num_teams, class TagPairSNAP>
   using SnapAoSoATeamPolicy = typename Kokkos::TeamPolicy<Device, Kokkos::LaunchBounds<vector_length * num_teams>, TagPairSNAP>;
 
+  template <class Device, int num_teams, class TagPairSNAP>
+  using SnapAoSoATeamPolicy16 = typename Kokkos::TeamPolicy<Device, Kokkos::SubGroupSize<16>, Kokkos::LaunchBounds<vector_length * num_teams>, TagPairSNAP>;
+  
   PairSNAPKokkos(class LAMMPS *);
   ~PairSNAPKokkos() override;
 
@@ -205,6 +209,9 @@ class PairSNAPKokkos : public PairSNAP {
   KOKKOS_INLINE_FUNCTION
   void operator() (TagPairSNAPComputeFusedDeidrjLarge<dir>,const typename Kokkos::TeamPolicy<DeviceType, TagPairSNAPComputeFusedDeidrjLarge<dir> >::member_type& team) const;
 
+  KOKKOS_INLINE_FUNCTION
+  void operator() (TagPairSNAPComputeFusedX2DeidrjLarge,const typename Kokkos::TeamPolicy<DeviceType, TagPairSNAPComputeFusedX2DeidrjLarge >::member_type& team) const;
+
   // CPU backend only
   KOKKOS_INLINE_FUNCTION
   void operator() (TagPairSNAPComputeNeighCPU,const typename Kokkos::TeamPolicy<DeviceType, TagPairSNAPComputeNeighCPU>::member_type& team) const;
@@ -268,6 +275,8 @@ class PairSNAPKokkos : public PairSNAP {
   Kokkos::View<real_type**, DeviceType> d_beta;                // betas for all atoms in list
   Kokkos::View<real_type***, Kokkos::LayoutLeft, DeviceType> d_beta_pack;          // betas for all atoms in list, GPU
 
+  sycl::global_ptr<int> d_ninside_;
+  
   typedef Kokkos::DualView<F_FLOAT**, DeviceType> tdual_fparams;
   tdual_fparams k_cutsq;
   typedef Kokkos::View<const F_FLOAT**, DeviceType,
@@ -297,7 +306,7 @@ class PairSNAPKokkos : public PairSNAP {
   friend void pair_virial_fdotr_compute<PairSNAPKokkos>(PairSNAPKokkos*);
 
   // Utility routine which wraps computing per-team scratch size requirements for
-  // ComputeNeigh, ComputeUi, and ComputeFusedDeidrj
+  // ComputeNeigh, ComputeUi, and ComputeFusedDeidpprj
   template <typename scratch_type>
   int scratch_size_helper(int values_per_team);
 

@@ -37,21 +37,32 @@ struct WignerWrapper {
   static constexpr int vector_length = vector_length_;
 
   const int offset; // my offset into the vector (0, ..., vector_length - 1)
-  real_type* buffer; // buffer of real numbers
+  //  real_type* buffer; // buffer of real numbers
+  sycl::local_ptr<real_type> buffer; // buffer of real numbers
+
+  KOKKOS_INLINE_FUNCTION
+  WignerWrapper(sycl::local_ptr<real_type> buffer_, const int offset_)
+    : offset(offset_), buffer(buffer_)
+  { ; }
 
   KOKKOS_INLINE_FUNCTION
   WignerWrapper(complex* buffer_, const int offset_)
-   : offset(offset_), buffer(reinterpret_cast<real_type*>(buffer_))
+    : offset(offset_), buffer(reinterpret_cast<real_type*>(buffer_))
   { ; }
+  //   : offset(offset_), buffer(reinterpret_cast<real_type*>(buffer_))
 
   KOKKOS_INLINE_FUNCTION
   complex get(const int& ma) const {
     return complex(buffer[offset + 2 * vector_length * ma], buffer[offset + vector_length + 2 * vector_length * ma]);
   }
 
+  //  void set(const int& ma, const complex& store) const {
   KOKKOS_INLINE_FUNCTION
   void set(const int& ma, const complex& store) const {
+    //    sycl::local_ptr<real_type> buffer_cc = const_cast<sycl::local_ptr<real_type> >(buffer);
+    const_cast<WignerWrapper<real_type_, vector_length_>*>(this)->
     buffer[offset + 2 * vector_length * ma] = store.re;
+    const_cast<WignerWrapper<real_type_, vector_length_>*>(this)->
     buffer[offset + vector_length + 2 * vector_length * ma] = store.im;
   }
 };
@@ -218,24 +229,35 @@ class SNAKokkos {
   KOKKOS_INLINE_FUNCTION
   void compute_fused_deidrj_large(const typename Kokkos::TeamPolicy<DeviceType>::member_type& team, const int, const int, const int); //ForceSNAP
 
+
+  KOKKOS_INLINE_FUNCTION
+  void compute_fusedx2_deidrj_large(const typename Kokkos::TeamPolicy<DeviceType>::member_type& team, const int, const int, const int); //ForceSNAP
+
   // core "evaluation" functions that get plugged into "compute" functions
   // plugged into compute_ui_small, compute_ui_large
   KOKKOS_FORCEINLINE_FUNCTION
-  void evaluate_ui_jbend(const WignerWrapper<real_type, vector_length>&, const complex&, const complex&, const real_type&, const int&,
+  void evaluate_ui_jbend(sycl::local_ptr<real_type>, const complex&, const complex&, const real_type&, const int&,
                         const int&, const int&, const int&);
   // plugged into compute_zi, compute_yi
   KOKKOS_FORCEINLINE_FUNCTION
   complex evaluate_zi(const int&, const int&, const int&, const int&, const int&, const int&, const int&, const int&, const int&,
-                        const int&, const int&, const int&, const int&, const real_type*);
+                      const int&, const int&, const int&, const int&, const sycl::global_ptr<real_type>);
   // plugged into compute_yi, compute_yi_with_zlist
   KOKKOS_FORCEINLINE_FUNCTION
   real_type evaluate_beta_scaled(const int&, const int&, const int&, const int&, const int&, const int&, const int&, const int&,
                         const Kokkos::View<real_type***, Kokkos::LayoutLeft, DeviceType> &);
   // plugged into compute_fused_deidrj_small, compute_fused_deidrj_large
+  #ifdef FUSED_PREFETCH_RPQ
   KOKKOS_FORCEINLINE_FUNCTION
-  real_type evaluate_duidrj_jbend(const WignerWrapper<real_type, vector_length>&, const complex&, const complex&, const real_type&,
-                        const WignerWrapper<real_type, vector_length>&, const complex&, const complex&, const real_type&,
-                        const int&, const int&, const int&, const int&);
+  real_type evaluate_duidrj_jbend(sycl::local_ptr<real_type>, const complex&, const complex&, const real_type&,
+                                  sycl::local_ptr<real_type>, const complex&, const complex&, const real_type&,
+                                  const int&, const int&, const int&, const int&, sycl::local_ptr<real_type>);
+  #else
+  KOKKOS_FORCEINLINE_FUNCTION
+  real_type evaluate_duidrj_jbend(sycl::local_ptr<real_type>, const complex&, const complex&, const real_type&,
+                                  sycl::local_ptr<real_type>, const complex&, const complex&, const real_type&,
+                                  const int&, const int&, const int&, const int&);
+  #endif
 
   // functions for bispectrum coefficients, CPU only
   KOKKOS_INLINE_FUNCTION
@@ -306,6 +328,25 @@ class SNAKokkos {
   t_sna_4c_ll da_pack; // `da`
   t_sna_4c_ll db_pack; // `db`
   t_sna_4d_ll sfac_pack; // sfac, dsfac_{x,y,z}
+
+  // Flattened arrays
+  int natom_div;
+  sycl::global_ptr<int> element_;
+  sycl::global_ptr<complex> a_pack_;
+  sycl::global_ptr<complex> b_pack_;
+  sycl::global_ptr<complex> da_pack_;
+  sycl::global_ptr<complex> db_pack_;
+  sycl::global_ptr<real_type> sfac_pack_;
+  sycl::global_ptr<real_type> dedr_;
+  sycl::global_ptr<real_type> ylist_r_;
+  sycl::global_ptr<real_type> ylist_i_;
+  sycl::global_ptr<real_type> cglist_;
+  sycl::global_ptr<complex> ulisttot_;
+  sycl::global_ptr<real_type> ulisttot_r_;
+  sycl::global_ptr<real_type> ulisttot_i_;
+  sycl::global_ptr<int> idxu_block_;
+  sycl::global_ptr<int> idxu_half_block_;
+  sycl::global_ptr<real_type> rootpqarray_;
 
   t_sna_4d_ll ulisttot_re_pack; // split real,
   t_sna_4d_ll ulisttot_im_pack; // imag, AoSoA, flattened

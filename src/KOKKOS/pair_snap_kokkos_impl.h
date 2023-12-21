@@ -63,6 +63,10 @@ PairSNAPKokkos<DeviceType, real_type, vector_length>::PairSNAPKokkos(LAMMPS *lmp
   datamask_read = EMPTY_MASK;
   datamask_modify = EMPTY_MASK;
 
+  k_cutsq = tdual_fparams("PairSNAPKokkos::cutsq",atom->ntypes+1,atom->ntypes+1);
+  auto d_cutsq = k_cutsq.template view<DeviceType>();
+  rnd_cutsq = d_cutsq;
+
   host_flag = (execution_space == Host);
 }
 
@@ -107,14 +111,6 @@ void PairSNAPKokkos<DeviceType, real_type, vector_length>::init_style()
   request->set_kokkos_device(std::is_same_v<DeviceType,LMPDeviceType>);
   if (neighflag == FULL)
     error->all(FLERR,"Must use half neighbor list style with pair snap/kk");
-
-#ifdef _WORK_HARDER
-  num_overtime = 2;
-  int hard_working_ranks[6] = {0, 2, 4, 6, 8, 10};
-  work_harder = 0;
-  for(int i=0; i<6; ++i) if(comm->me == hard_working_ranks[i]) work_harder = 1;
-  if(work_harder) printf("MOD:: Rank %i is working harder w/ num_overtime= %i\n",comm->me,num_overtime);
-#endif
 }
 
 /* ---------------------------------------------------------------------- */
@@ -206,11 +202,7 @@ void PairSNAPKokkos<DeviceType, real_type, vector_length>::compute(int eflag_in,
 
   int team_size_default = 1;
   if (!host_flag)
-#if defined(CHRIS_TEAM)
-     team_size_default = CHRIS_TEAM;
-#else
-     team_size_default = 32;//max_neighs;
-#endif
+    team_size_default = 32;//max_neighs;
 
   if (beta_max < inum) {
     beta_max = inum;
@@ -218,6 +210,7 @@ void PairSNAPKokkos<DeviceType, real_type, vector_length>::compute(int eflag_in,
     if (!host_flag)
       MemKK::realloc_kokkos(d_beta_pack,"PairSNAPKokkos:beta_pack",vector_length,ncoeff,(inum + vector_length - 1) / vector_length);
     MemKK::realloc_kokkos(d_ninside,"PairSNAPKokkos:ninside",inum);
+    d_ninside_ = d_ninside.impl_map().data();
   }
 
   chunk_size = MIN(chunksize,inum); // "chunksize" variable is set by user
@@ -416,11 +409,8 @@ void PairSNAPKokkos<DeviceType, real_type, vector_length>::compute(int eflag_in,
         } else {
           Snap3DRangePolicy<DeviceType, tile_size_compute_yi, TagPairSNAPComputeYi>
               policy_compute_yi({0,0,0},{vector_length,idxz_max,chunk_size_div},{vector_length,tile_size_compute_yi,1});
-	  Kokkos::parallel_for("ComputeYi",policy_compute_yi,*this);
-#ifdef _WORK_HARDER
-	  if(work_harder) for(int i=0; i<num_overtime; ++i) Kokkos::parallel_for("ComputeYi",policy_compute_yi,*this);
-#endif
-	}
+          Kokkos::parallel_for("ComputeYi",policy_compute_yi,*this);
+        }
       }
 
       // Fused ComputeDuidrj, ComputeDeidrj
@@ -439,19 +429,27 @@ void PairSNAPKokkos<DeviceType, real_type, vector_length>::compute(int eflag_in,
           const int n_teams = chunk_size_div * max_neighs * (twojmax + 1);
           const int n_teams_div = (n_teams + team_size_compute_fused_deidrj - 1) / team_size_compute_fused_deidrj;
 
+          #ifdef FUSED_PREFETCH_RPQ
+          const int fused_scratch = scratch_size +
+            scratch_size_helper<real_type>(team_size_compute_fused_deidrj *
+                                           32);
+          #else
+          const int fused_scratch = scratch_size;
+          #endif
+          
           // x direction
           SnapAoSoATeamPolicy<DeviceType, team_size_compute_fused_deidrj, TagPairSNAPComputeFusedDeidrjSmall<0> > policy_fused_deidrj_x(n_teams_div,team_size_compute_fused_deidrj,vector_length);
-          policy_fused_deidrj_x = policy_fused_deidrj_x.set_scratch_size(0, Kokkos::PerTeam(scratch_size));
+          policy_fused_deidrj_x = policy_fused_deidrj_x.set_scratch_size(0, Kokkos::PerTeam(fused_scratch));
           Kokkos::parallel_for("ComputeFusedDeidrjSmall<0>",policy_fused_deidrj_x,*this);
 
           // y direction
           SnapAoSoATeamPolicy<DeviceType, team_size_compute_fused_deidrj, TagPairSNAPComputeFusedDeidrjSmall<1> > policy_fused_deidrj_y(n_teams_div,team_size_compute_fused_deidrj,vector_length);
-          policy_fused_deidrj_y = policy_fused_deidrj_y.set_scratch_size(0, Kokkos::PerTeam(scratch_size));
+          policy_fused_deidrj_y = policy_fused_deidrj_y.set_scratch_size(0, Kokkos::PerTeam(fused_scratch));
           Kokkos::parallel_for("ComputeFusedDeidrjSmall<1>",policy_fused_deidrj_y,*this);
 
           // z direction
           SnapAoSoATeamPolicy<DeviceType, team_size_compute_fused_deidrj, TagPairSNAPComputeFusedDeidrjSmall<2> > policy_fused_deidrj_z(n_teams_div,team_size_compute_fused_deidrj,vector_length);
-          policy_fused_deidrj_z = policy_fused_deidrj_z.set_scratch_size(0, Kokkos::PerTeam(scratch_size));
+          policy_fused_deidrj_z = policy_fused_deidrj_z.set_scratch_size(0, Kokkos::PerTeam(fused_scratch));
           Kokkos::parallel_for("ComputeFusedDeidrjSmall<2>",policy_fused_deidrj_z,*this);
         } else {
           // Version w/out parallelism over j_bend
@@ -460,21 +458,58 @@ void PairSNAPKokkos<DeviceType, real_type, vector_length>::compute(int eflag_in,
           const int n_teams = chunk_size_div * max_neighs;
           const int n_teams_div = (n_teams + team_size_compute_fused_deidrj - 1) / team_size_compute_fused_deidrj;
 
+#ifdef FUSED_X2
+          // fused direction
+          #ifdef FUSED_PREFETCH_RPQ
+          const int fused_scratch = scratch_size*2 +
+            scratch_size_helper<real_type>(team_size_compute_fused_deidrj *
+                                           32);
+          #else
+          const int fused_scratch = scratch_size*2;
+          #endif
+          #ifndef FUSED_SIMD16
+          SnapAoSoATeamPolicy<DeviceType, team_size_compute_fused_deidrj, TagPairSNAPComputeFusedX2DeidrjLarge > policy_fusedx2_deidrj(n_teams_div,team_size_compute_fused_deidrj,vector_length);
+          #else
+          SnapAoSoATeamPolicy16<DeviceType, team_size_compute_fused_deidrj, TagPairSNAPComputeFusedX2DeidrjLarge > policy_fusedx2_deidrj(n_teams_div,team_size_compute_fused_deidrj,vector_length);
+          #endif          
+          policy_fusedx2_deidrj = policy_fusedx2_deidrj.set_scratch_size(0, Kokkos::PerTeam(fused_scratch));
+          Kokkos::parallel_for("ComputeFusedX2DeidrjLarge",policy_fusedx2_deidrj,*this);
+#else
+          #ifdef FUSED_PREFETCH_RPQ
+          const int fused_scratch = scratch_size +
+            scratch_size_helper<real_type>(team_size_compute_fused_deidrj *
+                                           32);
+          #else
+          const int fused_scratch = scratch_size;
+          #endif
+
           // x direction
+          #ifndef FUSED_SIMD16
           SnapAoSoATeamPolicy<DeviceType, team_size_compute_fused_deidrj, TagPairSNAPComputeFusedDeidrjLarge<0> > policy_fused_deidrj_x(n_teams_div,team_size_compute_fused_deidrj,vector_length);
-          policy_fused_deidrj_x = policy_fused_deidrj_x.set_scratch_size(0, Kokkos::PerTeam(scratch_size));
+          #else
+          SnapAoSoATeamPolicy16<DeviceType, team_size_compute_fused_deidrj, TagPairSNAPComputeFusedDeidrjLarge<0> > policy_fused_deidrj_x(n_teams_div,team_size_compute_fused_deidrj,vector_length);
+          #endif
+          policy_fused_deidrj_x = policy_fused_deidrj_x.set_scratch_size(0, Kokkos::PerTeam(fused_scratch));
           Kokkos::parallel_for("ComputeFusedDeidrjLarge<0>",policy_fused_deidrj_x,*this);
 
           // y direction
+          #ifndef FUSED_SIMD16
           SnapAoSoATeamPolicy<DeviceType, team_size_compute_fused_deidrj, TagPairSNAPComputeFusedDeidrjLarge<1> > policy_fused_deidrj_y(n_teams_div,team_size_compute_fused_deidrj,vector_length);
-          policy_fused_deidrj_y = policy_fused_deidrj_y.set_scratch_size(0, Kokkos::PerTeam(scratch_size));
+          #else
+          SnapAoSoATeamPolicy16<DeviceType, team_size_compute_fused_deidrj, TagPairSNAPComputeFusedDeidrjLarge<1> > policy_fused_deidrj_y(n_teams_div,team_size_compute_fused_deidrj,vector_length);
+          #endif
+          policy_fused_deidrj_y = policy_fused_deidrj_y.set_scratch_size(0, Kokkos::PerTeam(fused_scratch));
           Kokkos::parallel_for("ComputeFusedDeidrjLarge<1>",policy_fused_deidrj_y,*this);
 
           // z direction
+          #ifndef FUSED_SIMD16
           SnapAoSoATeamPolicy<DeviceType, team_size_compute_fused_deidrj, TagPairSNAPComputeFusedDeidrjLarge<2> > policy_fused_deidrj_z(n_teams_div,team_size_compute_fused_deidrj,vector_length);
-          policy_fused_deidrj_z = policy_fused_deidrj_z.set_scratch_size(0, Kokkos::PerTeam(scratch_size));
+          #else
+          SnapAoSoATeamPolicy16<DeviceType, team_size_compute_fused_deidrj, TagPairSNAPComputeFusedDeidrjLarge<2> > policy_fused_deidrj_z(n_teams_div,team_size_compute_fused_deidrj,vector_length);
+          #endif
+          policy_fused_deidrj_z = policy_fused_deidrj_z.set_scratch_size(0, Kokkos::PerTeam(fused_scratch));
           Kokkos::parallel_for("ComputeFusedDeidrjLarge<2>",policy_fused_deidrj_z,*this);
-
+#endif
         }
       }
 
@@ -557,9 +592,6 @@ void PairSNAPKokkos<DeviceType, real_type, vector_length>::allocate()
 
   int n = atom->ntypes;
   MemKK::realloc_kokkos(d_map,"PairSNAPKokkos::map",n+1);
-
-  MemKK::realloc_kokkos(k_cutsq,"PairSNAPKokkos::cutsq",n+1,n+1);
-  rnd_cutsq = k_cutsq.template view<DeviceType>();
 }
 
 
@@ -871,11 +903,9 @@ void PairSNAPKokkos<DeviceType, real_type, vector_length>::operator() (TagPairSN
     } else if (mapper.flip_sign == -1) {
       utot_re = -utot_re;
     }
-#ifdef _SWITCH_ULISTTOT_PACK
-    my_sna.ulisttot_pack(idxu, iatom_mod, ielem, iatom_div) = { utot_re, utot_im };
-#else
+
     my_sna.ulisttot_pack(iatom_mod, idxu, ielem, iatom_div) = { utot_re, utot_im };
-#endif
+
     if (mapper.flip_sign == 0) {
       my_sna.ylist_pack_re(iatom_mod, mapper.idxu_half, ielem, iatom_div) = 0.;
       my_sna.ylist_pack_im(iatom_mod, mapper.idxu_half, ielem, iatom_div) = 0.;
@@ -1003,10 +1033,35 @@ void PairSNAPKokkos<DeviceType, real_type, vector_length>::operator() (TagPairSN
     const int ii = iatom_mod + vector_length * iatom_div;
     if (ii >= chunk_size) return;
 
-    const int ninside = d_ninside(ii);
+    const int ninside = d_ninside_[ii];
     if (jj >= ninside) return;
 
     my_sna.template compute_fused_deidrj_large<dir>(team, iatom_mod, jj, iatom_div);
+
+  });
+}
+
+template<class DeviceType, typename real_type, int vector_length>
+KOKKOS_INLINE_FUNCTION
+void PairSNAPKokkos<DeviceType, real_type, vector_length>::operator() (TagPairSNAPComputeFusedX2DeidrjLarge,const typename Kokkos::TeamPolicy<DeviceType,TagPairSNAPComputeFusedX2DeidrjLarge >::member_type& team) const {
+  SNAKokkos<DeviceType, real_type, vector_length> my_sna = snaKK;
+
+  // extract flattened atom_div / neighbor number / bend location
+  int flattened_idx = team.team_rank() + team.league_rank() * team_size_compute_fused_deidrj;
+
+  // extract neighbor index, iatom_div
+  int iatom_div = flattened_idx / max_neighs; // removed "const" to work around GCC 7 bug
+  int jj = flattened_idx - max_neighs * iatom_div;
+
+  Kokkos::parallel_for(Kokkos::ThreadVectorRange(team, vector_length),
+    [&] (const int iatom_mod) {
+    const int ii = iatom_mod + vector_length * iatom_div;
+    if (ii >= chunk_size) return;
+
+    const int ninside = d_ninside_[ii];
+    if (jj >= ninside) return;
+
+    my_sna.compute_fusedx2_deidrj_large(team, iatom_mod, jj, iatom_div);
 
   });
 }
