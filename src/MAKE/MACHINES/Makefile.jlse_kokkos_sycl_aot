@@ -53,7 +53,8 @@ COMMON_FLAGS += -ffast-math -ffp-contract=fast
 #COMMON_FLAGS += -fsycl-targets=spir64_gen-unknown-unknown-sycldevice -Xsycl-target-backend "-device xehp"
 #COMMON_FLAGS += -fsycl-targets=spir64_gen -Xsycl-target-backend "-device 12.1.0,12.4.1"
 #COMMON_FLAGS += -fsycl-targets=spir64_gen -Xsycl-target-backend "-device 12.50.4"
-COMMON_FLAGS += -fsycl-targets=spir64_gen -Xsycl-target-backend "-device 12.60.7"
+COMMON_FLAGS += -fsycl-targets=spir64_gen -Xsycl-target-backend "-device pvc"
+#COMMON_FLAGS += -fsycl-targets=spir64_gen -Xsycl-target-backend "-device pvc -options -ze-intel-enable-auto-large-GRF-mode"
 #COMMON_FLAGS += -fsycl-targets=spir64_gen -Xsycl-target-backend "-device 12.60.7 -internal_options -cl-intel-compile-one-at-time"
 #COMMON_FLAGS += -fsycl-id-queries-fit-in-int
 #COMMON_FLAGS += -fno-sycl-early-optimizations
@@ -71,6 +72,7 @@ COMMON_FLAGS += $(CHRIS_EXTRA)
 CC =            mpicxx
 CCFLAGS =       $(COMMON_FLAGS)
 CCFLAGS +=      -DLAMMPS_MEMALIGN=64
+#CCFLAGS +=      -DFUSED_PREFETCH_RPQ
 SHFLAGS =       -fPIC
 DEPFLAGS =      -M
 
@@ -80,6 +82,7 @@ LINKFLAGS =     $(COMMON_FLAGS)
 LIB =           -L$(TBBROOT)/lib/intel64/gcc4.8 -ltbbmalloc -lstdc++
 LIB +=          ${KOKKOS_HOME}/lib64/libkokkoscore.a
 LIB +=          ${KOKKOS_HOME}/lib64/libkokkoscontainers.a
+#LIB +=          -L${KOKKOS_HOME}/lib64 -lkokkoscore -lkokkoscontainers
 #LIB +=          -L$(ITT)/lib64 -littnotify
 SIZE =          size
 endif
