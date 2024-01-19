@@ -50,6 +50,8 @@ endif
 # PACKEXT    = subset that require an external (downloaded) library
 
 PACKAGE = \
+	molecule \
+	kspace \
 	adios \
 	amoeba \
 	asphere \
@@ -86,7 +88,6 @@ PACKAGE = \
 	interlayer \
 	kim \
 	kokkos \
-	kspace \
 	latboltz \
 	lepton \
 	machdyn \
@@ -105,7 +106,6 @@ PACKAGE = \
 	ml-rann \
 	ml-snap \
 	mofff \
-	molecule \
 	molfile \
 	netcdf \
 	openmp \
@@ -144,9 +144,11 @@ PACKAGE = \
 # NOTE: the last four packages must remain at the end since
 # they depend on other packages to be installed first.
 
-PACKBASIC = kspace manybody molecule rigid
+PACKBASIC = molecule kspace manybody rigid
 
 PACKMOST = \
+	kspace \
+	molecule \
 	amoeba \
 	asphere \
 	bocs \
@@ -174,7 +176,6 @@ PACKMOST = \
 	fep \
 	granular \
 	interlayer \
-	kspace \
 	manybody \
 	mc \
 	meam \
@@ -182,7 +183,6 @@ PACKMOST = \
 	misc \
 	ml-snap \
 	mofff \
-	molecule \
 	openmp \
 	opt \
 	orient \
@@ -475,7 +475,7 @@ tar:
 	@cd STUBS; $(MAKE)
 	@echo "Created $(ROOT)_src.tar.gz"
 
-check: check-whitespace check-permissions check-homepage check-errordocs check-version
+check: check-whitespace check-permissions check-homepage check-errordocs check-docs check-version
 
 check-whitespace:
 	$(PYTHON) ../tools/coding_standard/whitespace.py ..
@@ -501,8 +501,12 @@ check-errordocs:
 fix-errordocs:
 	$(PYTHON) ../tools/coding_standard/errordocs.py .. -f
 
+check-docs:
+	$(MAKE) $(MFLAGS) -C ../doc anchor_check style_check package_check role_check
+
 check-version:
-	$(PYTHON) ../tools/coding_standard/versiontags.py ..
+	$(PYTHON) ../tools/coding_standard/versiontags.py .. || echo
+
 
 format-src:
 	clang-format -i --verbose --style=file *.cpp *.h */*.cpp */*.h
