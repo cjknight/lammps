@@ -68,17 +68,18 @@ COMMON_FLAGS += -fsycl-targets=spir64_gen -Xsycl-target-backend "-device pvc"
 COMMON_FLAGS += -I$(KOKKOS_HOME)/include
 COMMON_FLAGS += $(CHRIS_EXTRA)
 #COMMON_FLAGS += -I$(ITT)/include
+COMMON_FLAGS += -fsycl-device-code-split=per_kernel
 
 CC =            mpicxx
 CCFLAGS =       $(COMMON_FLAGS)
 CCFLAGS +=      -DLAMMPS_MEMALIGN=64
-#CCFLAGS +=      -DFUSED_PREFETCH_RPQ
+CCFLAGS +=      -DFUSED_PREFETCH_RPQ
 SHFLAGS =       -fPIC
 DEPFLAGS =      -M
 
 LINK =          $(CC)
 LINKFLAGS =     $(COMMON_FLAGS)
-#LINKFLAGS +=    -fsycl-max-parallel-link-jobs=5
+LINKFLAGS +=    -fsycl-link-huge-device-code -fsycl-max-parallel-link-jobs=64
 LIB =           -L$(TBBROOT)/lib/intel64/gcc4.8 -ltbbmalloc -lstdc++
 LIB +=          ${KOKKOS_HOME}/lib64/libkokkoscore.a
 LIB +=          ${KOKKOS_HOME}/lib64/libkokkoscontainers.a
@@ -121,9 +122,9 @@ MPI_LIB =
 # PATH = path for FFT library
 # LIB = name of FFT library
 
-FFT_INC =
-FFT_PATH =
-FFT_LIB =
+FFT_INC = -DFFT_MKLGPU
+FFT_PATH = 
+FFT_LIB = -Wl,-rpath=$(MKL_ROOT)/lib/intel64 $(MKL_ROOT)/lib/intel64/libmkl_sycl.so $(MKL_ROOT)/lib/intel64/libmkl_intel_ilp64.so $(MKL_ROOT)/lib/intel64/libmkl_tbb_thread.so $(MKL_ROOT)/lib/intel64/libmkl_core.so
 
 # JPEG and/or PNG library
 # see discussion in Section 3.5.4 of manual
