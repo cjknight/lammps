@@ -40,7 +40,6 @@ LIB =           -L$(TBBROOT)/lib/intel64/gcc4.8 -ltbbmalloc -lstdc++
 LIB +=          ${KOKKOS_HOME}/lib64/libkokkoscore.a
 LIB +=          ${KOKKOS_HOME}/lib64/libkokkoscontainers.a
 SIZE =          size
-endif
 
 ARCHIVE =	ar
 ARFLAGS =	-rc
