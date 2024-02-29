@@ -1299,7 +1299,7 @@ struct alignas(4 * sizeof(int)) reax_int4 {
 
 #ifdef LMP_KOKKOS_GPU
  #if defined(KOKKOS_ENABLE_SYCL)
-  #define SNAP_KOKKOS_DEVICE_VECLEN 32
+  #define SNAP_KOKKOS_DEVICE_VECLEN 16
  #else
   #define SNAP_KOKKOS_DEVICE_VECLEN 32
  #endif
