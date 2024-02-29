@@ -54,6 +54,7 @@ COMMON_FLAGS += -ffast-math -ffp-contract=fast
 #COMMON_FLAGS += -fsycl-targets=spir64_gen -Xsycl-target-backend "-device 12.1.0,12.4.1"
 #COMMON_FLAGS += -fsycl-targets=spir64_gen -Xsycl-target-backend "-device 12.50.4"
 COMMON_FLAGS += -fsycl-targets=spir64_gen -Xsycl-target-backend "-device pvc"
+COMMON_FLAGS += -fsycl-device-code-split=per_kernel
 #COMMON_FLAGS += -fsycl-targets=spir64_gen -Xsycl-target-backend "-device pvc -options -ze-intel-enable-auto-large-GRF-mode"
 #COMMON_FLAGS += -fsycl-targets=spir64_gen -Xsycl-target-backend "-device 12.60.7 -internal_options -cl-intel-compile-one-at-time"
 #COMMON_FLAGS += -fsycl-id-queries-fit-in-int
@@ -78,7 +79,7 @@ DEPFLAGS =      -M
 
 LINK =          $(CC)
 LINKFLAGS =     $(COMMON_FLAGS)
-#LINKFLAGS +=    -fsycl-max-parallel-link-jobs=5
+LINKFLAGS +=    -fsycl-max-parallel-link-jobs=64
 LIB =           -L$(TBBROOT)/lib/intel64/gcc4.8 -ltbbmalloc -lstdc++
 LIB +=          ${KOKKOS_HOME}/lib64/libkokkoscore.a
 LIB +=          ${KOKKOS_HOME}/lib64/libkokkoscontainers.a
