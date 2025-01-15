@@ -163,12 +163,12 @@ void PairGranHookeHistoryKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
   d_firstshear = fix_historyKK->k_firstvalue.template view<DeviceType>();
 
   Kokkos::deep_copy(d_firsttouch,0);
-  
+
   EV_FLOAT ev;
 
   if (neighflag == HALF) {
     if (force->newton_pair) {
-      if (vflag_either) { // VFLAG == 1
+      if (vflag_either) {
         if (shearupdate) {
           Kokkos::parallel_reduce(Kokkos::RangePolicy<DeviceType, TagPairGranHookeHistoryCompute<HALF,1,1,1>>(0,inum),*this, ev);
         } else {
@@ -198,7 +198,7 @@ void PairGranHookeHistoryKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
     }
   } else { // HALFTHREAD
     if (force->newton_pair) {
-      if (vflag_either) { // VFLAG == 0
+      if (vflag_either) {
         if (shearupdate) {
           Kokkos::parallel_reduce(Kokkos::RangePolicy<DeviceType, TagPairGranHookeHistoryCompute<HALFTHREAD,1,1,1>>(0,inum),*this, ev);
         } else {
@@ -212,7 +212,7 @@ void PairGranHookeHistoryKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
         }
       }
     } else {
-      if (vflag_global) {
+      if (vflag_either) {
         if (shearupdate) {
           Kokkos::parallel_reduce(Kokkos::RangePolicy<DeviceType, TagPairGranHookeHistoryCompute<HALFTHREAD,0,1,1>>(0,inum),*this, ev);
         } else {
@@ -227,7 +227,7 @@ void PairGranHookeHistoryKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
       }
     }
   }
-  
+
   if (eflag_atom) {
     k_eatom.template modify<DeviceType>();
     k_eatom.template sync<LMPHostType>();
@@ -241,7 +241,7 @@ void PairGranHookeHistoryKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
     virial[4] += ev.v[4];
     virial[5] += ev.v[5];
   }
-  
+
   if (vflag_atom) {
     k_vatom.template modify<DeviceType>();
     k_vatom.template sync<LMPHostType>();
@@ -300,7 +300,7 @@ void PairGranHookeHistoryKokkos<DeviceType>::operator()(TagPairGranHookeHistoryC
     const LMP_FLOAT jmass = rmass[j];
     const LMP_FLOAT jrad = radius[j];
     const LMP_FLOAT radsum = irad + jrad;
-      
+
     // check for touching neighbors
 
     if (rsq >= radsum * radsum) {
@@ -422,7 +422,7 @@ void PairGranHookeHistoryKokkos<DeviceType>::operator()(TagPairGranHookeHistoryC
     fx_i += fx;
     fy_i += fy;
     fz_i += fz;
-    
+
     F_FLOAT tor1 = rinv * (dely*fs3 - delz*fs2);
     F_FLOAT tor2 = rinv * (delz*fs1 - delx*fs3);
     F_FLOAT tor3 = rinv * (delx*fs2 - dely*fs1);
@@ -466,8 +466,8 @@ template<class DeviceType>
 template<int NEIGHFLAG, int NEWTON_PAIR>
 KOKKOS_INLINE_FUNCTION
 void PairGranHookeHistoryKokkos<DeviceType>::ev_tally_xyz(EV_FLOAT &ev, int i, int j,
-							  F_FLOAT fx, F_FLOAT fy, F_FLOAT fz,
-							  X_FLOAT delx, X_FLOAT dely, X_FLOAT delz) const
+                                                          F_FLOAT fx, F_FLOAT fy, F_FLOAT fz,
+                                                          X_FLOAT delx, X_FLOAT dely, X_FLOAT delz) const
 {
   Kokkos::View<F_FLOAT*[6], typename DAT::t_virial_array::array_layout,typename KKDevice<DeviceType>::value,Kokkos::MemoryTraits<AtomicF<NEIGHFLAG>::value> > v_vatom = k_vatom.view<DeviceType>();
 
@@ -477,7 +477,7 @@ void PairGranHookeHistoryKokkos<DeviceType>::ev_tally_xyz(EV_FLOAT &ev, int i, i
   const F_FLOAT v3 = delx*fy;
   const F_FLOAT v4 = delx*fz;
   const F_FLOAT v5 = dely*fz;
-  
+
   if (vflag_global) {
     if (NEWTON_PAIR) { // neigh half, newton on
       ev.v[0] += v0;
@@ -488,26 +488,26 @@ void PairGranHookeHistoryKokkos<DeviceType>::ev_tally_xyz(EV_FLOAT &ev, int i, i
       ev.v[5] += v5;
     } else { // neigh half, newton off
       if (i < nlocal) {
-	ev.v[0] += 0.5*v0;
-	ev.v[1] += 0.5*v1;
-	ev.v[2] += 0.5*v2;
-	ev.v[3] += 0.5*v3;
-	ev.v[4] += 0.5*v4;
-	ev.v[5] += 0.5*v5;
+        ev.v[0] += 0.5*v0;
+        ev.v[1] += 0.5*v1;
+        ev.v[2] += 0.5*v2;
+        ev.v[3] += 0.5*v3;
+        ev.v[4] += 0.5*v4;
+        ev.v[5] += 0.5*v5;
       }
       if (j < nlocal) {
-	ev.v[0] += 0.5*v0;
-	ev.v[1] += 0.5*v1;
-	ev.v[2] += 0.5*v2;
-	ev.v[3] += 0.5*v3;
-	ev.v[4] += 0.5*v4;
-	ev.v[5] += 0.5*v5;
+        ev.v[0] += 0.5*v0;
+        ev.v[1] += 0.5*v1;
+        ev.v[2] += 0.5*v2;
+        ev.v[3] += 0.5*v3;
+        ev.v[4] += 0.5*v4;
+        ev.v[5] += 0.5*v5;
       }
-    } 
+    }
   }
-  
+
   if (vflag_atom) {
-    
+
     if (NEWTON_PAIR || i < nlocal) {
       v_vatom(i,0) += 0.5*v0;
       v_vatom(i,1) += 0.5*v1;
@@ -524,9 +524,7 @@ void PairGranHookeHistoryKokkos<DeviceType>::ev_tally_xyz(EV_FLOAT &ev, int i, i
       v_vatom(j,4) += 0.5*v4;
       v_vatom(j,5) += 0.5*v5;
     }
-    
   }
-
 }
 
 namespace LAMMPS_NS {
