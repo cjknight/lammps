@@ -26,7 +26,7 @@ PairStyle(mace,PairMACE);
 #define LMP_PAIR_MACE_H
 
 #include "pair.h"
-
+#include "group.h"
 #include <torch/torch.h>
 #include <torch/script.h>
 
@@ -47,6 +47,10 @@ class PairMACE : public Pair {
 
  protected:
 
+  int groupbit_nnp;           // bitmask of the NNP group (persistent)
+  int nnp_local = 0;          // optional debug: #local NNP atoms on this rank
+  int nnp_ghost = 0;          // optional debug: #ghost NNP atoms on this rank
+
   bool domain_decomposition = true;
   torch::Device device = torch::kCPU;
   torch::jit::script::Module model;
@@ -56,6 +60,13 @@ class PairMACE : public Pair {
   int64_t num_interactions;
   std::vector<int64_t> mace_atomic_numbers;
   std::vector<int64_t> lammps_atomic_numbers;
+  
+  // Unit conversion variables
+  bool need_unit_conversion = false;
+  double energy_conv_factor = 1.0;   // Conversion factor for energy
+  double distance_conv_factor = 1.0; // Conversion factor for distance
+  double force_conv_factor = 1.0;    // Conversion factor for force
+  
   int mace_type(int lammps_type);
   const std::array<std::string,118> periodic_table =
     { "H", "He",
