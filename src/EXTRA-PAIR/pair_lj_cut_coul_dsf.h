@@ -45,7 +45,8 @@ class PairLJCutCoulDSF : public Pair {
   double **cut_lj, **cut_ljsq;
   double **epsilon, **sigma;
   double **lj1, **lj2, **lj3, **lj4, **offset;
-
+  double **scale;
+  
   double cut_coul, cut_coulsq;
   double alpha;
   double f_shift, e_shift;

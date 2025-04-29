@@ -62,6 +62,8 @@ PairLJCutCoulDSF::~PairLJCutCoulDSF()
     memory->destroy(lj3);
     memory->destroy(lj4);
     memory->destroy(offset);
+
+    memory->destroy(scale);
   }
 }
 
@@ -127,12 +129,12 @@ void PairLJCutCoulDSF::compute(int eflag, int vflag)
 
         if (rsq < cut_ljsq[itype][jtype]) {
           r6inv = r2inv*r2inv*r2inv;
-          forcelj = r6inv * (lj1[itype][jtype]*r6inv - lj2[itype][jtype]);
+          forcelj = scale[itype][jtype] * r6inv * (lj1[itype][jtype]*r6inv - lj2[itype][jtype]);
         } else forcelj = 0.0;
 
         if (rsq < cut_coulsq) {
           r = sqrt(rsq);
-          prefactor = qqrd2e*qtmp*q[j]/r;
+          prefactor = scale[itype][jtype] * qqrd2e*qtmp*q[j]/r;
           erfcd = exp(-alpha*alpha*r*r);
           t = 1.0 / (1.0 + EWALD_P*alpha*r);
           erfcc = t * (A1+t*(A2+t*(A3+t*(A4+t*A5)))) * erfcd;
@@ -155,7 +157,7 @@ void PairLJCutCoulDSF::compute(int eflag, int vflag)
           if (rsq < cut_ljsq[itype][jtype]) {
             evdwl = r6inv*(lj3[itype][jtype]*r6inv-lj4[itype][jtype]) -
                     offset[itype][jtype];
-            evdwl *= factor_lj;
+            evdwl *= factor_lj * scale[itype][jtype];
           } else evdwl = 0.0;
 
           if (rsq < cut_coulsq) {
@@ -183,9 +185,12 @@ void PairLJCutCoulDSF::allocate()
   int n = atom->ntypes;
 
   memory->create(setflag,n+1,n+1,"pair:setflag");
+  memory->create(scale,n+1,n+1,"pair:scale");
   for (int i = 1; i <= n; i++)
-    for (int j = i; j <= n; j++)
+    for (int j = i; j <= n; j++) {
       setflag[i][j] = 0;
+      scale[i][j] = 1.0;
+    }
 
   memory->create(cutsq,n+1,n+1,"pair:cutsq");
 
@@ -250,6 +255,7 @@ void PairLJCutCoulDSF::coeff(int narg, char **arg)
       epsilon[i][j] = epsilon_one;
       sigma[i][j] = sigma_one;
       cut_lj[i][j] = cut_lj_one;
+      scale[i][j] = 1.0;
       setflag[i][j] = 1;
       count++;
     }
@@ -287,6 +293,7 @@ double PairLJCutCoulDSF::init_one(int i, int j)
                                sigma[i][i],sigma[j][j]);
     sigma[i][j] = mix_distance(sigma[i][i],sigma[j][j]);
     cut_lj[i][j] = mix_distance(cut_lj[i][i],cut_lj[j][j]);
+    scale[i][j] = 1.0;
   }
 
   double cut = MAX(cut_lj[i][j],cut_coul);
@@ -308,6 +315,7 @@ double PairLJCutCoulDSF::init_one(int i, int j)
   lj3[j][i] = lj3[i][j];
   lj4[j][i] = lj4[i][j];
   offset[j][i] = offset[i][j];
+  scale[j][i] = scale[i][j];
 
   // compute I,J contribution to long-range tail correction
   // count total # of atoms of type I and J via Allreduce
@@ -349,6 +357,7 @@ void PairLJCutCoulDSF::write_restart(FILE *fp)
   int i,j;
   for (i = 1; i <= atom->ntypes; i++)
     for (j = i; j <= atom->ntypes; j++) {
+      fwrite(&scale[i][j],sizeof(double),1,fp);
       fwrite(&setflag[i][j],sizeof(int),1,fp);
       if (setflag[i][j]) {
         fwrite(&epsilon[i][j],sizeof(double),1,fp);
@@ -371,7 +380,11 @@ void PairLJCutCoulDSF::read_restart(FILE *fp)
   int me = comm->me;
   for (i = 1; i <= atom->ntypes; i++)
     for (j = i; j <= atom->ntypes; j++) {
-      if (me == 0) utils::sfread(FLERR,&setflag[i][j],sizeof(int),1,fp,nullptr,error);
+      if (me == 0) {
+	utils::sfread(FLERR,&scale[i][j],sizeof(int),1,fp,nullptr,error);
+        utils::sfread(FLERR,&setflag[i][j],sizeof(int),1,fp,nullptr,error);
+      }
+      MPI_Bcast(&scale[i][j],1,MPI_INT,0,world);
       MPI_Bcast(&setflag[i][j],1,MPI_INT,0,world);
       if (setflag[i][j]) {
         if (me == 0) {
@@ -470,6 +483,10 @@ void *PairLJCutCoulDSF::extract(const char *str, int &dim)
   if (strcmp(str,"cut_coul") == 0) {
     dim = 0;
     return (void *) &cut_coul;
+  }
+  if(strcmp(str,"scale") == 0) {
+    dim = 2;
+    return (void *) scale;
   }
   return nullptr;
 }
