@@ -81,6 +81,7 @@ liblammpsplugin_t *liblammpsplugin_load(const char *lib)
   ADDSYM(python_finalize);
 
   ADDSYM(error);
+  ADDSYM(expand);
 
   ADDSYM(file);
   ADDSYM(command);
@@ -105,6 +106,7 @@ liblammpsplugin_t *liblammpsplugin_load(const char *lib)
   ADDSYM(map_atom);
 
   ADDSYM(extract_atom_datatype);
+  ADDSYM(extract_atom_size);
   ADDSYM(extract_atom);
 
   ADDSYM(extract_compute);
@@ -115,6 +117,10 @@ liblammpsplugin_t *liblammpsplugin_load(const char *lib)
   ADDSYM(set_string_variable);
   ADDSYM(set_internal_variable);
   ADDSYM(variable_info);
+  ADDSYM(eval);
+  ADDSYM(clearstep_compute);
+  ADDSYM(addstep_compute);
+  ADDSYM(addstep_compute_all);
 
   ADDSYM(gather_atoms);
   ADDSYM(gather_atoms_concat);
@@ -138,6 +144,7 @@ liblammpsplugin_t *liblammpsplugin_load(const char *lib)
   ADDSYM(find_pair_neighlist);
   ADDSYM(find_fix_neighlist);
   ADDSYM(find_compute_neighlist);
+  ADDSYM(request_single_neighlist);
   ADDSYM(neighlist_num_elements);
   ADDSYM(neighlist_element_neighbors);
 
@@ -198,6 +205,7 @@ liblammpsplugin_t *liblammpsplugin_load(const char *lib)
     ADDSYM(has_error);
     ADDSYM(get_last_error_message);
   }
+  ADDSYM(set_show_error);
 
   ADDSYM(python_api_version);
   return lmp;
