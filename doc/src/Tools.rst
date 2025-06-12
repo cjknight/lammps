@@ -475,9 +475,13 @@ beginners to start with LAMMPS, it is also the expectation that
 LAMMPS-GUI users will eventually transition to workflows that most
 experienced LAMMPS users employ.
 
-All features have been extensively exposed to keyboard shortcuts, so
-that there is also appeal for experienced LAMMPS users for prototyping
-and testing simulation setups.
+.. image:: JPG/lammps-gui-screen.png
+   :align: center
+   :scale: 50%
+
+Features have been extensively exposed to keyboard shortcuts, so that
+there is also appeal for experienced LAMMPS users for prototyping and
+testing simulation setups.
 
 Features
 ^^^^^^^^
@@ -501,8 +505,8 @@ Here are a few highlights of LAMMPS-GUI
 - Indicator for line that caused an error
 - Visualization of current state in Image Viewer (via calling :doc:`write_dump image <dump_image>`)
 - Capture of images created via :doc:`dump image <dump_image>` in Slide show window
-- Dialog to set variables, similar to the LAMMPS command line flag '-v' / '-var'
-- Support for GPU, INTEL, KOKKOS/OpenMP, OPENMAP, and OPT and accelerator packages
+- Dialog to set variables, similar to the LAMMPS command-line flag '-v' / '-var'
+- Support for GPU, INTEL, KOKKOS/OpenMP, OPENMP, and OPT accelerator packages
 
 Parallelization
 ^^^^^^^^^^^^^^^
@@ -523,8 +527,8 @@ with CMake is required.
 The LAMMPS-GUI has been successfully compiled and tested on:
 
 - Ubuntu Linux 20.04LTS x86_64 using GCC 9, Qt version 5.12
-- Fedora Linux 40 x86\_64 using GCC 14 and Clang 17, Qt version 5.15LTS
-- Fedora Linux 40 x86\_64 using GCC 14, Qt version 6.7
+- Fedora Linux 41 x86\_64 using GCC 14 and Clang 17, Qt version 5.15LTS
+- Fedora Linux 41 x86\_64 using GCC 14, Qt version 6.8
 - Apple macOS 12 (Monterey) and macOS 13 (Ventura) with Xcode on arm64 and x86\_64, Qt version 5.15LTS
 - Windows 10 and 11 x86_64 with Visual Studio 2022 and Visual C++ 14.36, Qt version 5.15LTS
 - Windows 10 and 11 x86_64 with Visual Studio 2022 and Visual C++ 14.40, Qt version 6.7
@@ -550,7 +554,7 @@ will be found automatically.  2) you can download the `Flatpak file
 *flatpak* command: ``flatpak install --user
 LAMMPS-Linux-x86_64-GUI-<version>.flatpak`` and run it with ``flatpak
 run org.lammps.lammps-gui``.  The flatpak bundle also includes the
-command line version of LAMMPS and some LAMMPS tools like msi2lmp.  The
+command-line version of LAMMPS and some LAMMPS tools like msi2lmp.  The
 can be launched by using the ``--command`` flag. For example to run
 LAMMPS directly on the ``in.lj`` benchmark input you would type in the
 ``bench`` folder: ``flatpak run --command=lmp -in in.lj`` The flatpak
@@ -608,10 +612,10 @@ would be the ``examples/COUPLE/plugin`` folder of the LAMMPS
 distribution.
 
 When compiling LAMMPS-GUI with plugin support, there is an additional
-command line flag (``-p <path>`` or ``--pluginpath <path>``) which
+command-line flag (``-p <path>`` or ``--pluginpath <path>``) which
 allows to override the path to LAMMPS shared library used by the GUI.
 This is usually auto-detected on the first run and can be changed in the
-LAMMPS-GUI *Preferences* dialog.  The command line flag allows to reset
+LAMMPS-GUI *Preferences* dialog.  The command-line flag allows to reset
 this path to a valid value in case the original setting has become
 invalid.  An empty path ("") as argument restores the default setting.
 
@@ -656,7 +660,7 @@ it will create a compressed ``LAMMPS-Win10-amd64.zip`` zip file with the
 executables and required dependent .dll files.  This zip file can be
 uncompressed and ``lammps-gui.exe`` run directly from there.  The
 uncompressed folder can be added to the ``PATH`` environment and LAMMPS
-and LAMMPS-GUI can be launched from anywhere from the command line.
+and LAMMPS-GUI can be launched from anywhere from the command-line.
 
 **MinGW64 Cross-compiler**
 
@@ -876,7 +880,7 @@ the same ``LAMMPS_CACHING_DIR``. This script does the following:
  #. Start a simple local HTTP server using Python to host files for CMake
 
 Afterwards, it will print out instruction on how to modify the CMake
-command line to make sure it uses the local HTTP server.
+commands to make sure it uses the local HTTP server.
 
 To undo the environment changes and shutdown the local HTTP server,
 run the ``deactivate_caches`` command.
@@ -930,7 +934,7 @@ dependencies and redirects the download to the local cache.
 
    mkdir build
    cd build
-   cmake -D LAMMPS_DOWNLOADS_URL=${HTTP_CACHE_URL} -C "${LAMMPS_HTTP_CACHE_CONFIG}" -C ../cmake/presets/most.cmake ../cmake
+   cmake -D LAMMPS_DOWNLOADS_URL=${HTTP_CACHE_URL} -C "${LAMMPS_HTTP_CACHE_CONFIG}" -C ../cmake/presets/most.cmake -D DOWNLOAD_POTENTIALS=off ../cmake
    make -j 8
 
    deactivate_caches
@@ -1022,10 +1026,10 @@ regression tests with a given LAMMPS binary.  The tool launches the
 LAMMPS binary with any given input script under one of the `examples`
 subdirectories, and compares the thermo output in the generated log file
 with those in the provided log file with the same number of processors
-ub the same subdirectory. If the differences between the actual and
+in the same subdirectory. If the differences between the actual and
 reference values are within specified tolerances, the test is considered
 passed.  For each test batch, that is, a set of example input scripts,
-the mpirun command, the LAMMPS command line arguments, and the
+the mpirun command, the LAMMPS command-line arguments, and the
 tolerances for individual thermo quantities can be specified in a
 configuration file in YAML format.
 
@@ -1250,10 +1254,10 @@ tabulate tool
 
 .. versionadded:: 22Dec2022
 
-The ``tabulate`` folder contains Python scripts scripts to generate tabulated
-potential files for LAMMPS.  The bulk of the code is in the ``tabulate`` module
-in the ``tabulate.py`` file.  Some example files demonstrating its use are
-included.  See the README file for more information.
+The ``tabulate`` folder contains Python scripts scripts to generate and
+visualize tabulated potential files for LAMMPS.  The bulk of the code is in the
+``tabulate`` module in the ``tabulate.py`` file.  Some example files
+demonstrating its use are included.  See the README file for more information.
 
 ----------
 
@@ -1276,11 +1280,13 @@ Those scripts were written by Steve Plimpton sjplimp at gmail.com
 valgrind tool
 -------------
 
-The ``valgrind`` folder contains additional suppressions fur LAMMPS when using
-valgrind's memcheck tool to search for memory access violation and memory
-leaks. These suppressions are automatically invoked when running tests through
-CMake "ctest -T memcheck". See the provided README file to add these
-suppressions when running LAMMPS.
+The ``valgrind`` folder contains additional suppressions for LAMMPS when
+using `valgrind's <https://valgrind.org/>`_ ` `memcheck tool
+<https://valgrind.org/info/tools.html#memcheck>`_ to search for memory
+access violation and memory leaks.  These suppressions are automatically
+invoked when running tests through CMake "ctest -T memcheck".  See the
+instruction in the ``README`` file to add these suppressions when using
+valgrind with LAMMPS or other programs.
 
 ----------
 
