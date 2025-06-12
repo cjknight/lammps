@@ -81,20 +81,22 @@ void PairMACEKokkos<DeviceType>::compute(int eflag, int vflag)
   if (eflag_atom || vflag_atom)
     error->all(FLERR, "ERROR: mace/kokkos eflag_atom and/or vflag_atom not implemented.");
 
+  double scale_dist = (need_unit_conversion) ? distance_conv_factor : 1.0;
+  
   int nlocal = atom->nlocal;
   auto r_max_squared = this->r_max_squared;
-  auto h0 = domain->h[0];
-  auto h1 = domain->h[1];
-  auto h2 = domain->h[2];
-  auto h3 = domain->h[3];
-  auto h4 = domain->h[4];
-  auto h5 = domain->h[5];
-  auto hinv0 = domain->h_inv[0];
-  auto hinv1 = domain->h_inv[1];
-  auto hinv2 = domain->h_inv[2];
-  auto hinv3 = domain->h_inv[3];
-  auto hinv4 = domain->h_inv[4];
-  auto hinv5 = domain->h_inv[5];
+  auto h0 = domain->h[0] * scale_dist;
+  auto h1 = domain->h[1] * scale_dist;
+  auto h2 = domain->h[2] * scale_dist;
+  auto h3 = domain->h[3] * scale_dist;
+  auto h4 = domain->h[4] * scale_dist;
+  auto h5 = domain->h[5] * scale_dist;
+  auto hinv0 = 1.0/domain->h[0];
+  auto hinv1 = 1.0/domain->h[1];
+  auto hinv2 = 1.0/domain->h[2];
+  auto hinv3 = -domain->h[3]/(domain->h[1]*domain->h[2]);
+  auto hinv4 = (domain->h[3]*domain->h[5]/domain->h[1] - domain->h[4])/(domain->h[0]*domain->h[2]);
+  auto hinv5 = -domain->h[5]/(domain->h[0]*domain->h[1]);
 
   auto _k_lammps_atomic_numbers = k_lammps_atomic_numbers;
   auto _k_mace_atomic_numbers = k_mace_atomic_numbers;
@@ -126,9 +128,9 @@ void PairMACEKokkos<DeviceType>::compute(int eflag, int vflag)
   }
   auto k_positions = Kokkos::View<double*[3],Kokkos::LayoutRight,DeviceType>("k_positions", n_nodes);
   Kokkos::parallel_for("PairMACEKokkos: Fill k_positions.", n_nodes, KOKKOS_LAMBDA (const int i) {
-    k_positions(i,0) = x(i,0);
-    k_positions(i,1) = x(i,1);
-    k_positions(i,2) = x(i,2);
+    k_positions(i,0) = x(i,0) * scale_dist;
+    k_positions(i,1) = x(i,1) * scale_dist;
+    k_positions(i,2) = x(i,2) * scale_dist;
   });
   auto positions = torch::from_blob(
     k_positions.data(),
@@ -313,7 +315,7 @@ void PairMACEKokkos<DeviceType>::compute(int eflag, int vflag)
   input.insert("unit_shifts", unit_shifts);
   input.insert("weight", weight);
   auto output = model.forward({input, mask, bool(vflag_global)}).toGenericDict();
-
+  
   // mace energy
   //   -> sum of site energies of local atoms
   if (eflag_global) {
@@ -327,6 +329,10 @@ void PairMACEKokkos<DeviceType>::compute(int eflag, int vflag)
     }, eng_vdwl);
   }
 
+  if(need_unit_conversion) eng_vdwl *= energy_conv_factor;
+
+  double scale_force = (need_unit_conversion) ? force_conv_factor : 1.0;
+  
   // mace forces
   //   -> derivatives of total mace energy
   forces = output.at("forces").toTensor();
@@ -334,9 +340,9 @@ void PairMACEKokkos<DeviceType>::compute(int eflag, int vflag)
   auto k_forces = Kokkos::View<double*[3],Kokkos::LayoutRight,DeviceType,Kokkos::MemoryTraits<Kokkos::Unmanaged>>(forces_ptr,n_nodes);
   Kokkos::parallel_for("PairMACEKokkos: Extract k_forces.", n_nodes, KOKKOS_LAMBDA(const int ii) {
     const int i = d_ilist(ii);
-    f(i,0) += k_forces(i,0);
-    f(i,1) += k_forces(i,1);
-    f(i,2) += k_forces(i,2);
+    f(i,0) += k_forces(i,0) * scale_force;
+    f(i,1) += k_forces(i,1) * scale_force;
+    f(i,2) += k_forces(i,2) * scale_force;
   });
 
   // mace virials (local atoms only)
@@ -347,12 +353,12 @@ void PairMACEKokkos<DeviceType>::compute(int eflag, int vflag)
     // caution: lammps does not use voigt ordering
     // also: it would be nice to get rid of the 'template item' stuff,
     //       but some compilers seem to require it
-    virial[0] += vir[0][0][0].template item<double>();
-    virial[1] += vir[0][1][1].template item<double>();
-    virial[2] += vir[0][2][2].template item<double>();
-    virial[3] += 0.5*(vir[0][1][0].template item<double>() + vir[0][0][1].template item<double>());
-    virial[4] += 0.5*(vir[0][2][0].template item<double>() + vir[0][0][2].template item<double>());
-    virial[5] += 0.5*(vir[0][2][1].template item<double>() + vir[0][1][2].template item<double>());
+    virial[0] += energy_conv_factor * (vir[0][0][0].template item<double>());
+    virial[1] += energy_conv_factor * (vir[0][1][1].template item<double>());
+    virial[2] += energy_conv_factor * (vir[0][2][2].template item<double>());
+    virial[3] += energy_conv_factor * 0.5*(vir[0][1][0].template item<double>() + vir[0][0][1].template item<double>());
+    virial[4] += energy_conv_factor * 0.5*(vir[0][2][0].template item<double>() + vir[0][0][2].template item<double>());
+    virial[5] += energy_conv_factor * 0.5*(vir[0][2][1].template item<double>() + vir[0][1][2].template item<double>());
   }
 
   // TODO: investigate this
