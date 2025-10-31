@@ -1,12 +1,12 @@
 #!/bin/bash -l
-#PBS -l select=1024
+#PBS -l select=1
 #PBS -l place=scatter
-#PBS -l walltime=0:15:00
+#PBS -l walltime=0:20:00
 #PBS -q prod
 #PBS -A Catalyst
 #PBS -l filesystems=home:flare
 
-cd /flare/catalyst/proj_shared/knight/lammps/aurora_stat/lammps/stat
+cd ${PBS_O_WORKDIR}
 
 NNODES=`wc -l < $PBS_NODEFILE`
 NRANKS_PER_NODE=24
@@ -20,12 +20,17 @@ NTOTRANKS=$(( NNODES * NRANKS_PER_NODE ))
 
 EXE=../build/lmp
 
-NSTEPS=10000
-X=2
-Y=2
-Z=2
+INPUT=in.lj
+NSTEPS=1000
 
+#X=2
+#Y=2
+#Z=2
 EXE_ARG="-in in.lj -var nsteps ${NSTEPS} -var x ${X} -var y ${Y} -var z ${Z} "
+
+XYZ=`python3 decompose_global_problem_xyz.py ${NNODES} 0 2`
+EXE_ARG="-in in.lj -var nsteps ${NSTEPS} ${XYZ} "
+
 EXE_ARG+=" -pk gpu 1 -sf gpu " 
 #EXE_ARG+=" -pk gpu 1 -pk omp ${NTHREADS} -sf hybrid gpu omp " 
 
