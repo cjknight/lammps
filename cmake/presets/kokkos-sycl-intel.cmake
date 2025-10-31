@@ -25,6 +25,6 @@ set(CMAKE_Fortran_COMPILER ifx CACHE STRING "" FORCE)
 set(MPI_CXX_COMPILER "mpicxx" CACHE STRING "" FORCE)
 set(CMAKE_CXX_STANDARD 17 CACHE STRING "" FORCE)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w -O3 -fsycl-device-code-split=per_kernel " CACHE STRING "" FORCE)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w -g -O0 -fsycl-device-code-split=per_kernel " CACHE STRING "" FORCE)
 
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -O3 -fsycl -flink-huge-device-code " CACHE STRING "" FORCE)
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -g -O0 -fsycl -flink-huge-device-code " CACHE STRING "" FORCE)
