@@ -35,6 +35,8 @@
 
 #include <cstring>
 
+#include <unistd.h> // sleep()
+
 using namespace LAMMPS_NS;
 
 /* ---------------------------------------------------------------------- */
@@ -243,7 +245,36 @@ void Verlet::run(int n)
   if (atom->sortfreq > 0) sortflag = 1;
   else sortflag = 0;
 
+  int stat_hang_rank = -1; // MPI rank that will "hang"
+  int stat_hang_minutes = 15; // sleep for 15 minutes
+  int stat_step = n - 1; // Simulation step where hang or crash occurs
+
+  // update stat variables from environment
+  {
+    const char * hang_rank = getenv("LMP_STAT_HANG_RANK");
+    if(hang_rank) stat_hang_rank = utils::inumeric(FLERR, hang_rank, false, lmp);
+
+    const char * hang_minutes = getenv("LMP_STAT_HANG_MINUTES");
+    if(hang_minutes) stat_hang_minutes = utils::inumeric(FLERR, hang_minutes, false, lmp);
+
+    const char * step = getenv("LMP_STAT_STEP");
+    if(step) stat_step = utils::inumeric(FLERR, step, false, lmp);
+  }
+
+  if(comm->me == 0) {
+    fprintf(screen,"LMP_STAT: HANG_RANK= %i  HANG_MINUTES= %i  STEP= %i\n",stat_hang_rank, stat_hang_minutes, stat_step);
+    fflush(screen);
+  }
+
   for (int i = 0; i < n; i++) {
+    if(stat_hang_rank > -1 && i == stat_step) {
+      if(stat_hang_rank == comm->me) {
+        fprintf(screen,"Yawn, rank %i going to sleep now...\n",comm->me,stat_hang_minutes);
+        fflush(screen);
+        sleep(stat_hang_minutes*60); // sleep for minutes  
+      }
+    }
+
     if (timer->check_timeout(i)) {
       update->nsteps = i;
       break;

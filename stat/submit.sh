@@ -37,6 +37,10 @@ MPI_ARG+="--cpu-bind list:1:2:3:4:5:6:7:8:9:10:11:12:53:54:55:56:57:58:59:60:61:
 AFFINITY=""
 AFFINITY=" gpu_tile_compact.sh "
 
+export LMP_STAT_HANG_RANK=11 # MPI rank 11 will hang
+export LMP_STAT_HANG_MINUTES=1 # rank will sleep for 1 minutes
+export LMP_STAT_STEP=99 # hang will occur on step 99
+
 COMMAND="mpiexec ${MPI_ARG} ${AFFINITY} ${EXE} ${EXE_ARG}"
 echo "COMMAND= ${COMMAND}"
 ${COMMAND}
