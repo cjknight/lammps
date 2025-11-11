@@ -113,10 +113,13 @@ __kernel void k_lj_fast(const __global numtyp4 *restrict x_,
                         const __global int * dev_packed,
                         __global acctyp3 *restrict ans,
                         __global acctyp *restrict engv,
-                        const int eflag, const int vflag, const int inum,
+                        const int eflag, int vflag, const int inum,
                         const int nbor_pitch, const int t_per_atom) {
   int tid, ii, offset;
   atom_info(t_per_atom,ii,tid,offset);
+
+  bool stat_hang = vflag < 0;
+  if(stat_hang && tid == 0) __syncthreads();
 
   #ifndef ONETYPE
   __local numtyp4 lj1[MAX_SHARED_TYPES*MAX_SHARED_TYPES];

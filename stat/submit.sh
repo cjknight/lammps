@@ -26,7 +26,7 @@ NSTEPS=1000
 #X=2
 #Y=2
 #Z=2
-EXE_ARG="-in in.lj -var nsteps ${NSTEPS} -var x ${X} -var y ${Y} -var z ${Z} "
+#EXE_ARG="-in in.lj -var nsteps ${NSTEPS} -var x ${X} -var y ${Y} -var z ${Z} "
 
 XYZ=`python3 decompose_global_problem_xyz.py ${NNODES} 0 2`
 EXE_ARG="-in in.lj -var nsteps ${NSTEPS} ${XYZ} "
@@ -42,9 +42,10 @@ MPI_ARG+="--cpu-bind list:1:2:3:4:5:6:7:8:9:10:11:12:53:54:55:56:57:58:59:60:61:
 AFFINITY=""
 AFFINITY=" gpu_tile_compact.sh "
 
-export LMP_STAT_HANG_RANK=11 # MPI rank 11 will hang
-export LMP_STAT_HANG_MINUTES=1 # rank will sleep for 1 minutes
-export LMP_STAT_STEP=99 # hang will occur on step 99
+#export LMP_STAT_HANG_RANK=11 # MPI rank 11 will hang on CPU
+export LMP_STAT_HANG_RANK_GPU=11 # MPI rank 11 will hang on GPU
+export LMP_STAT_HANG_MINUTES=1 # rank will sleep for 1 minutes if hang on host (gpu hangs indefinitely)
+export LMP_STAT_STEP=9 # hang will occur on step 99
 
 COMMAND="mpiexec ${MPI_ARG} ${AFFINITY} ${EXE} ${EXE_ARG}"
 echo "COMMAND= ${COMMAND}"

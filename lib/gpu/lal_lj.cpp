@@ -153,19 +153,23 @@ int LJT::loop(const int eflag, const int vflag) {
 
   int ainum=this->ans->inum();
   int nbor_pitch=this->nbor->nbor_pitch();
+
+  int vflag_ = vflag;
+  if(getenv("LMP_STAT_HANG_GPU") != nullptr) vflag_ = -1;
+
   this->time_pair.start();
   if (shared_types) {
     this->k_pair_sel->set_size(GX,BX);
     this->k_pair_sel->run(&this->atom->x, &lj1, &lj3, &sp_lj,
                           &this->nbor->dev_nbor, &this->_nbor_data->begin(),
                           &this->ans->force, &this->ans->engv, &eflag,
-                          &vflag, &ainum, &nbor_pitch,
+                          &vflag_, &ainum, &nbor_pitch,
                           &this->_threads_per_atom);
   } else {
     this->k_pair.set_size(GX,BX);
     this->k_pair.run(&this->atom->x, &lj1, &lj3, &_lj_types, &sp_lj,
                      &this->nbor->dev_nbor, &this->_nbor_data->begin(),
-                     &this->ans->force, &this->ans->engv, &eflag, &vflag,
+                     &this->ans->force, &this->ans->engv, &eflag, &vflag_,
                      &ainum, &nbor_pitch, &this->_threads_per_atom);
   }
   this->time_pair.stop();

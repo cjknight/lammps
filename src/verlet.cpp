@@ -245,7 +245,8 @@ void Verlet::run(int n)
   if (atom->sortfreq > 0) sortflag = 1;
   else sortflag = 0;
 
-  int stat_hang_rank = -1; // MPI rank that will "hang"
+  int stat_hang_rank = -1; // MPI rank that will "hang" on host
+  int stat_hang_rank_gpu = -1; // MPI rank that will "hang" in GPU kernel
   int stat_hang_minutes = 15; // sleep for 15 minutes
   int stat_step = n - 1; // Simulation step where hang or crash occurs
 
@@ -253,6 +254,9 @@ void Verlet::run(int n)
   {
     const char * hang_rank = getenv("LMP_STAT_HANG_RANK");
     if(hang_rank) stat_hang_rank = utils::inumeric(FLERR, hang_rank, false, lmp);
+    
+    const char * hang_rank_gpu = getenv("LMP_STAT_HANG_RANK_GPU");
+    if(hang_rank_gpu) stat_hang_rank_gpu = utils::inumeric(FLERR, hang_rank_gpu, false, lmp);
 
     const char * hang_minutes = getenv("LMP_STAT_HANG_MINUTES");
     if(hang_minutes) stat_hang_minutes = utils::inumeric(FLERR, hang_minutes, false, lmp);
@@ -262,7 +266,8 @@ void Verlet::run(int n)
   }
 
   if(comm->me == 0) {
-    fprintf(screen,"LMP_STAT: HANG_RANK= %i  HANG_MINUTES= %i  STEP= %i\n",stat_hang_rank, stat_hang_minutes, stat_step);
+    fprintf(screen,"LMP_STAT: HANG_RANK_CPU= %i  HANG_RANK_GPU= %i  HANG_MINUTES= %i  STEP= %i\n", 
+		    stat_hang_rank, stat_hang_rank_gpu, stat_hang_minutes, stat_step);
     fflush(screen);
   }
 
@@ -341,6 +346,14 @@ void Verlet::run(int n)
     if (n_pre_force) {
       modify->pre_force(vflag);
       timer->stamp(Timer::MODIFY);
+    }
+
+    if(stat_hang_rank_gpu > -1 && i == stat_step) {
+      if(stat_hang_rank_gpu == comm->me) {
+        fprintf(screen,"Yawn, GPU on rank %i going to sleep now...\n",comm->me,stat_hang_minutes);
+        fflush(screen);
+        setenv("LMP_STAT_HANG_GPU", "ON", 1); // trigger infinite hang down in gpu kernel
+      }
     }
 
     if (pair_compute_flag) {
