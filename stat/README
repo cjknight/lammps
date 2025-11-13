@@ -1,8 +1,10 @@
-# clone chris’ repo or just the aurora_stat branch, either or
+## clone chris’ repo or just the aurora_stat branch, either or
 
 $ git clone https://github.com/cjknight/lammps.git
 $ cd lammps
 $ git checkout aurora_stat
+
+## If building with GPU package (OpenCL backend)
 $ mkdir build
 $ cd build
 $ cmake -C ../cmake/presets/aurora.cmake ../cmake
@@ -11,6 +13,16 @@ $ make -j 16
 # submit batch job: Replace 'Catalyst' with ALCF project name
 $ cd ../stat
 $ qsub -l select=4 -A Catalyst ./submit.sh
+
+
+## If building with Kokkos package (SYCL backend)
+$ cd src
+$ make yes-KOKKOS
+$ make aurora_kokkos -j 32
+
+# submit batch job: Replace 'Catalyst' with ALCF project name
+$ cd ../stat
+$ qsub -l select=4 -A Catalyst ./submit_kokkos.sh
 
 # Edit LMP_STAT_# environment variables in submit.sh to trigger hang
 
