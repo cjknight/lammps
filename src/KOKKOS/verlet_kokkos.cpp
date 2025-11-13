@@ -31,6 +31,8 @@
 #include "timer.h"
 #include "kokkos.h"
 
+#include <unistd.h>
+
 using namespace LAMMPS_NS;
 
 template<class ViewA, class ViewB>
@@ -286,8 +288,42 @@ void VerletKokkos::run(int n)
 
   atomKK->sync(Device,ALL_MASK);
 
+  int stat_hang_rank = -1; // MPI rank that will "hang" on host
+  int stat_hang_rank_gpu = -1; // MPI rank that will "hang" in GPU kernel
+  int stat_hang_minutes = 15; // sleep for 15 minutes
+  int stat_step = n - 1; // Simulation step where hang or crash occurs
+
+  // update stat variables from environment
+  {
+    const char * hang_rank = getenv("LMP_STAT_HANG_RANK");
+    if(hang_rank) stat_hang_rank = utils::inumeric(FLERR, hang_rank, false, lmp);
+
+    const char * hang_rank_gpu = getenv("LMP_STAT_HANG_RANK_GPU");
+    if(hang_rank_gpu) stat_hang_rank_gpu = utils::inumeric(FLERR, hang_rank_gpu, false, lmp);
+
+    const char * hang_minutes = getenv("LMP_STAT_HANG_MINUTES");
+    if(hang_minutes) stat_hang_minutes = utils::inumeric(FLERR, hang_minutes, false, lmp);
+
+    const char * step = getenv("LMP_STAT_STEP");
+    if(step) stat_step = utils::inumeric(FLERR, step, false, lmp);
+  }
+
+  if(comm->me == 0) {
+    fprintf(screen,"LMP_STAT: HANG_RANK_CPU= %i  HANG_RANK_GPU= %i  HANG_MINUTES= %i  STEP= %i\n",
+                    stat_hang_rank, stat_hang_rank_gpu, stat_hang_minutes, stat_step);
+    fflush(screen);
+  }
+
   timer->init_timeout();
   for (int i = 0; i < n; i++) {
+    if(stat_hang_rank > -1 && i == stat_step) {
+      if(stat_hang_rank == comm->me) {
+        fprintf(screen,"Yawn, rank %i going to sleep now...\n",comm->me,stat_hang_minutes);
+        fflush(screen);
+	sleep(stat_hang_minutes*60); // sleep for minutes
+      }
+    }
+
     if (timer->check_timeout(i)) {
       update->nsteps = i;
       break;
@@ -429,6 +465,14 @@ void VerletKokkos::run(int n)
           execute_on_host = true;
           datamask_read_host |= force->kspace->datamask_read;
         }
+      }
+    }
+
+    if(stat_hang_rank_gpu > -1 && i == stat_step) {
+      if(stat_hang_rank_gpu == comm->me) {
+        fprintf(screen,"Yawn, GPU in rank %i going to sleep now...\n",comm->me,stat_hang_minutes);
+        fflush(screen);
+	vflag -= 100;
       }
     }
 

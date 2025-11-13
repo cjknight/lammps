@@ -60,6 +60,9 @@ PairLJCutKokkos<DeviceType>::~PairLJCutKokkos()
 template<class DeviceType>
 void PairLJCutKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
 {
+  bool stat_hang = vflag_in < 0;
+  if(vflag_in < 0) vflag_in += 100;
+
   eflag = eflag_in;
   vflag = vflag_in;
 
@@ -99,6 +102,15 @@ void PairLJCutKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
   special_lj[3] = force->special_lj[3];
 
   // loop over neighbors of my atoms
+
+  if(stat_hang) {
+    using member_type = Kokkos::TeamPolicy<DeviceType>::member_type;
+    Kokkos::TeamPolicy<DeviceType> policy(1024, Kokkos::AUTO());
+    Kokkos::parallel_for("HangForever", policy, KOKKOS_LAMBDA(member_type team_member){
+		      if(team_member.team_rank() == 0) team_member.team_barrier();
+		    }
+		    );
+  }
 
   copymode = 1;
 
