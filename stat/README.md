@@ -5,7 +5,7 @@ $ cd lammps
 $ git checkout aurora_stat
 ```
 
-## If building with GPU package (OpenCL backend)
+# If building with GPU package (OpenCL backend)
 ```
 $ mkdir build
 $ cd build
@@ -13,20 +13,20 @@ $ cmake -C ../cmake/presets/aurora.cmake ../cmake
 $ make -j 16
 ```
 
-# submit batch job: Replace 'Catalyst' with ALCF project name
+## submit batch job: Replace 'Catalyst' with ALCF project name
 ```
 $ cd ../stat
 $ qsub -l select=4 -A Catalyst ./submit.sh
 ```
 
-## If building with Kokkos package (SYCL backend)
+# If building with Kokkos package (SYCL backend)
 ```
 $ cd src
 $ make yes-KOKKOS
 $ make aurora_kokkos -j 32
 ```
 
-# submit batch job: Replace 'Catalyst' with ALCF project name
+## submit batch job: Replace 'Catalyst' with ALCF project name
 ```
 $ cd ../stat
 $ qsub -l select=4 -A Catalyst ./submit_kokkos.sh
