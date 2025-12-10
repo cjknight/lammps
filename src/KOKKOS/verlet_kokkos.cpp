@@ -31,6 +31,8 @@
 #include "timer.h"
 #include "kokkos.h"
 
+#include <ittnotify.h>
+
 using namespace LAMMPS_NS;
 
 template<class ViewA, class ViewB>
@@ -278,6 +280,8 @@ void VerletKokkos::run(int n)
 
   fuse_integrate = 0;
   fuse_force_clear = 0;
+
+  __itt_resume();
 
   if (atomKK->sortfreq > 0) sortflag = 1;
   else sortflag = 0;

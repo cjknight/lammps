@@ -35,6 +35,8 @@
 
 #include <cstring>
 
+#include <ittnotify.h>
+
 using namespace LAMMPS_NS;
 
 /* ---------------------------------------------------------------------- */
@@ -242,6 +244,8 @@ void Verlet::run(int n)
 
   if (atom->sortfreq > 0) sortflag = 1;
   else sortflag = 0;
+
+  __itt_resume(); 
 
   for (int i = 0; i < n; i++) {
     if (timer->check_timeout(i)) {
