@@ -720,6 +720,9 @@ if(NOT ${CMAKE_SYSTEM_NAME} STREQUAL "Windows")
    target_link_libraries(lammps PRIVATE ${CMAKE_DL_LIBS})
 endif()
 
+# add libittnotify
+target_link_libraries(lammps PRIVATE "-L$ENV{VTUNE_PROFILER_DIR}/lib64 -littnotify")
+
 ######################################################################
 # the windows version of LAMMPS requires a couple extra libraries
 # and the MPI library - if use - has to be linked right before those
