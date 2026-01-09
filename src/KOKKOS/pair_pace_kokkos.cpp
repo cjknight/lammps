@@ -448,6 +448,8 @@ void PairPACEKokkos<DeviceType>::init_style()
   copy_pertype();
   copy_splines();
   copy_tilde();
+
+  pace_scratch = lmp->kokkos->pace_scratch;
 }
 
 /* ----------------------------------------------------------------------
@@ -630,7 +632,7 @@ void PairPACEKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
       check_team_size_for<TagPairPACEComputeNeigh>(chunk_size,team_size,vector_length);
       int scratch_size = scratch_size_helper<int>(team_size * maxneigh);
       typename Kokkos::TeamPolicy<DeviceType, TagPairPACEComputeNeigh> policy_neigh(chunk_size,team_size,vector_length);
-      policy_neigh = policy_neigh.set_scratch_size(0, Kokkos::PerTeam(scratch_size));
+      policy_neigh = policy_neigh.set_scratch_size(pace_scratch, Kokkos::PerTeam(scratch_size));
       Kokkos::parallel_for("ComputeNeigh",policy_neigh,*this);
     }
 
@@ -774,7 +776,7 @@ void PairPACEKokkos<DeviceType>::operator() (TagPairPACEComputeNeigh,const typen
   // If it is, inside is assigned to 1, otherwise -1
   const int team_rank = team.team_rank();
   const int scratch_shift = team_rank * maxneigh; // offset into pointer for entire team
-  int* inside = (int*)team.team_shmem().get_shmem(team.team_size() * maxneigh * sizeof(int), 0) + scratch_shift;
+  int* inside = (int*)team.team_shmem().get_shmem(team.team_size() * maxneigh * sizeof(int), pace_scratch) + scratch_shift;
 
   // loop over list of all neighbors within force cutoff
   // distsq[] = distance sq to each

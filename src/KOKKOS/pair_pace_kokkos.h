@@ -181,6 +181,7 @@ class PairPACEKokkos : public PairPACE {
   // ComputeNeigh, ComputeUi, and ComputeFusedDeidrj
   template <typename scratch_type>
   int scratch_size_helper(int values_per_team);
+  int pace_scratch;
 
   typedef Kokkos::View<int*, DeviceType> t_ace_1i;
   typedef Kokkos::View<int**, DeviceType> t_ace_2i;

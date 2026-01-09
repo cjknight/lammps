@@ -66,6 +66,7 @@ class KokkosLMP : protected Pointers {
   int nbor_block_size_set;
   int bond_block_size;
   int bond_block_size_set;
+  int pace_scratch;
 
   static int is_finalized;
   static int init_ngpus;

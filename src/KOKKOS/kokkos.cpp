@@ -269,6 +269,7 @@ KokkosLMP::KokkosLMP(LAMMPS *lmp, int narg, char **arg) : Pointers(lmp)
   neigh_thread = 0;
   neigh_thread_set = 0;
   neigh_transpose = 0;
+  pace_scratch = 0;
   if (ngpus > 0) {
     neighflag = FULL;
     neighflag_qeq = FULL;
@@ -607,6 +608,10 @@ void KokkosLMP::accelerator(int narg, char **arg)
       if (iarg+2 > narg) error->all(FLERR,"Illegal package kokkos command");
       bond_block_size = utils::inumeric(FLERR, arg[iarg+1], false, lmp);
       bond_block_size_set = 1;
+      iarg += 2;
+    } else if (strcmp(arg[iarg],"pace/scratch") == 0) {
+      if (iarg+2 > narg) error->all(FLERR,"Illegal package kokkos command");
+      pace_scratch = utils::inumeric(FLERR, arg[iarg+1], false, lmp);
       iarg += 2;
     } else error->all(FLERR,"Illegal package kokkos command");
   }
