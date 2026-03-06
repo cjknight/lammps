@@ -47,7 +47,7 @@ Specifying details of the LAMMPS workload
 * The size of the simulation workload is weak-scaled up depending on the number of compute nodes requested. LAMMPS has good weak-scaling performance, so the runtime should be close to or slightly increase as the node count increases.
 * The `NSTEPS` variable in the job script can be used to increase the runtime. The runtime increases roughly linearly with the number of simulation steps. 
 
-Environment variables are exported to control how LAMMPS will hang or segfault on CPU or GPU.
+Environment variables are exported to control how LAMMPS will hang or segfault on CPU or GPU. Segfault has higher priority than hang in case both are requested.
 
 * `export LMP_STAT_STEP=9` # hang/segfault will occur on step 9 of simulation
 
@@ -55,6 +55,8 @@ Environment variables are exported to control how LAMMPS will hang or segfault o
 * `#export LMP_STAT_HANG_MINUTES=1` # rank will sleep for 1 minute(s) if hang on CPU (gpu hangs indefinitely)
 
 * `export LMP_STAT_HANG_RANK_GPU=11` # MPI rank 11 will hang on GPU
+
+* `export LMP_STAT_SEGFAULT_RANK_GPU=11` # MPI rank 11 will segfault on GPU
 
 These environment variables are exported in the batch job script to trigger the desired behavior.
 
@@ -73,9 +75,20 @@ Changes in the GPU kernel can be found in the `pair_lj_cut_kokkos.cpp` file in t
                     }
                     );
   }
+
+  if(stat_segfault) {
+    Kokkos::parallel_for("CrashWrite", nall, KOKKOS_LAMBDA(const int &i){
+                      f(i,0) *= 1.0;
+                      f(i,1) *= 1.0;
+                      //f(i,2) = f(i,2) * 1.0; // correct
+                      f(i+1,2) = f(i,2) * 1.0; // out-of-bounds access
+                    }
+                    );
+  }
+
 ```
 
-This code can be modifed as desired to achieve the desired outcome.
+This code can be modifed as needed to achieve whatever failure mode is desired on the GPU.
 
 ## Running workloads with the GPU/OpenCL backend
 
