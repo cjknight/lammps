@@ -352,7 +352,7 @@ void Verlet::run(int n)
       if(stat_hang_rank_gpu == comm->me) {
         fprintf(screen,"Yawn, GPU on rank %i going to sleep now...\n",comm->me,stat_hang_minutes);
         fflush(screen);
-        setenv("LMP_STAT_HANG_GPU", "ON", 1); // trigger infinite hang down in gpu kernel
+        setenv("LMP_STAT_HANG_GPU", "ON", 1); // trigger infinite hang down in GPU package kernel
       }
     }
 

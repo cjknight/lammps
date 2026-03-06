@@ -290,6 +290,7 @@ void VerletKokkos::run(int n)
 
   int stat_hang_rank = -1; // MPI rank that will "hang" on host
   int stat_hang_rank_gpu = -1; // MPI rank that will "hang" in GPU kernel
+  int stat_segfault_rank_gpu = -1; // MPI rank that will "segfault" in GPU kernel
   int stat_hang_minutes = 15; // sleep for 15 minutes
   int stat_step = n - 1; // Simulation step where hang or crash occurs
 
@@ -300,6 +301,9 @@ void VerletKokkos::run(int n)
 
     const char * hang_rank_gpu = getenv("LMP_STAT_HANG_RANK_GPU");
     if(hang_rank_gpu) stat_hang_rank_gpu = utils::inumeric(FLERR, hang_rank_gpu, false, lmp);
+    
+    const char * segfault_rank_gpu = getenv("LMP_STAT_SEGFAULT_RANK_GPU");
+    if(segfault_rank_gpu) stat_segfault_rank_gpu = utils::inumeric(FLERR, segfault_rank_gpu, false, lmp);
 
     const char * hang_minutes = getenv("LMP_STAT_HANG_MINUTES");
     if(hang_minutes) stat_hang_minutes = utils::inumeric(FLERR, hang_minutes, false, lmp);
@@ -309,8 +313,8 @@ void VerletKokkos::run(int n)
   }
 
   if(comm->me == 0) {
-    fprintf(screen,"LMP_STAT: HANG_RANK_CPU= %i  HANG_RANK_GPU= %i  HANG_MINUTES= %i  STEP= %i\n",
-                    stat_hang_rank, stat_hang_rank_gpu, stat_hang_minutes, stat_step);
+    fprintf(screen,"LMP_STAT: HANG_RANK_CPU= %i  HANG_RANK_GPU= %i  HANG_MINUTES= %i  SEGFAULT_GPU= %i  STEP= %i\n",
+                    stat_hang_rank, stat_hang_rank_gpu, stat_hang_minutes, stat_segfault_rank_gpu, stat_step);
     fflush(screen);
   }
 
@@ -468,11 +472,21 @@ void VerletKokkos::run(int n)
       }
     }
 
-    if(stat_hang_rank_gpu > -1 && i == stat_step) {
-      if(stat_hang_rank_gpu == comm->me) {
-        fprintf(screen,"Yawn, GPU in rank %i going to sleep now...\n",comm->me,stat_hang_minutes);
-        fflush(screen);
-	vflag -= 100;
+    if(i == stat_step) {
+      if(stat_hang_rank_gpu > -1) {
+        if(stat_hang_rank_gpu == comm->me) {
+          fprintf(screen,"Yawn, GPU in rank %i going to sleep now...\n",comm->me);
+          fflush(screen);
+	  vflag -= 100;
+        }
+      }
+
+      if(stat_segfault_rank_gpu > -1) {
+        if(stat_segfault_rank_gpu == comm->me) {
+          fprintf(screen,"Uh-oh, GPU in rank %i going to crash now...\n",comm->me);
+          fflush(screen);
+          vflag -= 1000;
+        }
       }
     }
 

@@ -60,8 +60,11 @@ PairLJCutKokkos<DeviceType>::~PairLJCutKokkos()
 template<class DeviceType>
 void PairLJCutKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
 {
+  bool stat_segfault = vflag_in < -200;
+  if(stat_segfault) vflag_in += 1000;
+ 
   bool stat_hang = vflag_in < 0;
-  if(vflag_in < 0) vflag_in += 100;
+  if(stat_hang) vflag_in += 100;
 
   eflag = eflag_in;
   vflag = vflag_in;
@@ -109,6 +112,16 @@ void PairLJCutKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
     Kokkos::parallel_for("HangForever", policy, KOKKOS_LAMBDA(member_type team_member){
 		      if(team_member.team_rank() == 0) team_member.team_barrier();
 		    }
+		    );
+  }
+  
+  if(stat_segfault) {
+    Kokkos::parallel_for("CrashWrite", nall, KOKKOS_LAMBDA(const int &i){
+		      f(i,0) *= 1.0;
+		      f(i,1) *= 1.0;
+		      //f(i,2) = f(i,2) * 1.0; // correct
+		      f(i+1,2) = f(i,2) * 1.0; // out-of-bounds access
+                    }
 		    );
   }
 
