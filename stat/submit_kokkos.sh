@@ -40,7 +40,7 @@ AFFINITY=" gpu_tile_compact.sh "
 
 #export LMP_STAT_HANG_RANK=11 # MPI rank 11 will hang on CPU
 #export LMP_STAT_HANG_RANK_GPU=11 # MPI rank 11 will hang on GPU
-#export LMP_STAT_SEGFAULT_RANK_GPU=11 # MPI rank 11 will hang on GPU
+#export LMP_STAT_SEGFAULT_RANK_GPU=11 # MPI rank 11 will segfault on GPU
 #export LMP_STAT_HANG_MINUTES=1 # rank will sleep for 1 minutes if hang on host (gpu hangs indefinitely)
 export LMP_STAT_STEP=9 # hang will occur on step 9
 
