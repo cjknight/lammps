@@ -38,13 +38,16 @@ static constexpr double TOLERANCE = 0.05;
 
 DihedralFourier::DihedralFourier(LAMMPS *lmp) : Dihedral(lmp)
 {
-   writedata = 1;
+  writedata = 1;
+  nterms_max = 0;
 }
 
 /* ---------------------------------------------------------------------- */
 
 DihedralFourier::~DihedralFourier()
 {
+  if (copymode) return;
+
   if (allocated) {
     memory->destroy(setflag);
     memory->destroy(nterms);
@@ -273,7 +276,7 @@ void DihedralFourier::allocate()
 
 void DihedralFourier::coeff(int narg, char **arg)
 {
-  if (narg < 4) error->all(FLERR,"Incorrect args for dihedral coefficients");
+  if (narg < 4) error->all(FLERR,"Incorrect args for dihedral coefficients" + utils::errorurl(21));
   if (!allocated) allocate();
 
   int ilo,ihi;
@@ -297,6 +300,7 @@ void DihedralFourier::coeff(int narg, char **arg)
   int count = 0;
   for (int i = ilo; i <= ihi; i++) {
     nterms[i] = nterms_one;
+    nterms_max = MAX(nterms_max,nterms_one);
     delete[] k[i];
     delete[] multiplicity[i];
     delete[] shift[i];
@@ -322,7 +326,7 @@ void DihedralFourier::coeff(int narg, char **arg)
     count++;
   }
 
-  if (count == 0) error->all(FLERR,"Incorrect args for dihedral coefficients");
+  if (count == 0) error->all(FLERR,"Incorrect args for dihedral coefficients" + utils::errorurl(21));
 }
 
 /* ----------------------------------------------------------------------

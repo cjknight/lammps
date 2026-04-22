@@ -44,7 +44,7 @@ class DerivativeException : public std::exception {
   {
     message = fmt::format("Order {} derivative of function {} in {} is not supported", deg, fn, vn);
   }
-  const char *what() const noexcept override { return message.c_str(); }
+  [[nodiscard]] const char *what() const noexcept override { return message.c_str(); }
 };
 }    // namespace Lepton
 
@@ -98,7 +98,7 @@ class VariableException : public std::exception {
   {
     message = fmt::format("Variable {} in expression {} does not exist", var, expr);
   }
-  const char *what() const noexcept override { return message.c_str(); }
+  [[nodiscard]] const char *what() const noexcept override { return message.c_str(); }
 };
 }    // namespace LeptonUtils
 
@@ -155,7 +155,7 @@ std::string LeptonUtils::substitute(const std::string &in, LAMMPS_NS::LAMMPS *lm
     vars.insert(name);
   }
 
-  auto variable = lmp->input->variable;
+  auto *variable = lmp->input->variable;
   fmt::dynamic_format_arg_store<fmt::format_context> args;
   for (const auto &v : vars) {
     const char *val = variable->retrieve(v.c_str());

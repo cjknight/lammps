@@ -1,18 +1,5 @@
-//@HEADER
-// ************************************************************************
-//
-//                        Kokkos v. 4.0
-//       Copyright (2022) National Technology & Engineering
-//               Solutions of Sandia, LLC (NTESS).
-//
-// Under the terms of Contract DE-NA0003525 with NTESS,
-// the U.S. Government retains certain rights in this software.
-//
-// Part of Kokkos, under the Apache License v2.0 with LLVM Exceptions.
-// See https://kokkos.org/LICENSE for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-//
-//@HEADER
+// SPDX-FileCopyrightText: Copyright Contributors to the Kokkos project
 
 #ifndef KOKKOS_IMPL_PUBLIC_INCLUDE
 #include <Kokkos_Macros.hpp>
@@ -73,9 +60,9 @@ class CudaSpace {
   CudaSpace(int device_id, cudaStream_t stream);
 
  public:
-  CudaSpace(CudaSpace&& rhs)      = default;
-  CudaSpace(const CudaSpace& rhs) = default;
-  CudaSpace& operator=(CudaSpace&& rhs) = default;
+  CudaSpace(CudaSpace&& rhs)                 = default;
+  CudaSpace(const CudaSpace& rhs)            = default;
+  CudaSpace& operator=(CudaSpace&& rhs)      = default;
   CudaSpace& operator=(const CudaSpace& rhs) = default;
   ~CudaSpace()                               = default;
 
@@ -174,9 +161,9 @@ class CudaUVMSpace {
   CudaUVMSpace(int device_id, cudaStream_t stream);
 
  public:
-  CudaUVMSpace(CudaUVMSpace&& rhs)      = default;
-  CudaUVMSpace(const CudaUVMSpace& rhs) = default;
-  CudaUVMSpace& operator=(CudaUVMSpace&& rhs) = default;
+  CudaUVMSpace(CudaUVMSpace&& rhs)                 = default;
+  CudaUVMSpace(const CudaUVMSpace& rhs)            = default;
+  CudaUVMSpace& operator=(CudaUVMSpace&& rhs)      = default;
   CudaUVMSpace& operator=(const CudaUVMSpace& rhs) = default;
   ~CudaUVMSpace()                                  = default;
 
@@ -266,9 +253,9 @@ class CudaHostPinnedSpace {
   CudaHostPinnedSpace(int device_id, cudaStream_t stream);
 
  public:
-  CudaHostPinnedSpace(CudaHostPinnedSpace&& rhs)      = default;
-  CudaHostPinnedSpace(const CudaHostPinnedSpace& rhs) = default;
-  CudaHostPinnedSpace& operator=(CudaHostPinnedSpace&& rhs) = default;
+  CudaHostPinnedSpace(CudaHostPinnedSpace&& rhs)                 = default;
+  CudaHostPinnedSpace(const CudaHostPinnedSpace& rhs)            = default;
+  CudaHostPinnedSpace& operator=(CudaHostPinnedSpace&& rhs)      = default;
   CudaHostPinnedSpace& operator=(const CudaHostPinnedSpace& rhs) = default;
   ~CudaHostPinnedSpace()                                         = default;
 
@@ -502,7 +489,7 @@ template <class MemSpace1, class MemSpace2, class ExecutionSpace>
 struct DeepCopy<MemSpace1, MemSpace2, ExecutionSpace,
                 std::enable_if_t<is_cuda_type_space<MemSpace1>::value &&
                                  is_cuda_type_space<MemSpace2>::value &&
-                                 !std::is_same<ExecutionSpace, Cuda>::value>> {
+                                 !std::is_same_v<ExecutionSpace, Cuda>>> {
   inline DeepCopy(void* dst, const void* src, size_t n) {
     DeepCopyCuda(dst, src, n);
   }
@@ -526,7 +513,7 @@ struct DeepCopy<MemSpace1, MemSpace2, ExecutionSpace,
 template <class MemSpace, class ExecutionSpace>
 struct DeepCopy<MemSpace, HostSpace, ExecutionSpace,
                 std::enable_if_t<is_cuda_type_space<MemSpace>::value &&
-                                 !std::is_same<ExecutionSpace, Cuda>::value>> {
+                                 !std::is_same_v<ExecutionSpace, Cuda>>> {
   inline DeepCopy(void* dst, const void* src, size_t n) {
     DeepCopyCuda(dst, src, n);
   }
@@ -549,7 +536,7 @@ struct DeepCopy<MemSpace, HostSpace, ExecutionSpace,
 template <class MemSpace, class ExecutionSpace>
 struct DeepCopy<HostSpace, MemSpace, ExecutionSpace,
                 std::enable_if_t<is_cuda_type_space<MemSpace>::value &&
-                                 !std::is_same<ExecutionSpace, Cuda>::value>> {
+                                 !std::is_same_v<ExecutionSpace, Cuda>>> {
   inline DeepCopy(void* dst, const void* src, size_t n) {
     DeepCopyCuda(dst, src, n);
   }

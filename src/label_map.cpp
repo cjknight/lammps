@@ -18,8 +18,12 @@
 #include "comm.h"
 #include "error.h"
 #include "force.h"
+#include "improper.h"
+#include "tokenizer.h"
 
+#include <algorithm>
 #include <cstring>
+#include <utility>
 
 using namespace LAMMPS_NS;
 
@@ -36,6 +40,8 @@ static const char cite_type_label_framework[] =
     " pages =   {3282--3297}\n"
     "}\n\n";
 
+static const std::string empty;
+
 /* ---------------------------------------------------------------------- */
 
 LabelMap::LabelMap(LAMMPS *_lmp, int _natomtypes, int _nbondtypes, int _nangletypes,
@@ -43,8 +49,6 @@ LabelMap::LabelMap(LAMMPS *_lmp, int _natomtypes, int _nbondtypes, int _nanglety
     Pointers(_lmp), natomtypes(_natomtypes), nbondtypes(_nbondtypes), nangletypes(_nangletypes),
     ndihedraltypes(_ndihedraltypes), nimpropertypes(_nimpropertypes)
 {
-  if (lmp->citeme) lmp->citeme->add(cite_type_label_framework);
-
   lmap2lmap.atom = lmap2lmap.bond = lmap2lmap.angle = lmap2lmap.dihedral = lmap2lmap.improper =
       nullptr;
   reset_type_labels();
@@ -111,6 +115,8 @@ void LabelMap::modify_lmap(int narg, char **arg)
 {
   if ((narg < 1) || ((narg > 2) && ((narg % 2) == 0)))
     error->all(FLERR, "Incorrect number of arguments for labelmap command");
+
+  if (lmp->citeme) lmp->citeme->add(cite_type_label_framework);
 
   int ntypes;
   std::vector<std::string> *labels;
@@ -238,6 +244,8 @@ int LabelMap::find_or_create(const std::string &mylabel, std::vector<std::string
   auto search = labels_map.find(mylabel);
   if (search != labels_map.end()) return search->second;
 
+  if (lmp->citeme) lmp->citeme->add(cite_type_label_framework);
+
   // if no match found, create new label at next available index
   // label map assumed to be intialized with numeric index
   // user labels are assumed to be alphanumeric (not a number)
@@ -252,7 +260,7 @@ int LabelMap::find_or_create(const std::string &mylabel, std::vector<std::string
 
   // if label cannot be found or created, need more space reserved
 
-  error->all(FLERR, "Topology type exceeds system topology type");
+  error->all(FLERR, "Topology type exceeds system topology type" + utils::errorurl(25));
 
   // never reaches here, just to prevent compiler warning
 
@@ -264,7 +272,7 @@ int LabelMap::find_or_create(const std::string &mylabel, std::vector<std::string
    return -1 if type not yet defined
 ------------------------------------------------------------------------- */
 
-int LabelMap::find(const std::string &mylabel, int mode) const
+int LabelMap::find_type(const std::string &mylabel, int mode) const
 {
   switch (mode) {
     case Atom::ATOM:
@@ -285,6 +293,45 @@ int LabelMap::find(const std::string &mylabel, int mode) const
     default:
       return -1;
   }
+}
+
+/* ----------------------------------------------------------------------
+   return type label given a numeric type
+   return "" if type label does not exist
+------------------------------------------------------------------------- */
+
+const std::string &LabelMap::find_label(int i, int mode) const
+{
+  switch (mode) {
+    case Atom::ATOM:
+      if ((i > 0) && (i <= atom->ntypes)) {
+        if (is_complete(mode)) return typelabel[i - 1];
+      }
+      break;
+    case Atom::BOND:
+      if ((i > 0) && (i <= atom->nbondtypes)) {
+        if (is_complete(mode)) return btypelabel[i - 1];
+      }
+      break;
+    case Atom::ANGLE:
+      if ((i > 0) && (i <= atom->nangletypes)) {
+        if (is_complete(mode)) return atypelabel[i - 1];
+      }
+      break;
+    case Atom::DIHEDRAL:
+      if ((i > 0) && (i <= atom->ndihedraltypes)) {
+        if (is_complete(mode)) return dtypelabel[i - 1];
+      }
+      break;
+    case Atom::IMPROPER:
+      if ((i > 0) && (i <= atom->nimpropertypes)) {
+        if (is_complete(mode)) return itypelabel[i - 1];
+      }
+      break;
+    default:
+      return empty;
+  }
+  return empty;
 }
 
 /* ----------------------------------------------------------------------
@@ -327,34 +374,267 @@ bool LabelMap::is_complete(int mode) const
 }
 
 /* ----------------------------------------------------------------------
+   infer bond type from two atom types
+   input/output is numeric types, uses type labels internally
+   assumes bond type labels are of the form "a-b" for atom types 'a' and 'b'
+   returns negative of numeric type if constituent atoms types in reverse order
+------------------------------------------------------------------------- */
+
+int LabelMap::infer_bondtype(int type1, int type2)
+{
+  // check for out of range input
+  if ((type1 < 1) || (type1 > natomtypes) || (type2 < 1) || (type2 > natomtypes)) return 0;
+
+  // convert numeric atom types to type label
+  std::vector<std::string> mytypes(2);
+  mytypes[0] = typelabel[type1 - 1];
+  mytypes[1] = typelabel[type2 - 1];
+  if (mytypes[0].empty() || mytypes[1].empty()) return 0;
+
+  return infer_bondtype(mytypes);
+}
+
+/* ----------------------------------------------------------------------
+   infer numeric type from two atom type labels
+   assumes bond types are of the form "a-b" for atom types 'a' and 'b'
+   returns negative of numeric type if constituent atoms types in reverse order
+------------------------------------------------------------------------- */
+
+int LabelMap::infer_bondtype(const std::vector<std::string> &mytypes)
+{
+  // search for matching bond type label with symmetry considerations
+  int out = 0;
+  std::vector<std::string> btypes(2);
+  for (int i = 0; i < nbondtypes; i++) {
+    int status = parse_typelabel(2, btypelabel[i], btypes);
+    if ((status != -1) && (btypes.size() == 2)) {
+      if (mytypes[0] == btypes[0] && mytypes[1] == btypes[1]) return i + 1;
+      if (mytypes[0] == btypes[1] && mytypes[1] == btypes[0]) out = -(i + 1);
+    }
+  }
+  return out;
+}
+
+/* ----------------------------------------------------------------------
+   infer angle type from three atom types
+   input/output is numeric types, uses type labels internally
+   assumes angle types of the form "a-b-c" for atom types 'a', 'b', 'c'
+   returns negative of numeric type if constituent atoms types in reverse order
+------------------------------------------------------------------------- */
+
+int LabelMap::infer_angletype(int type1, int type2, int type3)
+{
+  // check for out of range input
+  if ((type1 < 1) || (type1 > natomtypes) || (type2 < 1) || (type2 > natomtypes) || (type3 < 1) ||
+      (type3 > natomtypes))
+    return 0;
+
+  // convert numeric atom types to type label
+  std::vector<std::string> mytypes(3);
+  mytypes[0] = typelabel[type1 - 1];
+  mytypes[1] = typelabel[type2 - 1];
+  mytypes[2] = typelabel[type3 - 1];
+  for (size_t i = 0; i < 3; i++)
+    if (mytypes[i].empty()) return 0;
+
+  return infer_angletype(mytypes);
+}
+
+/* ----------------------------------------------------------------------
+   infer angle type from three atom types
+   input/output is numeric types, uses type labels internally
+   assumes angle types of the form "a-b-c" for atom types 'a', 'b', 'c'
+   returns negative of numeric type if constituent atoms types in reverse order
+------------------------------------------------------------------------- */
+
+int LabelMap::infer_angletype(const std::vector<std::string> &mytypes)
+{
+  // search for matching angle type label, with symmetry considerations
+
+  int out = 0;
+  int status;
+  std::vector<std::string> atypes(3);
+  for (int i = 0; i < nangletypes; i++) {
+    status = parse_typelabel(3, atypelabel[i], atypes);
+    if (status != -1 && mytypes[1] == atypes[1]) {
+      if (mytypes[0] == atypes[0] && mytypes[2] == atypes[2]) return i + 1;
+      if (mytypes[0] == atypes[2] && mytypes[2] == atypes[0]) out = -(i + 1);
+    }
+  }
+  return out;
+}
+
+/* ----------------------------------------------------------------------
+   infer dihedral type from four atom types
+   input/output is numeric types, uses type labels internally
+   assumes dihedral types of the form "a-b-c-d"
+   returns negative of numeric type if constituent atoms types in reverse order
+------------------------------------------------------------------------- */
+
+int LabelMap::infer_dihedraltype(int type1, int type2, int type3, int type4)
+{
+  // check for out of range input
+  if ((type1 < 1) || (type1 > natomtypes) || (type2 < 1) || (type2 > natomtypes) || (type3 < 1) ||
+      (type3 > natomtypes) || (type4 < 1) || (type4 > natomtypes))
+    return 0;
+
+  // convert numeric atom types to type label
+  std::vector<std::string> mytypes(4);
+  mytypes[0] = typelabel[type1 - 1];
+  mytypes[1] = typelabel[type2 - 1];
+  mytypes[2] = typelabel[type3 - 1];
+  mytypes[3] = typelabel[type4 - 1];
+  for (size_t i = 0; i < 4; i++)
+    if (mytypes[i].empty()) return 0;
+
+  return infer_dihedraltype(mytypes);
+}
+
+/* ----------------------------------------------------------------------
+   infer dihedral type from four atom types
+   input/output is numeric types, uses type labels internally
+   assumes dihedral types of the form "a-b-c-d"
+   returns negative of numeric type if constituent atoms types in reverse order
+------------------------------------------------------------------------- */
+
+int LabelMap::infer_dihedraltype(const std::vector<std::string> &mytypes)
+{
+  // search for matching dihedral type label
+
+  int out = 0;
+  int status;
+  std::vector<std::string> dtypes(4);
+  for (int i = 0; i < ndihedraltypes; i++) {
+    status = parse_typelabel(4, dtypelabel[i], dtypes);
+    if (status != -1) {
+      if (mytypes[0] == dtypes[0] && mytypes[1] == dtypes[1] && mytypes[2] == dtypes[2] &&
+           mytypes[3] == dtypes[3]) return i + 1;
+      if (mytypes[3] == dtypes[0] && mytypes[2] == dtypes[1] && mytypes[1] == dtypes[2] &&
+           mytypes[0] == dtypes[3]) out = -(i + 1);
+    }
+  }
+  return out;
+}
+
+/* ----------------------------------------------------------------------
+   infer improper type from four atom types
+   input/output is numeric types, uses type labels internally
+   assumes improper types of the form "a-b-c-d"
+   the symmetry of the improper is encoded in improper.symmatoms
+------------------------------------------------------------------------- */
+
+int LabelMap::infer_impropertype(int type1, int type2, int type3, int type4, std::array<int, 4> *iorder)
+{
+  // check for out of range input
+  if ((type1 < 1) || (type1 > natomtypes) || (type2 < 1) || (type2 > natomtypes) || (type3 < 1) ||
+      (type3 > natomtypes) || (type4 < 1) || (type4 > natomtypes))
+    return 0;
+
+  // convert numeric atom types to type label
+  std::vector<std::string> mytypes(4);
+  mytypes[0] = typelabel[type1 - 1];
+  mytypes[1] = typelabel[type2 - 1];
+  mytypes[2] = typelabel[type3 - 1];
+  mytypes[3] = typelabel[type4 - 1];
+  for (int i = 0; i < 4; i++)
+    if (mytypes[i].empty()) return 0;
+
+  return infer_impropertype(mytypes, iorder);
+}
+
+/* ----------------------------------------------------------------------
+   infer improper type from four atom types
+   input/output is numeric types, uses type labels internally
+   assumes improper types of the form "a-b-c-d"
+   the symmetry of the improper is encoded in improper.symmatoms
+------------------------------------------------------------------------- */
+
+int LabelMap::infer_impropertype(const std::vector<std::string> &mytypes, std::array<int, 4> *iorder)
+{
+  // search for matching improper type label
+  int out = 0;
+  int status, navail_types;
+  std::vector<std::string> itypes(4);
+  std::vector<std::string> avail_types;
+  for (int i = 0; i < nimpropertypes; i++) {
+    status = parse_typelabel(4, itypelabel[i], itypes);
+    if (status != -1) {
+      if (mytypes[0] == itypes[0] && mytypes[1] == itypes[1] && mytypes[2] == itypes[2] &&
+          mytypes[3] == itypes[3]) return i + 1;
+      navail_types = 4;
+      avail_types = mytypes;
+      for (int j = 0; j < 4; j++) {
+        if (force->improper && force->improper->symmatoms[j] == 1) {
+          if (mytypes[j] != itypes[j]) {
+            status = -1;
+            break;
+          }
+          avail_types[j] = "";
+          navail_types--;
+        }
+      }
+      if (status == -1) continue;
+
+      if (iorder) *iorder = {0, 1, 2, 3};
+      for (int j = 0; j < 4; j++) {
+        if (std::string(force->improper_style) == "none" || force->improper->symmatoms[j] == 0) {
+          for (int k = 0; k < 4; k++) {
+            if (itypes[j] == avail_types[k]) {
+              avail_types[k] = "";
+              navail_types--;
+              if (iorder) (*iorder)[j] = k;
+              break;
+            }
+          }
+        }
+      }
+      if (navail_types == 0) out = -(i + 1);
+    }
+  }
+  return out;
+}
+
+/* ----------------------------------------------------------------------
+   return -1 if number of parsed strings is not equal to ntypes input
+------------------------------------------------------------------------- */
+
+int LabelMap::parse_typelabel(int ntypes, const std::string &label, std::vector<std::string> &types)
+{
+  auto out = Tokenizer(label,"-").as_vector();
+  if ((int)out.size() != ntypes) return -1;
+  types = std::move(out);
+  return 1;
+}
+
+/* ----------------------------------------------------------------------
    proc 0 writes to data file
 ------------------------------------------------------------------------- */
 
 void LabelMap::write_data(FILE *fp)
 {
   if (is_complete(Atom::ATOM)) {
-    fmt::print(fp, "\nAtom Type Labels\n\n");
-    for (int i = 0; i < natomtypes; i++) fmt::print(fp, "{} {}\n", i + 1, typelabel[i]);
+    utils::print(fp, "\nAtom Type Labels\n\n");
+    for (int i = 0; i < natomtypes; i++) utils::print(fp, "{} {}\n", i + 1, typelabel[i]);
   }
 
   if (force->bond && is_complete(Atom::BOND)) {
-    fmt::print(fp, "\nBond Type Labels\n\n");
-    for (int i = 0; i < nbondtypes; i++) fmt::print(fp, "{} {}\n", i + 1, btypelabel[i]);
+    utils::print(fp, "\nBond Type Labels\n\n");
+    for (int i = 0; i < nbondtypes; i++) utils::print(fp, "{} {}\n", i + 1, btypelabel[i]);
   }
 
   if (force->angle && is_complete(Atom::ANGLE)) {
-    fmt::print(fp, "\nAngle Type Labels\n\n");
-    for (int i = 0; i < nangletypes; i++) fmt::print(fp, "{} {}\n", i + 1, atypelabel[i]);
+    utils::print(fp, "\nAngle Type Labels\n\n");
+    for (int i = 0; i < nangletypes; i++) utils::print(fp, "{} {}\n", i + 1, atypelabel[i]);
   }
 
   if (force->dihedral && is_complete(Atom::DIHEDRAL)) {
-    fmt::print(fp, "\nDihedral Type Labels\n\n");
-    for (int i = 0; i < ndihedraltypes; i++) fmt::print(fp, "{} {}\n", i + 1, dtypelabel[i]);
+    utils::print(fp, "\nDihedral Type Labels\n\n");
+    for (int i = 0; i < ndihedraltypes; i++) utils::print(fp, "{} {}\n", i + 1, dtypelabel[i]);
   }
 
   if (force->improper && is_complete(Atom::IMPROPER)) {
-    fmt::print(fp, "\nImproper Type Labels\n\n");
-    for (int i = 0; i < nimpropertypes; i++) fmt::print(fp, "{} {}\n", i + 1, itypelabel[i]);
+    utils::print(fp, "\nImproper Type Labels\n\n");
+    for (int i = 0; i < nimpropertypes; i++) utils::print(fp, "{} {}\n", i + 1, itypelabel[i]);
   }
 }
 
@@ -471,31 +751,31 @@ void LabelMap::write_map(const std::string &filename)
     if (typelabel_map.size() > 0) {
       fputs("labelmap atom", fp);
       for (int i = 0; i < natomtypes; ++i)
-        if (!typelabel[i].empty()) fmt::print(fp, " {} \"\"\" {} \"\"\"", i + 1, typelabel[i]);
+        if (!typelabel[i].empty()) utils::print(fp, R"( {} """ {} """)", i + 1, typelabel[i]);
       fputc('\n', fp);
     }
     if (btypelabel_map.size() > 0) {
       fputs("labelmap bond", fp);
       for (int i = 0; i < nbondtypes; ++i)
-        if (!btypelabel[i].empty()) fmt::print(fp, " {} \"\"\" {} \"\"\"", i + 1, btypelabel[i]);
+        if (!btypelabel[i].empty()) utils::print(fp, R"( {} """ {} """)", i + 1, btypelabel[i]);
       fputc('\n', fp);
     }
     if (atypelabel_map.size() > 0) {
       fputs("labelmap angle", fp);
       for (int i = 0; i < nangletypes; ++i)
-        if (!atypelabel[i].empty()) fmt::print(fp, " {} \"\"\" {} \"\"\"", i + 1, atypelabel[i]);
+        if (!atypelabel[i].empty()) utils::print(fp, R"( {} """ {} """)", i + 1, atypelabel[i]);
       fputc('\n', fp);
     }
     if (dtypelabel_map.size() > 0) {
       fputs("labelmap dihedral", fp);
       for (int i = 0; i < ndihedraltypes; ++i)
-        if (!dtypelabel[i].empty()) fmt::print(fp, " {} \"\"\" {} \"\"\"", i + 1, dtypelabel[i]);
+        if (!dtypelabel[i].empty()) utils::print(fp, R"( {} """ {} """)", i + 1, dtypelabel[i]);
       fputc('\n', fp);
     }
     if (itypelabel_map.size() > 0) {
       fputs("labelmap improper", fp);
       for (int i = 0; i < nimpropertypes; ++i)
-        if (!itypelabel[i].empty()) fmt::print(fp, " {} \"\"\" {} \"\"\"", i + 1, itypelabel[i]);
+        if (!itypelabel[i].empty()) utils::print(fp, R"( {} """ {} """)", i + 1, itypelabel[i]);
       fputc('\n', fp);
     }
     fclose(fp);

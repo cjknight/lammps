@@ -48,8 +48,8 @@ Fix::Fix(LAMMPS *lmp, int /*narg*/, char **arg) :
     error->all(FLERR,"Fix ID must be alphanumeric or underscore characters");
 
   igroup = group->find(arg[1]);
-  if (igroup == -1) error->all(FLERR,"Could not find fix group ID");
-  groupbit = group->bitmask[igroup];
+  if (igroup == -1) error->all(FLERR,"Could not find fix {} group ID {}", arg[2], arg[1]);
+  groupbit = group->get_bitmask_by_id(FLERR, arg[1], fmt::format("fix {}",arg[2]));
 
   style = utils::strdup(arg[2]);
 
@@ -58,6 +58,7 @@ Fix::Fix(LAMMPS *lmp, int /*narg*/, char **arg) :
   box_change = NO_BOX_CHANGE;
   thermo_energy = 0;
   thermo_virial = 0;
+  thermo_modify_colname = 0;
   energy_global_flag = energy_peratom_flag = 0;
   virial_global_flag = virial_peratom_flag = 0;
   ecouple_flag = 0;
@@ -83,7 +84,7 @@ Fix::Fix(LAMMPS *lmp, int /*narg*/, char **arg) :
   scalar_flag = vector_flag = array_flag = 0;
   extscalar = extvector = extarray = -1;
   peratom_flag = local_flag = pergrid_flag = 0;
-  global_freq = local_freq = peratom_freq = pergrid_freq = -1;
+  local_freq = peratom_freq = pergrid_freq = -1;
   size_vector_variable = size_array_rows_variable = 0;
 
   comm_forward = comm_reverse = comm_border = 0;
@@ -133,13 +134,13 @@ void Fix::init_flags()
 {
    if (scalar_flag && (extscalar < 0))
     error->all(FLERR, "Must set 'extscalar' when setting 'scalar_flag' for fix {}.  "
-               "Contact the developer.", style);
+               "Please contact the LAMMPS developers.{}", style, utils::errorurl(35));
   if (vector_flag && (extvector < 0) && !extlist)
     error->all(FLERR, "Must set 'extvector' or 'extlist' when setting 'vector_flag' for fix {}.  "
-               "Contact the developer.", style);
+               "Please contact the LAMMPS developers.{}", style, utils::errorurl(35));
   if (array_flag && (extarray < 0))
     error->all(FLERR, "Must set 'extarray' when setting 'array_flag' for fix {}.  "
-               "Contact the developer.", style);
+               "Please contact the LAMMPS developers.{}", style, utils::errorurl(35));
 }
 
 /* ----------------------------------------------------------------------
