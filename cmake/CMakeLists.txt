@@ -723,6 +723,9 @@ endif()
 # add libittnotify
 target_link_libraries(lammps PRIVATE "-L$ENV{VTUNE_PROFILER_DIR}/lib64 -littnotify")
 
+#add geopm
+target_link_libraries(lammps PRIVATE "-L$ENV{MY_GEOPM}/lib64 -lgeopmd -lpthread")
+
 ######################################################################
 # the windows version of LAMMPS requires a couple extra libraries
 # and the MPI library - if use - has to be linked right before those
