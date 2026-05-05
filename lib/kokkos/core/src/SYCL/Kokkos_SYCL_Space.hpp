@@ -47,7 +47,7 @@ class SYCLDeviceUSMSpace {
   using size_type       = Impl::SYCLInternal::size_type;
 
   SYCLDeviceUSMSpace();
-  explicit SYCLDeviceUSMSpace(sycl::queue queue);
+  explicit SYCLDeviceUSMSpace(synergy::queue queue);
 
   void* allocate(const SYCL& exec_space,
                  const std::size_t arg_alloc_size) const;
@@ -67,7 +67,7 @@ class SYCLDeviceUSMSpace {
   static constexpr const char* name() { return "SYCLDeviceUSM"; }
 
  private:
-  sycl::queue m_queue;
+  synergy::queue m_queue;
 };
 
 class SYCLSharedUSMSpace {
@@ -78,7 +78,7 @@ class SYCLSharedUSMSpace {
   using size_type       = Impl::SYCLInternal::size_type;
 
   SYCLSharedUSMSpace();
-  explicit SYCLSharedUSMSpace(sycl::queue queue);
+  explicit SYCLSharedUSMSpace(synergy::queue queue);
 
   template <typename ExecutionSpace>
   void* allocate(const ExecutionSpace&, const size_t arg_alloc_size) const {
@@ -108,7 +108,7 @@ class SYCLSharedUSMSpace {
   static constexpr const char* name() { return "SYCLSharedUSM"; }
 
  private:
-  sycl::queue m_queue;
+  synergy::queue m_queue;
 };
 
 class SYCLHostUSMSpace {
@@ -119,7 +119,7 @@ class SYCLHostUSMSpace {
   using size_type       = Impl::SYCLInternal::size_type;
 
   SYCLHostUSMSpace();
-  explicit SYCLHostUSMSpace(sycl::queue queue);
+  explicit SYCLHostUSMSpace(synergy::queue queue);
 
   template <typename ExecutionSpace>
   void* allocate(const ExecutionSpace&, const size_t arg_alloc_size) const {
@@ -149,7 +149,7 @@ class SYCLHostUSMSpace {
   static constexpr const char* name() { return "SYCLHostUSM"; }
 
  private:
-  sycl::queue m_queue;
+  synergy::queue m_queue;
 };
 
 namespace Impl {

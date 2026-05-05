@@ -27,6 +27,9 @@
 
 #include <impl/Kokkos_Error.hpp>
 #include <impl/Kokkos_Profiling.hpp>
+
+#include <synergy.hpp>
+
 namespace Kokkos {
 namespace Impl {
 
@@ -78,11 +81,11 @@ class SYCLInternal {
   uint32_t m_instance_id =
       Kokkos::Tools::Experimental::Impl::idForInstance<Kokkos::SYCL>(
           reinterpret_cast<uintptr_t>(this));
-  std::optional<sycl::queue> m_queue;
+  std::optional<synergy::queue> m_queue;
 
   // Using std::vector<std::optional<sycl::queue>> reveals a compiler bug when
   // compiling for the CUDA backend. Storing pointers instead works around this.
-  static std::vector<std::optional<sycl::queue>*> all_queues;
+  static std::vector<std::optional<synergy::queue>*> all_queues;
   // We need a mutex for thread safety when modifying all_queues.
   static std::mutex mutex;
 
@@ -93,13 +96,13 @@ class SYCLInternal {
    public:
     void reset();
 
-    void reset(sycl::queue q, uint32_t instance_id) {
+    void reset(synergy::queue q, uint32_t instance_id) {
       m_instance_id = instance_id;
       reset();
       m_q.emplace(std::move(q));
     }
     USMObjectMem() = default;
-    explicit USMObjectMem(sycl::queue q, uint32_t instance_id) noexcept
+    explicit USMObjectMem(synergy::queue q, uint32_t instance_id) noexcept
         : m_q(std::move(q)), m_instance_id(instance_id) {}
 
     USMObjectMem(USMObjectMem const&)            = delete;
@@ -175,7 +178,7 @@ class SYCLInternal {
 
     sycl::event m_copy_event;
 
-    std::optional<sycl::queue> m_q;
+    std::optional<synergy::queue> m_q;
     void* m_data = nullptr;
     std::unique_ptr<char[]> m_staging;
 
@@ -202,7 +205,7 @@ class SYCLInternal {
 
   void initialize(const sycl::device& d);
 
-  void initialize(const sycl::queue& q);
+  void initialize(const synergy::queue& q);
 
   int is_initialized() const { return m_queue.has_value(); }
 
@@ -221,7 +224,7 @@ class SYCLInternal {
   size_t m_pool_next{0};
 
  public:
-  static void fence(sycl::queue& q, const std::string& name,
+  static void fence(synergy::queue& q, const std::string& name,
                     uint32_t instance_id) {
     fence_helper(q, name, instance_id);
   }

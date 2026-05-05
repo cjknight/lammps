@@ -39,7 +39,7 @@ void DeepCopySYCL(void* dst, const void* src, size_t n) {
 
 void DeepCopyAsyncSYCL(const Kokkos::SYCL& instance, void* dst, const void* src,
                        size_t n) {
-  sycl::queue& q = instance.sycl_queue();
+  synergy::queue& q = instance.sycl_queue();
   auto event     = q.memcpy(dst, src, n);
 #ifndef KOKKOS_IMPL_SYCL_USE_IN_ORDER_QUEUES
   q.ext_oneapi_submit_barrier(std::vector<sycl::event>{event});
@@ -75,22 +75,22 @@ std::string_view get_memory_space_name(sycl::usm::alloc allocation_kind) {
 namespace Kokkos {
 
 SYCLDeviceUSMSpace::SYCLDeviceUSMSpace() : m_queue(SYCL().sycl_queue()) {}
-SYCLDeviceUSMSpace::SYCLDeviceUSMSpace(sycl::queue queue)
+SYCLDeviceUSMSpace::SYCLDeviceUSMSpace(synergy::queue queue)
     : m_queue(std::move(queue)) {}
 
 SYCLSharedUSMSpace::SYCLSharedUSMSpace() : m_queue(SYCL().sycl_queue()) {}
-SYCLSharedUSMSpace::SYCLSharedUSMSpace(sycl::queue queue)
+SYCLSharedUSMSpace::SYCLSharedUSMSpace(synergy::queue queue)
     : m_queue(std::move(queue)) {}
 
 SYCLHostUSMSpace::SYCLHostUSMSpace() : m_queue(SYCL().sycl_queue()) {}
-SYCLHostUSMSpace::SYCLHostUSMSpace(sycl::queue queue)
+SYCLHostUSMSpace::SYCLHostUSMSpace(synergy::queue queue)
     : m_queue(std::move(queue)) {}
 
 void* allocate_sycl(const char* arg_label, const size_t arg_alloc_size,
                     const size_t arg_logical_size,
                     const Kokkos::Tools::SpaceHandle arg_handle,
                     const sycl::usm::alloc allocation_kind,
-                    const sycl::queue& queue) {
+                    const synergy::queue& queue) {
   void* const hostPtr = sycl::malloc(arg_alloc_size, queue, allocation_kind);
 
   if (hostPtr == nullptr) {
@@ -184,7 +184,7 @@ void* SYCLHostUSMSpace::allocate(const char* arg_label,
 void sycl_deallocate(const char* arg_label, void* const arg_alloc_ptr,
                      const size_t arg_alloc_size, const size_t arg_logical_size,
                      const Kokkos::Tools::SpaceHandle arg_handle,
-                     const sycl::queue& queue) {
+                     const synergy::queue& queue) {
   if (Kokkos::Profiling::profileLibraryLoaded()) {
     const size_t reported_size =
         (arg_logical_size > 0) ? arg_logical_size : arg_alloc_size;

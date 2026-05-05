@@ -39,7 +39,7 @@ std::size_t scratch_count(const std::size_t size) {
 
 }  // namespace
 
-std::vector<std::optional<sycl::queue>*> SYCLInternal::all_queues;
+std::vector<std::optional<synergy::queue>*> SYCLInternal::all_queues;
 std::mutex SYCLInternal::mutex;
 
 Kokkos::View<uint32_t*, SYCLDeviceUSMSpace> sycl_global_unique_token_locks(
@@ -92,14 +92,14 @@ void SYCLInternal::initialize(const sycl::device& d) {
   };
 #ifdef KOKKOS_IMPL_SYCL_USE_IN_ORDER_QUEUES
   initialize(
-      sycl::queue{d, exception_handler, sycl::property::queue::in_order()});
+      synergy::queue{d, exception_handler, sycl::property::queue::in_order()});
 #else
-  initialize(sycl::queue{d, exception_handler});
+  initialize(synergy::queue{d, exception_handler});
 #endif
 }
 
 // FIXME_SYCL
-void SYCLInternal::initialize(const sycl::queue& q) {
+void SYCLInternal::initialize(const synergy::queue& q) {
   KOKKOS_EXPECTS(!is_initialized());
 
 #define KOKKOS_IMPL_CHECK_SYCL_BACKEND_SUPPORT(BACKEND, REQUIRED)            \
@@ -337,7 +337,7 @@ void SYCLInternal::fence_helper(WAT& wat, const std::string& name,
         }
       });
 }
-template void SYCLInternal::fence_helper<sycl::queue>(sycl::queue&,
+template void SYCLInternal::fence_helper<synergy::queue>(synergy::queue&,
                                                       const std::string&,
                                                       uint32_t);
 template void SYCLInternal::fence_helper<sycl::event>(sycl::event&,

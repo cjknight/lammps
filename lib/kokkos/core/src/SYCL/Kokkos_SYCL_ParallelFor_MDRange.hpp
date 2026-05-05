@@ -20,7 +20,6 @@
 #include <limits>
 
 #include <sycl/sycl.hpp>
-
 #include <impl/KokkosExp_IterateTileGPU.hpp>
 
 #ifdef KOKKOS_IMPL_SYCL_USE_IN_ORDER_QUEUES
@@ -154,7 +153,7 @@ class Kokkos::Impl::ParallelFor<FunctorType, Kokkos::MDRangePolicy<Traits...>,
   sycl::event sycl_direct_launch(const FunctorWrapper& functor_wrapper,
                                  const sycl::event& memcpy_event) const {
     // Convenience references
-    sycl::queue& q = m_space.sycl_queue();
+    synergy::queue& q = m_space.sycl_queue();
 
     if (m_policy.m_num_tiles == 0) return {};
 

@@ -87,7 +87,7 @@ class Kokkos::Impl::ParallelReduce<CombinedFunctorReducerType,
     // Convenience references
     Kokkos::Impl::SYCLInternal& instance =
         *m_space.impl_internal_space_instance();
-    sycl::queue& q = m_space.sycl_queue();
+    synergy::queue& q = m_space.sycl_queue();
 
     const typename Policy::index_type n_tiles = m_policy.m_num_tiles;
     const unsigned int value_count =

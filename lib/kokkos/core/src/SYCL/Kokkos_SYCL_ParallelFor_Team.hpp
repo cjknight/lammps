@@ -53,7 +53,7 @@ class Kokkos::Impl::ParallelFor<FunctorType, Kokkos::TeamPolicy<Properties...>,
                                  const sycl::event& memcpy_event) const {
     // Convenience references
     const Kokkos::SYCL& space = m_policy.space();
-    sycl::queue& q            = space.sycl_queue();
+    synergy::queue& q            = space.sycl_queue();
 
     desul::ensure_sycl_lock_arrays_on_device(q);
 

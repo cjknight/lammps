@@ -62,13 +62,13 @@ class SYCL {
   using scratch_memory_space = ScratchMemorySpace<SYCL>;
 
   SYCL();
-  explicit SYCL(const sycl::queue&);
+  explicit SYCL(const synergy::queue&);
 
   uint32_t impl_instance_id() const noexcept {
     return m_space_instance->impl_get_instance_id();
   }
 
-  sycl::queue& sycl_queue() const noexcept {
+  synergy::queue& sycl_queue() const noexcept {
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     return *m_space_instance->m_queue;
   }
@@ -156,7 +156,7 @@ std::vector<SYCL> impl_partition_space(const SYCL& base_instance,
   instances.reserve(weights.size());
   std::generate_n(std::back_inserter(instances), weights.size(),
                   [&context, &device]() {
-                    return SYCL(sycl::queue(context, device
+                    return SYCL(synergy::queue(context, device
 #ifdef KOKKOS_IMPL_SYCL_USE_IN_ORDER_QUEUES
                                             ,
                                             sycl::property::queue::in_order()

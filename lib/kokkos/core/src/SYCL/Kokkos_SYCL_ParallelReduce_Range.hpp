@@ -61,7 +61,7 @@ class Kokkos::Impl::ParallelReduce<
     const Kokkos::SYCL& space = policy.space();
     Kokkos::Impl::SYCLInternal& instance =
         *space.impl_internal_space_instance();
-    sycl::queue& q = space.sycl_queue();
+    synergy::queue& q = space.sycl_queue();
 
     std::size_t size = policy.end() - policy.begin();
     const unsigned int value_count =

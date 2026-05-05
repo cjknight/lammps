@@ -53,7 +53,7 @@ SYCL::SYCL()
       "SYCL instance constructor");
 }
 
-SYCL::SYCL(const sycl::queue& stream)
+SYCL::SYCL(const synergy::queue& stream)
     : m_space_instance(new Impl::SYCLInternal, [](Impl::SYCLInternal* ptr) {
         ptr->finalize();
         delete ptr;
