@@ -192,6 +192,13 @@ void PairMLIAP::settings(int narg, char ** arg)
         iarg += 3;
       }
 #endif
+#ifdef MLIAP_MTP
+        else if (strcmp(arg[iarg+1], "mtp") == 0) {
+          if (iarg+3 > narg) utils::missing_cmd_args(FLERR, "pair_style mliap descriptor mtp", error);
+          descriptor = new MLIAPDescriptorMTP(lmp,arg[iarg+2]);
+          iarg += 3;
+        }
+#endif
       else error->all(FLERR,"Illegal pair_style mliap command");
     } else if (strcmp(arg[iarg], "unified") == 0) {
 #ifdef MLIAP_PYTHON
