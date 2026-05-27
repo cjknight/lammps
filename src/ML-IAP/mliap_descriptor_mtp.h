@@ -26,6 +26,9 @@ class MLIAPDescriptorMTP : public MLIAPDescriptor {
   void init() override;
 
   void compute_descriptors(class MLIAPData *) override;
+  void compute_descriptor_gradients(class MLIAPData *) override;
+  void compute_forces(class MLIAPData *) override;
+  void compute_force_gradients(class MLIAPData *) override;
 
  protected:
   enum BasisType {
@@ -55,6 +58,11 @@ class MLIAPDescriptorMTP : public MLIAPDescriptor {
 
   int n_descriptors;
 
+  std::vector<std::string> species;
+  std::vector<BasisSpec> basis_specs;
+
+  // radial_coeffs[mu][itype][jtype][n]
+  std::vector<std::vector<std::vector<std::vector<double>>>> radial_coeffs;
 
   void build_basis_index();
 
@@ -67,8 +75,6 @@ class MLIAPDescriptorMTP : public MLIAPDescriptor {
                                 int itype,
                                 int jtype,
                                 std::vector<double> &fmu);
-
-  void compute_forces(class MLIAPData *);
 };    // namespace LAMMPS_NS
 
 }

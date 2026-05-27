@@ -11,40 +11,24 @@
    See the README file in the top-level LAMMPS directory.
 ------------------------------------------------------------------------- */
 
-#ifdef MLIAP_MTP
+//#ifdef MLIAP_MTP
 
 #include "mliap_descriptor_mtp.h"
 
-// #include "ace-evaluator/ace_abstract_basis.h"
-// #include "ace-evaluator/ace_c_basis.h"
-// #include "ace-evaluator/ace_evaluator.h"
-// #include "ace-evaluator/ace_types.h"
-
 #include "atom.h"
-#include "comm.h"
+#include "error.h"
 #include "memory.h"
-#include "mliap_data.h"
+#include "neighbor.h"
+#include "neigh_list.h"
 #include "pair_mliap.h"
-
-namespace LAMMPS_NS {
-// struct ACE_ML_impl {
-//   ACE_ML_impl() : basis_set(nullptr), ace(nullptr) {}
-//   ~ACE_ML_impl()
-//   {
-//     delete basis_set;
-//     delete ace;
-//   }
-//   ACECTildeBasisSet *basis_set;
-//   ACECTildeEvaluator *ace;
-// };
-}    // namespace LAMMPS_NS
+#include "mliap_data.h"
 
 using namespace LAMMPS_NS;
 
 /* ---------------------------------------------------------------------- */
 
 MLIAPDescriptorMTP::MLIAPDescriptorMTP(LAMMPS *_lmp) :
-    MLIAPDescriptor(_lmp)
+    Pointers(_lmp), MLIAPDescriptor(_lmp)
 {
   cutoff = 5.0;
   rmin = 0.8;
@@ -58,6 +42,7 @@ MLIAPDescriptorMTP::MLIAPDescriptorMTP(LAMMPS *_lmp) :
   n_descriptors = 0;
 }
 
+/*
 void MLIAPDescriptorMTP::read_paramfile(char *fname)
 {
   std::ifstream fp(fname);
@@ -188,6 +173,7 @@ void MLIAPDescriptorMTP::read_paramfile(char *fname)
   if (n_rf <= 0)
     error->all(FLERR, "Invalid n_rf in MTP descriptor");
 }
+*/
 
 /* ---------------------------------------------------------------------- */
 
@@ -239,7 +225,7 @@ void MLIAPDescriptorMTP::build_basis_index()
   // nu0 x nu1^2
   for (int mu0 = 0; mu0 < n_rf; mu0++) {
     for (int mu1 = 0; mu1 < n_rf; mu1++) {
-      if (2 * mu0 + 2 * (2 * mu1 + 4) <= max_leve) {
+      if (2 * mu0 + 2 * (2 * mu1 + 4) <= max_level) {
         BasisSpec spec;
         spec.type = NU0_X_NU1SQ;
         spec.mu[0] = mu0;
@@ -383,75 +369,111 @@ void MLIAPDescriptorMTP::compute_radial_functions(
 
 void MLIAPDescriptorMTP::compute_descriptors(MLIAPData *data)
 {
-  double **x = atom->x;
   int *type = atom->type;
 
-  int inum = list->inum;
-  int *ilist = list->ilist;
-  int *numneigh = list->numneigh;
-  int **firstneigh = list->firstneigh;
+  int nlistatoms = data->nlistatoms;
 
-  for (int ii = 0; ii < inum; ii++) {
+  int *iatoms = data->iatoms;
+  int *numneighs = data->numneighs;
 
-    int i = ilist[ii];
+  int *pair_i = data->pair_i;
+  int *jatoms = data->jatoms;
+
+  double **rij = data->rij;
+
+  int pair_index = 0;
+
+  for (int ii = 0; ii < nlistatoms; ii++) {
+
+    int i = iatoms[ii];
 
     std::vector<double> M0(n_rf, 0.0);
     std::vector<double> M1(n_rf * 3, 0.0);
     std::vector<double> M2(n_rf * 9, 0.0);
 
-    int *jlist = firstneigh[i];
-    int jnum = numneigh[i];
+    int jnum = numneighs[ii];
 
-    for (int jj = 0; jj < jnum; jj++) {
+    for (int jj = 0; jj < jnum; jj++, pair_index++) {
 
-      int j = jlist[jj] & NEIGHMASK;
+      int j = jatoms[pair_index];
 
-      double dx = x[j][0] - x[i][0];
-      double dy = x[j][1] - x[i][1];
-      double dz = x[j][2] - x[i][2];
+      double dx = rij[pair_index][0];
+      double dy = rij[pair_index][1];
+      double dz = rij[pair_index][2];
 
       double rsq = dx*dx + dy*dy + dz*dz;
       double r = sqrt(rsq);
 
-      if (r >= cutoff) continue;
+      if (r >= cutoff)
+        continue;
 
       std::vector<double> fmu;
-      compute_radial_functions(r,
-                               type[i]-1,
-                               type[j]-1,
-                               fmu);
+
+      compute_radial_functions(
+        r,
+        type[i]-1,
+        type[j]-1,
+        fmu);
 
       for (int mu = 0; mu < n_rf; mu++) {
 
         double f = fmu[mu];
 
+        // -------------------------------------------------
         // M0
+        // -------------------------------------------------
+
         M0[mu] += f;
 
+        // -------------------------------------------------
         // M1
+        // -------------------------------------------------
+
         M1[mu*3 + 0] += f * dx;
         M1[mu*3 + 1] += f * dy;
         M1[mu*3 + 2] += f * dz;
 
+        // -------------------------------------------------
         // M2
+        // -------------------------------------------------
+
         if (max_nu >= 2) {
+
           M2[mu*9 + 0] += f * dx * dx;
           M2[mu*9 + 1] += f * dx * dy;
           M2[mu*9 + 2] += f * dx * dz;
+
           M2[mu*9 + 3] += f * dy * dx;
           M2[mu*9 + 4] += f * dy * dy;
           M2[mu*9 + 5] += f * dy * dz;
+
           M2[mu*9 + 6] += f * dz * dx;
           M2[mu*9 + 7] += f * dz * dy;
           M2[mu*9 + 8] += f * dz * dz;
         }
+
+        // -------------------------------------------------
+        // TODO:
+        // graddesc accumulation
+        // -------------------------------------------------
       }
     }
 
+    // -----------------------------------------------------
+    // Build invariant descriptor vector
+    // -----------------------------------------------------
+
     int k = 0;
 
-    for (int s = 0; s < (int)species.size(); s++)
-      data->descriptors[ii][k++] = ((type[i]-1) == s);
+    // Species one-hot
+
+    for (int s = 0; s < (int)species.size(); s++) {
+
+      data->descriptors[ii][k++] =
+        ((type[i]-1) == s) ? 1.0 : 0.0;
+    }
+
+    // Invariant basis functions
 
     for (size_t b = 0; b < basis_specs.size(); b++) {
 
@@ -469,17 +491,18 @@ void MLIAPDescriptorMTP::compute_descriptors(MLIAPData *data)
         int b2 = spec.mu[1];
 
         val =
-          M1[a*3+0]*M1[b2*3+0] +
-          M1[a*3+1]*M1[b2*3+1] +
-          M1[a*3+2]*M1[b2*3+2];
+          M1[a*3 + 0] * M1[b2*3 + 0] +
+          M1[a*3 + 1] * M1[b2*3 + 1] +
+          M1[a*3 + 2] * M1[b2*3 + 2];
 
       } else if (spec.type == NU2_FROB) {
 
         int a = spec.mu[0];
         int b2 = spec.mu[1];
 
-        for (int q = 0; q < 9; q++)
-          val += M2[a*9+q] * M2[b2*9+q];
+        for (int q = 0; q < 9; q++) {
+          val += M2[a*9 + q] * M2[b2*9 + q];
+        }
       }
 
       data->descriptors[ii][k++] = val;
@@ -488,46 +511,199 @@ void MLIAPDescriptorMTP::compute_descriptors(MLIAPData *data)
 }
 
 
-void MLIAPDescriptorMTP::compute_descriptor_gradients(MLIAPData *data)
+void MLIAPDescriptorMTP::compute_descriptor_gradients(
+  MLIAPData *data)
 {
-  double **x = atom->x;
   int *type = atom->type;
+  int nlistatoms = data->nlistatoms;
+  int *iatoms = data->iatoms;
+  int *numneighs = data->numneighs;
+  int *jatoms = data->jatoms;
+  double **rij = data->rij;
 
-  int inum = list->inum;
-  int *ilist = list->ilist;
-  int *numneigh = list->numneigh;
-  int **firstneigh = list->firstneigh;
+  int pair_index = 0;
 
-  for (int ii = 0; ii < inum; ii++) {
+  for (int ii = 0; ii < nlistatoms; ii++) {
+    int i = iatoms[ii];
+    int jnum = numneighs[ii];
 
-    int i = ilist[ii];
+    // -------------------------------------------------------
+    // First pass:
+    // build full moment tensors for atom i
+    // -------------------------------------------------------
 
-    int *jlist = firstneigh[i];
-    int jnum = numneigh[i];
+    std::vector<double> M0(n_rf, 0.0);
+    std::vector<double> M1(n_rf * 3, 0.0);
+    std::vector<double> M2(n_rf * 9, 0.0);
 
-    for (int jj = 0; jj < jnum; jj++) {
+    int pair_start = pair_index;
 
-      int j = jlist[jj] & NEIGHMASK;
+    for (int jj = 0; jj < jnum; jj++, pair_index++) {
 
-      double dx = x[j][0] - x[i][0];
-      double dy = x[j][1] - x[i][1];
-      double dz = x[j][2] - x[i][2];
+      int j = jatoms[pair_index];
+
+      double dx = rij[pair_index][0];
+      double dy = rij[pair_index][1];
+      double dz = rij[pair_index][2];
+
+      double r = sqrt(dx*dx + dy*dy + dz*dz);
+
+      if (r >= cutoff)
+        continue;
+
+      // ---------------------------------------------
+      // Compute Chebyshev basis + radial functions
+      // ---------------------------------------------
+
+      std::vector<double> T(n_radial, 0.0);
+
+      double x =
+        (2.0 * r - rmin - cutoff) /
+        (cutoff - rmin + 1e-10);
+
+      if (x > 1.0) x = 1.0;
+      if (x < -1.0) x = -1.0;
+
+      double fc = cutoff_function(r);
+
+      T[0] = 1.0;
+
+      if (n_radial >= 2)
+        T[1] = x;
+
+      for (int n = 2; n < n_radial; n++)
+        T[n] = 2.0 * x * T[n-1] - T[n-2];
+
+      for (int n = 0; n < n_radial; n++)
+        T[n] *= fc;
+
+      std::vector<double> fmu(n_rf, 0.0);
+
+      for (int mu = 0; mu < n_rf; mu++) {
+
+        double f = 0.0;
+
+        for (int n = 0; n < n_radial; n++) {
+
+          f +=
+            radial_coeffs[mu][type[i]-1][type[j]-1][n]
+            * T[n];
+        }
+
+        fmu[mu] = f;
+
+        // -----------------------------------------
+        // M0
+        // -----------------------------------------
+
+        M0[mu] += f;
+
+        // -----------------------------------------
+        // M1
+        // -----------------------------------------
+
+        M1[mu*3 + 0] += f * dx;
+        M1[mu*3 + 1] += f * dy;
+        M1[mu*3 + 2] += f * dz;
+
+        // -----------------------------------------
+        // M2
+        // -----------------------------------------
+
+        if (max_nu >= 2) {
+
+          M2[mu*9 + 0] += f * dx * dx;
+          M2[mu*9 + 1] += f * dx * dy;
+          M2[mu*9 + 2] += f * dx * dz;
+
+          M2[mu*9 + 3] += f * dy * dx;
+          M2[mu*9 + 4] += f * dy * dy;
+          M2[mu*9 + 5] += f * dy * dz;
+
+          M2[mu*9 + 6] += f * dz * dx;
+          M2[mu*9 + 7] += f * dz * dy;
+          M2[mu*9 + 8] += f * dz * dz;
+        }
+      }
+    }
+
+    // -------------------------------------------------------
+    // Second pass:
+    // descriptor derivatives
+    // -------------------------------------------------------
+
+    pair_index = pair_start;
+
+    for (int jj = 0; jj < jnum; jj++, pair_index++) {
+
+      int j = jatoms[pair_index];
+
+      double dx = rij[pair_index][0];
+      double dy = rij[pair_index][1];
+      double dz = rij[pair_index][2];
 
       double rsq = dx*dx + dy*dy + dz*dz;
       double r = sqrt(rsq);
 
-      if (r >= cutoff) continue;
+      if (r >= cutoff)
+        continue;
 
-      double rinv = 1.0 / (r + 1e-12);
+      double rinv = 1.0 / (r + 1e-20);
 
       double ex = dx * rinv;
       double ey = dy * rinv;
       double ez = dz * rinv;
 
-      // radial functions + derivatives
-      std::vector<double> fmu, dfmu;
-      fmu.resize(n_rf);
-      dfmu.resize(n_rf);
+      // ---------------------------------------------------
+      // Chebyshev basis + derivatives
+      // ---------------------------------------------------
+
+      double denom = (cutoff - rmin + 1e-10);
+
+      double x =
+        (2.0 * r - rmin - cutoff) / denom;
+
+      if (x > 1.0) x = 1.0;
+      if (x < -1.0) x = -1.0;
+
+      double dxdr = 2.0 / denom;
+
+      double fc = cutoff_function(r);
+
+      double dfcdr = 0.0;
+
+      if (r < cutoff) {
+
+        double tmp = (cutoff - r) / (cutoff - rmin);
+
+        if (tmp > 0.0)
+          dfcdr = -2.0 * tmp / (cutoff - rmin);
+      }
+
+      std::vector<double> T(n_radial, 0.0);
+      std::vector<double> dTdx(n_radial, 0.0);
+
+      T[0] = 1.0;
+      dTdx[0] = 0.0;
+
+      if (n_radial >= 2) {
+        T[1] = x;
+        dTdx[1] = 1.0;
+      }
+
+      for (int n = 2; n < n_radial; n++) {
+
+        T[n] =
+          2.0 * x * T[n-1] - T[n-2];
+
+        dTdx[n] =
+          2.0 * T[n-1]
+          + 2.0 * x * dTdx[n-1]
+          - dTdx[n-2];
+      }
+
+      std::vector<double> fmu(n_rf, 0.0);
+      std::vector<double> dfmu(n_rf, 0.0);
 
       for (int mu = 0; mu < n_rf; mu++) {
 
@@ -539,101 +715,201 @@ void MLIAPDescriptorMTP::compute_descriptor_gradients(MLIAPData *data)
           double c =
             radial_coeffs[mu][type[i]-1][type[j]-1][n];
 
-          double Tn = 0.0; // assume cached or recomputed consistently
-          double dTn = 0.0;
+          double basis = T[n] * fc;
 
-          f  += c * Tn;
-          df += c * dTn;
+          double dbasisdr =
+            dTdx[n] * dxdr * fc
+            + T[n] * dfcdr;
+
+          f += c * basis;
+          df += c * dbasisdr;
         }
 
         fmu[mu] = f;
         dfmu[mu] = df;
       }
 
+      // ---------------------------------------------------
+      // Zero gradients
+      // ---------------------------------------------------
+
+      for (int k = 0; k < n_descriptors; k++) {
+
+        data->graddesc[pair_index][k][0] = 0.0;
+        data->graddesc[pair_index][k][1] = 0.0;
+        data->graddesc[pair_index][k][2] = 0.0;
+      }
+
       int k = species.size();
 
-      // ---------------- NU0 ----------------
-      for (int mu = 0; mu < n_rf; mu++) {
+      // ===================================================
+      // Descriptor derivatives
+      // ===================================================
 
-        double df = dfmu[mu];
+      for (size_t b = 0; b < basis_specs.size(); b++, k++) {
 
-        data->graddesc[ii][k][0] += df * ex;
-        data->graddesc[ii][k][1] += df * ey;
-        data->graddesc[ii][k][2] += df * ez;
+        const BasisSpec &spec = basis_specs[b];
 
-        k++;
-      }
+        double gx = 0.0;
+        double gy = 0.0;
+        double gz = 0.0;
 
-      // ---------------- NU1 ----------------
-      for (int mu = 0; mu < n_rf; mu++) {
+        // -------------------------------------------------
+        // NU0
+        // -------------------------------------------------
 
-        double f = fmu[mu];
-        double df = dfmu[mu];
+        if (spec.type == NU0) {
 
-        for (int a = 0; a < 3; a++) {
-          for (int b = 0; b < 3; b++) {
+          int mu = spec.mu[0];
 
-            double ra = (a==0?dx:(a==1?dy:dz));
-            double rb = (b==0?dx:(b==1?dy:dz));
-
-            double delta = (a==b);
-
-            data->graddesc[ii][k][b] +=
-              df * ra * rb * rinv + f * delta;
-          }
-        }
-
-        k++;
-      }
-
-      // ---------------- NU2 ----------------
-      if (max_nu >= 2) {
-
-        for (int mu = 0; mu < n_rf; mu++) {
-
-          double f = fmu[mu];
           double df = dfmu[mu];
 
-          for (int a = 0; a < 3; a++) {
-            for (int b = 0; b < 3; b++) {
-              for (int c = 0; c < 3; c++) {
+          gx = df * ex;
+          gy = df * ey;
+          gz = df * ez;
+        }
 
-                double ra = (a==0?dx:(a==1?dy:dz));
-                double rb = (b==0?dx:(b==1?dy:dz));
-                double rc = (c==0?dx:(c==1?dz:dz));
+        // -------------------------------------------------
+        // NU1_DOT
+        // D = M1[a] dot M1[b]
+        // -------------------------------------------------
 
-                double term =
-                  df * ra * rb * rc * rinv +
-                  f * (
-                    (a==b ? rc : 0.0) +
-                    (a==c ? rb : 0.0) +
-                    (b==c ? ra : 0.0)
-                  );
+        else if (spec.type == NU1_DOT) {
 
-                data->graddesc[ii][k][c] += term;
+          int a = spec.mu[0];
+          int b2 = spec.mu[1];
+
+          double va[3] = {
+            M1[a*3 + 0],
+            M1[a*3 + 1],
+            M1[a*3 + 2]
+          };
+
+          double vb[3] = {
+            M1[b2*3 + 0],
+            M1[b2*3 + 1],
+            M1[b2*3 + 2]
+          };
+
+          double ra[3] = {dx, dy, dz};
+
+          for (int c = 0; c < 3; c++) {
+
+            double dMa =
+              dfmu[a] * ra[c] * ex
+              + (c == 0 ? fmu[a] : 0.0);
+
+            double dMb =
+              dfmu[b2] * ra[c] * ex
+              + (c == 0 ? fmu[b2] : 0.0);
+
+            if (c == 1) {
+
+              dMa =
+                dfmu[a] * ra[c] * ey
+                + fmu[a];
+
+              dMb =
+                dfmu[b2] * ra[c] * ey
+                + fmu[b2];
+            }
+
+            if (c == 2) {
+
+              dMa =
+                dfmu[a] * ra[c] * ez
+                + fmu[a];
+
+              dMb =
+                dfmu[b2] * ra[c] * ez
+                + fmu[b2];
+            }
+
+            double g =
+              dMa * vb[c]
+              + va[c] * dMb;
+
+            if (c == 0) gx += g;
+            if (c == 1) gy += g;
+            if (c == 2) gz += g;
+          }
+        }
+
+        // -------------------------------------------------
+        // NU2_FROB
+        // D = M2[a] : M2[b]
+        // -------------------------------------------------
+
+        else if (spec.type == NU2_FROB) {
+
+          int a = spec.mu[0];
+          int b2 = spec.mu[1];
+
+          double rvec[3] = {dx, dy, dz};
+
+          for (int alpha = 0; alpha < 3; alpha++) {
+
+            double grad = 0.0;
+
+            for (int p = 0; p < 3; p++) {
+              for (int q = 0; q < 3; q++) {
+
+                int idx = p*3 + q;
+
+                double Mab =
+                  M2[b2*9 + idx];
+
+                double Maa =
+                  M2[a*9 + idx];
+
+                double rp = rvec[p];
+                double rq = rvec[q];
+
+                double rc =
+                  (alpha == 0 ? ex :
+                   alpha == 1 ? ey : ez);
+
+                double dA =
+                  dfmu[a] * rp * rq * rc;
+
+                double dB =
+                  dfmu[b2] * rp * rq * rc;
+
+                if (alpha == p)
+                  dA += fmu[a] * rq;
+
+                if (alpha == q)
+                  dA += fmu[a] * rp;
+
+                if (alpha == p)
+                  dB += fmu[b2] * rq;
+
+                if (alpha == q)
+                  dB += fmu[b2] * rp;
+
+                grad +=
+                  dA * Mab
+                  + Maa * dB;
               }
             }
-          }
 
-          k++;
+            if (alpha == 0) gx = grad;
+            if (alpha == 1) gy = grad;
+            if (alpha == 2) gz = grad;
+          }
         }
+
+        data->graddesc[pair_index][k][0] = gx;
+        data->graddesc[pair_index][k][1] = gy;
+        data->graddesc[pair_index][k][2] = gz;
       }
     }
   }
 }
 
+void MLIAPDescriptorMTP::init() {}
+void MLIAPDescriptorMTP::compute_forces(class MLIAPData *) {}
+void MLIAPDescriptorMTP::compute_force_gradients(class MLIAPData *) {}
 
-/* ---------------------------------------------------------------------- */
 
-/* ----------------------------------------------------------------------
-   memory usage
-------------------------------------------------------------------------- */
-
-double MLIAPDescriptorMTP::memory_usage()
-{
-  double bytes = MLIAPDescriptor::memory_usage();
-
-  return bytes;
-}
-
-#endif
+//#endif

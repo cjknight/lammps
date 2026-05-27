@@ -24,6 +24,7 @@
 #ifdef MLIAP_ACE
 #include "mliap_descriptor_ace.h"
 #endif
+#include "mliap_descriptor_mtp.h"
 #include "mliap_model_linear.h"
 #include "mliap_model_nn.h"
 #include "mliap_model_quadratic.h"
@@ -192,13 +193,14 @@ void PairMLIAP::settings(int narg, char ** arg)
         iarg += 3;
       }
 #endif
-#ifdef MLIAP_MTP
+//#ifdef MLIAP_MTP
         else if (strcmp(arg[iarg+1], "mtp") == 0) {
           if (iarg+3 > narg) utils::missing_cmd_args(FLERR, "pair_style mliap descriptor mtp", error);
-          descriptor = new MLIAPDescriptorMTP(lmp,arg[iarg+2]);
+          //descriptor = new MLIAPDescriptorMTP(lmp,arg[iarg+2]);
+          descriptor = new MLIAPDescriptorMTP(lmp);
           iarg += 3;
         }
-#endif
+//#endif
       else error->all(FLERR,"Illegal pair_style mliap command");
     } else if (strcmp(arg[iarg], "unified") == 0) {
 #ifdef MLIAP_PYTHON
