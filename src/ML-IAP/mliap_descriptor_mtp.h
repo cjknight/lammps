@@ -56,8 +56,6 @@ class MLIAPDescriptorMTP : public MLIAPDescriptor {
   int max_nu;
   int max_level;
 
-  int n_descriptors;
-
   std::vector<std::string> species;
   std::vector<BasisSpec> basis_specs;
 
@@ -69,7 +67,8 @@ class MLIAPDescriptorMTP : public MLIAPDescriptor {
   double cutoff_function(double r);
 
   void chebyshev_basis(double r,
-                       std::vector<double> &T);
+                       std::vector<double>& basis,
+                       std::vector<double>& dbasisdr);
 
   void compute_radial_functions(double r,
                                 int itype,

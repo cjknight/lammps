@@ -30,6 +30,7 @@ using namespace LAMMPS_NS;
 MLIAPDescriptorMTP::MLIAPDescriptorMTP(LAMMPS *_lmp) :
     Pointers(_lmp), MLIAPDescriptor(_lmp)
 {
+  // TODO replace hard-coded vals with read param file method
   cutoff = 5.0;
   rmin = 0.8;
 
@@ -39,7 +40,96 @@ MLIAPDescriptorMTP::MLIAPDescriptorMTP(LAMMPS *_lmp) :
   max_nu = 2;
   max_level = 24;
 
-  n_descriptors = 0;
+  nelements = 2;
+  elements = new char *[nelements];
+  elements[0] = utils::strdup("Hf");
+  elements[1] = utils::strdup("O");
+
+  cutsq = new double*[nelements];
+  for (int i = 0; i < nelements; i++) {
+    cutsq[i] = new double[nelements];
+    for (int j = 0; j < nelements; j++) {
+      cutsq[i][j] = cutoff * cutoff;
+    }
+  }
+
+  radelem = new double[nelements];
+  wjelem  = new double[nelements];
+
+  for (int i = 0; i < nelements; i++) {
+    radelem[i] = cutoff;
+    wjelem[i]  = 1.0;
+  }
+
+  cutmax = cutoff;
+
+  radial_coeffs = {{{{-0.2447, -0.0318,  0.0754,  0.1395, -0.1484,  0.0208,  0.0844,
+           -0.1241,  0.0925,  0.0688, -0.0540,  0.0526},
+          { 0.0042,  0.0917, -0.0252, -0.0610,  0.1305,  0.0653, -0.0369,
+            0.1262, -0.1013,  0.1202, -0.0585,  0.0264}},
+         {{-0.1521,  0.4008,  0.2365, -0.1499,  0.1519, -0.0173, -0.0042,
+           -0.0246, -0.0036, -0.0513,  0.0146, -0.0260},
+          { 0.1476, -0.3381, -0.1169,  0.1768, -0.0987, -0.0911,  0.1166,
+           -0.0076,  0.0092,  0.0027, -0.0258,  0.0099}}},
+        {{{-0.0352, -0.1239,  0.0984,  0.0361,  0.0329, -0.0730,  0.0708,
+            0.0022, -0.0166,  0.0733, -0.0199,  0.0212},
+          { 0.1127, -0.1117, -0.0670,  0.2263, -0.2338,  0.1436,  0.1020,
+           -0.1920,  0.1989, -0.1239,  0.0523, -0.0205}},
+         {{ 0.2011, -0.2627, -0.1469,  0.1648, -0.1849, -0.0698,  0.1653,
+           -0.1533, -0.0114,  0.0688, -0.0374,  0.0207},
+          { 0.0781, -0.1464,  0.1385, -0.0886, -0.0648, -0.0479, -0.0042,
+            0.0007, -0.0623,  0.0068, -0.0163,  0.0040}}},
+        {{{-0.2271, -0.0410,  0.1535, -0.0994,  0.0804,  0.0542,  0.0874,
+            0.0205, -0.0566,  0.1701, -0.1366,  0.0880},
+          { 0.1981, -0.1798, -0.0212,  0.0405,  0.0269, -0.1858,  0.0614,
+            0.0035, -0.0844,  0.0912, -0.0525,  0.0290}},
+         {{-0.1807, -0.2523, -0.0034,  0.0007, -0.1189,  0.0408, -0.0159,
+           -0.0510, -0.0035,  0.0372, -0.0217,  0.0072},
+          { 0.1311,  0.1413, -0.1593, -0.1606,  0.0378, -0.1025, -0.2056,
+            0.1364, -0.1094, -0.0013, -0.0206, -0.0373}}},
+        {{{ 0.2233,  0.0307, -0.1252,  0.0097,  0.1242, -0.0192, -0.1376,
+            0.0655,  0.0555, -0.0627,  0.0618, -0.0513},
+          { 0.0849,  0.0838, -0.1443,  0.1232, -0.2335,  0.1126, -0.0903,
+           -0.0397, -0.0785,  0.0484, -0.0513,  0.0045}},
+         {{-0.0511,  0.3114,  0.0510, -0.1860,  0.2855, -0.0076, -0.1646,
+            0.2708, -0.2459,  0.1174, -0.0331, -0.0036},
+          {-0.0429, -0.0498,  0.0480, -0.0121,  0.0943, -0.1320,  0.0387,
+            0.0977, -0.0346,  0.0483, -0.0472,  0.0121}}},
+        {{{ 0.0017,  0.0191,  0.0900, -0.0645,  0.0645,  0.1803, -0.0989,
+            0.1618,  0.0903,  0.0585,  0.1584, -0.0665},
+          {-0.1189, -0.0177, -0.1610, -0.1198,  0.2687, -0.0911,  0.1409,
+            0.1545, -0.1616,  0.0156,  0.0058, -0.0927}},
+         {{-0.0644, -0.0048,  0.1127,  0.0167, -0.1665, -0.1081,  0.1935,
+            0.0259, -0.1781,  0.0779,  0.0277, -0.0143},
+          { 0.1150, -0.0781, -0.1805,  0.0807, -0.0628,  0.0251, -0.0194,
+           -0.1175, -0.0741,  0.0766,  0.0182,  0.0037}}},
+        {{{-0.0388, -0.3264,  0.0051,  0.2516, -0.0125,  0.0237, -0.0725,
+            0.0110, -0.0127, -0.0871,  0.1302, -0.0701},
+          { 0.0675,  0.1019,  0.2805, -0.3129, -0.2140,  0.1077, -0.0609,
+            0.0519, -0.0702,  0.0035,  0.0008, -0.0151}},
+         {{ 0.4596, -0.1280, -0.3715, -0.1221,  0.3463, -0.2010,  0.0017,
+           -0.1269, -0.0982,  0.0573, -0.0513, -0.1273},
+          { 0.0752,  0.0196, -0.1749, -0.1342,  0.2093, -0.0124, -0.2006,
+           -0.0512,  0.1997,  0.0291,  0.0679, -0.0592}}},
+        {{{ 0.3244,  0.1113, -0.0616,  0.0581,  0.0030, -0.0107,  0.0733,
+           -0.0252,  0.0375, -0.0201,  0.0007,  0.0576},
+          {-0.4145,  0.2638,  0.0613, -0.3144, -0.1169, -0.0404, -0.0933,
+            0.0047, -0.0482,  0.0934, -0.0588,  0.0761}},
+         {{-0.1471,  0.1471,  0.1179, -0.0543,  0.0930,  0.2975,  0.0950,
+           -0.0192,  0.0035,  0.1687, -0.1024, -0.0020},
+          { 0.0780, -0.2967,  0.0461,  0.1159, -0.0736, -0.0665,  0.3035,
+           -0.2316, -0.0116,  0.1327, -0.0472,  0.0801}}},
+        {{{ 0.0424,  0.1429, -0.0733, -0.1524, -0.1965,  0.0758,  0.2900,
+           -0.0539, -0.0053, -0.0039,  0.2369, -0.0459},
+          { 0.2965, -0.1077, -0.2609,  0.0010, -0.1916,  0.0761,  0.1841,
+            0.0561, -0.0155,  0.0884, -0.0855,  0.0201}},
+         {{ 0.0552,  0.1000,  0.1373,  0.0681, -0.1462, -0.0236,  0.1402,
+           -0.2282, -0.1106,  0.1163, -0.0921, -0.0582},
+          {-0.1235,  0.3442, -0.0397, -0.3588,  0.0730,  0.0977, -0.1698,
+            0.0307,  0.0226,  0.0568,  0.0417, -0.0255}}}};
+
+  build_basis_index();
+  ndescriptors = nelements + basis_specs.size();
 }
 
 /*
@@ -164,10 +254,9 @@ void MLIAPDescriptorMTP::read_paramfile(char *fname)
   // ------------------------------------------------------------
   // finalize internal structures
   // ------------------------------------------------------------
-  build_basis_index();
 
   // sanity checks
-  if (species.size() == 0)
+  if (nelements == 0)
     error->all(FLERR, "No species defined in MTP descriptor");
 
   if (n_rf <= 0)
@@ -291,8 +380,6 @@ void MLIAPDescriptorMTP::build_basis_index()
       basis_specs.push_back(spec);
     }
   }
-
-  n_descriptors = species.size() + basis_specs.size();
 }
 
 
@@ -308,34 +395,60 @@ double MLIAPDescriptorMTP::cutoff_function(double r)
   return x * x;
 }
 
-// TODO
-void MLIAPDescriptorMTP::chebyshev_basis(double r, std::vector<double> &T)
+void MLIAPDescriptorMTP::chebyshev_basis(
+    double r,
+    std::vector<double>& basis,
+    std::vector<double>& dbasisdr)
 {
-  T.resize(n_radial);
+    basis.resize(n_radial);
+    dbasisdr.resize(n_radial);
 
-  double x = (2.0 * r - rmin - cutoff) / (cutoff - rmin + 1e-10);
+    double denom = cutoff - rmin + 1e-10;
 
-  if (x > 1.0)
-    x = 1.0;
-  if (x < -1.0)
-    x = -1.0;
+    double x = (2.0*r - rmin - cutoff)/denom;
+    x = std::clamp(x, -1.0, 1.0);
 
-  double fc = cutoff_function(r);
+    double dxdr = 2.0/denom;
 
-  T[0] = 1.0;
+    double fc = cutoff_function(r);
 
-  if (n_radial >= 2)
-    T[1] = x;
+    double dfcdr = 0.0;
+    if (r < cutoff) {
+        double tmp = (cutoff-r)/(cutoff-rmin);
+        if (tmp > 0.0)
+            dfcdr = -2.0*tmp/(cutoff-rmin);
+    }
 
-  for (int n = 2; n < n_radial; n++) {
-    T[n] = 2.0 * x * T[n - 1] - T[n - 2];
-  }
+    std::vector<double> T(n_radial);
+    std::vector<double> dTdx(n_radial);
 
-  for (int n = 0; n < n_radial; n++)
-    T[n] *= fc;
+    T[0] = 1.0;
+    dTdx[0] = 0.0;
+
+    if (n_radial >= 2) {
+        T[1] = x;
+        dTdx[1] = 1.0;
+    }
+
+    for (int n=2; n<n_radial; n++) {
+        T[n] = 2*x*T[n-1] - T[n-2];
+
+        dTdx[n] =
+            2*T[n-1]
+          + 2*x*dTdx[n-1]
+          - dTdx[n-2];
+    }
+
+    for (int n=0; n<n_radial; n++) {
+        basis[n] =
+            T[n] * fc;
+
+        dbasisdr[n] =
+            dTdx[n]*dxdr*fc
+          + T[n]*dfcdr;
+    }
 }
 
-// TODO
 void MLIAPDescriptorMTP::compute_radial_functions(
   double r,
   int itype,
@@ -343,26 +456,20 @@ void MLIAPDescriptorMTP::compute_radial_functions(
   std::vector<double> &fmu)
 {
   std::vector<double> T;
-  chebyshev_basis(r, T);
+  std::vector<double> dTdr;
+  chebyshev_basis(r, T, dTdr);
 
   fmu.resize(n_rf);
 
-  if (itype < 0 || jtype < 0)
-    error->all(FLERR, "Negative species index in MTP descriptor");
-  if (itype >= (int)radial_coeffs[0].size())
-    error->all(FLERR, "itype out of bounds in MTP descriptor");
-  if (jtype >= (int)radial_coeffs[0][itype].size())
-    error->all(FLERR, "jtype out of bounds in MTP descriptor");
-
   for (int mu = 0; mu < n_rf; mu++) {
 
-    double val = 0.0;
+      double f = 0.0;
 
-    for (int n = 0; n < n_radial; n++) {
-      val += radial_coeffs[mu][itype][jtype][n] * T[n];
-    }
+      for (int n = 0; n < n_radial; n++) {
+          f += radial_coeffs[mu][itype][jtype][n] * T[n];
+      }
 
-    fmu[mu] = val;
+      fmu[mu] = f;
   }
 }
 
@@ -389,7 +496,10 @@ void MLIAPDescriptorMTP::compute_descriptors(MLIAPData *data)
 
     std::vector<double> M0(n_rf, 0.0);
     std::vector<double> M1(n_rf * 3, 0.0);
-    std::vector<double> M2(n_rf * 9, 0.0);
+    std::vector<double> M2;
+    if (max_nu >= 2) {
+      M2.resize(n_rf * 9, 0.0);
+    }
 
     int jnum = numneighs[ii];
 
@@ -451,11 +561,6 @@ void MLIAPDescriptorMTP::compute_descriptors(MLIAPData *data)
           M2[mu*9 + 7] += f * dz * dy;
           M2[mu*9 + 8] += f * dz * dz;
         }
-
-        // -------------------------------------------------
-        // TODO:
-        // graddesc accumulation
-        // -------------------------------------------------
       }
     }
 
@@ -466,27 +571,20 @@ void MLIAPDescriptorMTP::compute_descriptors(MLIAPData *data)
     int k = 0;
 
     // Species one-hot
-
-    for (int s = 0; s < (int)species.size(); s++) {
+    for (int s = 0; s < nelements; s++) {
 
       data->descriptors[ii][k++] =
         ((type[i]-1) == s) ? 1.0 : 0.0;
     }
 
     // Invariant basis functions
-
     for (size_t b = 0; b < basis_specs.size(); b++) {
-
       const BasisSpec &spec = basis_specs[b];
-
       double val = 0.0;
 
       if (spec.type == NU0) {
-
         val = M0[spec.mu[0]];
-
       } else if (spec.type == NU1_DOT) {
-
         int a = spec.mu[0];
         int b2 = spec.mu[1];
 
@@ -496,13 +594,69 @@ void MLIAPDescriptorMTP::compute_descriptors(MLIAPData *data)
           M1[a*3 + 2] * M1[b2*3 + 2];
 
       } else if (spec.type == NU2_FROB) {
-
         int a = spec.mu[0];
         int b2 = spec.mu[1];
 
         for (int q = 0; q < 9; q++) {
           val += M2[a*9 + q] * M2[b2*9 + q];
         }
+      } else if (spec.type == NU0_X_NU1SQ) {
+        int mu0 = spec.mu[0];
+        int mu1 = spec.mu[1];
+
+        double norm2 =
+            M1[mu1*3 + 0] * M1[mu1*3 + 0] +
+            M1[mu1*3 + 1] * M1[mu1*3 + 1] +
+            M1[mu1*3 + 2] * M1[mu1*3 + 2];
+
+        val = M0[mu0] * norm2;
+      } else if (spec.type == NU0_X_NU1_NU1) {
+        int mu0 = spec.mu[0];
+        int mu1 = spec.mu[1];
+        int mu2 = spec.mu[2];
+
+        double dot =
+            M1[mu1*3 + 0] * M1[mu2*3 + 0] +
+            M1[mu1*3 + 1] * M1[mu2*3 + 1] +
+            M1[mu1*3 + 2] * M1[mu2*3 + 2];
+
+        val = M0[mu0] * dot;
+      } else if (spec.type == V_T_V) {
+        int mu1 = spec.mu[0];
+        int mu2 = spec.mu[1];
+        int mu3 = spec.mu[2];
+
+        double Tv[3];
+
+        Tv[0] =
+            M1[mu1*3 + 0] * M2[mu2*9 + 0] +
+            M1[mu1*3 + 1] * M2[mu2*9 + 3] +
+            M1[mu1*3 + 2] * M2[mu2*9 + 6];
+
+        Tv[1] =
+            M1[mu1*3 + 0] * M2[mu2*9 + 1] +
+            M1[mu1*3 + 1] * M2[mu2*9 + 4] +
+            M1[mu1*3 + 2] * M2[mu2*9 + 7];
+
+        Tv[2] =
+            M1[mu1*3 + 0] * M2[mu2*9 + 2] +
+            M1[mu1*3 + 1] * M2[mu2*9 + 5] +
+            M1[mu1*3 + 2] * M2[mu2*9 + 8];
+
+        val =
+            Tv[0] * M1[mu3*3 + 0] +
+            Tv[1] * M1[mu3*3 + 1] +
+            Tv[2] * M1[mu3*3 + 2];
+      } else if (spec.type == NU0_X_NU0) {
+        int mu0 = spec.mu[0];
+        int mu1 = spec.mu[1];
+        val = M0[mu0] * M0[mu1];
+      } else if (spec.type == NU0_SQ) {
+        int mu0 = spec.mu[0];
+        val = M0[mu0] * M0[mu0];
+      } else {
+        printf("Basis type: %d\n", spec.type);
+        error->all(FLERR, "Unknown MTP basis function type");
       }
 
       data->descriptors[ii][k++] = val;
@@ -573,9 +727,6 @@ void MLIAPDescriptorMTP::compute_descriptor_gradients(
 
       for (int n = 2; n < n_radial; n++)
         T[n] = 2.0 * x * T[n-1] - T[n-2];
-
-      for (int n = 0; n < n_radial; n++)
-        T[n] *= fc;
 
       std::vector<double> fmu(n_rf, 0.0);
 
@@ -658,49 +809,10 @@ void MLIAPDescriptorMTP::compute_descriptor_gradients(
       // Chebyshev basis + derivatives
       // ---------------------------------------------------
 
-      double denom = (cutoff - rmin + 1e-10);
+      std::vector<double> basis;
+      std::vector<double> dbasisdr;
 
-      double x =
-        (2.0 * r - rmin - cutoff) / denom;
-
-      if (x > 1.0) x = 1.0;
-      if (x < -1.0) x = -1.0;
-
-      double dxdr = 2.0 / denom;
-
-      double fc = cutoff_function(r);
-
-      double dfcdr = 0.0;
-
-      if (r < cutoff) {
-
-        double tmp = (cutoff - r) / (cutoff - rmin);
-
-        if (tmp > 0.0)
-          dfcdr = -2.0 * tmp / (cutoff - rmin);
-      }
-
-      std::vector<double> T(n_radial, 0.0);
-      std::vector<double> dTdx(n_radial, 0.0);
-
-      T[0] = 1.0;
-      dTdx[0] = 0.0;
-
-      if (n_radial >= 2) {
-        T[1] = x;
-        dTdx[1] = 1.0;
-      }
-
-      for (int n = 2; n < n_radial; n++) {
-
-        T[n] =
-          2.0 * x * T[n-1] - T[n-2];
-
-        dTdx[n] =
-          2.0 * T[n-1]
-          + 2.0 * x * dTdx[n-1]
-          - dTdx[n-2];
-      }
+      chebyshev_basis(r, basis, dbasisdr);
 
       std::vector<double> fmu(n_rf, 0.0);
       std::vector<double> dfmu(n_rf, 0.0);
@@ -715,14 +827,8 @@ void MLIAPDescriptorMTP::compute_descriptor_gradients(
           double c =
             radial_coeffs[mu][type[i]-1][type[j]-1][n];
 
-          double basis = T[n] * fc;
-
-          double dbasisdr =
-            dTdx[n] * dxdr * fc
-            + T[n] * dfcdr;
-
-          f += c * basis;
-          df += c * dbasisdr;
+          f += c * basis[n];
+          df += c * dbasisdr[n];
         }
 
         fmu[mu] = f;
@@ -733,14 +839,14 @@ void MLIAPDescriptorMTP::compute_descriptor_gradients(
       // Zero gradients
       // ---------------------------------------------------
 
-      for (int k = 0; k < n_descriptors; k++) {
+      for (int k = 0; k < ndescriptors; k++) {
 
         data->graddesc[pair_index][k][0] = 0.0;
         data->graddesc[pair_index][k][1] = 0.0;
         data->graddesc[pair_index][k][2] = 0.0;
       }
 
-      int k = species.size();
+      int k = nelements;
 
       // ===================================================
       // Descriptor derivatives

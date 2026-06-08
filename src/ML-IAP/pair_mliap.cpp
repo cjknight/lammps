@@ -195,10 +195,11 @@ void PairMLIAP::settings(int narg, char ** arg)
 #endif
 //#ifdef MLIAP_MTP
         else if (strcmp(arg[iarg+1], "mtp") == 0) {
-          if (iarg+3 > narg) utils::missing_cmd_args(FLERR, "pair_style mliap descriptor mtp", error);
+          // TODO require mtp param file?
+          //if (iarg+3 > narg) utils::missing_cmd_args(FLERR, "pair_style mliap descriptor mtp", error);
           //descriptor = new MLIAPDescriptorMTP(lmp,arg[iarg+2]);
           descriptor = new MLIAPDescriptorMTP(lmp);
-          iarg += 3;
+          iarg += 2;
         }
 //#endif
       else error->all(FLERR,"Illegal pair_style mliap command");
