@@ -30,6 +30,10 @@ cdef extern from "mliap_data.h" namespace "LAMMPS_NS":
         double * eatoms             # energy for all atoms in list
         double energy
 
+        # Charges accessor for LES
+        double * get_charges()
+        void update_charges()
+
 cdef extern from "mliap_model_python.h" namespace "LAMMPS_NS":
     cdef cppclass MLIAPModelPython:
         void connect_param_counts()
@@ -64,7 +68,7 @@ cdef public int MLIAPPY_load_model(MLIAPModelPython * c_model, char* fname) with
     else:
         if str_fname.endswith(".pt") or str_fname.endswith('.pth'):
             import torch
-            model = torch.load(str_fname)
+            model = torch.load(str_fname, weights_only=False)
         else:
             with open(str_fname,'rb') as pfile:
                 model = pickle.load(pfile)
@@ -107,13 +111,21 @@ cdef public void MLIAPPY_compute_gradients(MLIAPModelPython * c_model, MLIAPData
     n_a = data.nlistatoms
 
     # Make numpy arrays from pointers
-    beta_np = np.asarray(<double[:n_a,:n_d] > &data.betas[0][0])
+    beta_np = np.asarray(<double[:n_a,:n_d]> &data.betas[0][0])
+    charges_np = np.asarray(<double[:n_a]> data.get_charges())
     desc_np = np.asarray(<double[:n_a,:n_d]> &data.descriptors[0][0])
     elem_np = np.asarray(<int[:n_a]> &data.ielems[0])
     en_np = np.asarray(<double[:n_a]> &data.eatoms[0])
 
     # Invoke python model on numpy arrays.
-    model(elem_np,desc_np,beta_np,en_np)
+    
+    model(elem_np,desc_np,beta_np,en_np,charges_np)
+
+    # for i in range(n_a):
+    #     print(data.get_charges()[i]);
+    # update charges in kspace:
+    data.update_charges()
+
 
     # Get the total energy from the atom energy.
     energy = np.sum(en_np)

@@ -23,6 +23,8 @@
 #include "mliap_descriptor.h"
 #include "mliap_model.h"
 #include "neigh_list.h"
+#include "kspace.h"
+#include "force.h"
 
 using namespace LAMMPS_NS;
 
@@ -312,4 +314,13 @@ double MLIAPData::memory_usage()
     bytes += (double) nneigh_max * ndescriptors * 3 * sizeof(double);    // graddesc
 
   return bytes;
+}
+
+double *MLIAPData::get_charges() {
+  return atom->q;
+}
+
+void MLIAPData::update_charges() {
+  if (force->kspace)
+        force->kspace->qsum_qsq(1);
 }
