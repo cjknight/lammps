@@ -34,6 +34,7 @@
 #endif
 
 #include "atom.h"
+#include "comm.h"
 #include "error.h"
 #include "force.h"
 #include "info.h"
@@ -56,6 +57,12 @@ PairMLIAP::PairMLIAP(LAMMPS *lmp) :
   manybody_flag = 1;
   is_child = false;
   centroidstressflag = CENTROID_NOTAVAIL;
+
+  pppmflag = 1;
+  ewaldflag = 1;
+  msmflag = 1;
+  // TODO Cutoff is hardcoded to match example
+  cutoff_coul = 5.0; 
 }
 
 /* ---------------------------------------------------------------------- */
@@ -104,6 +111,9 @@ void PairMLIAP::compute(int eflag, int vflag)
   // compute E_i and beta_i = dE_i/dB_i for all i in list
 
   model->compute_gradients(data);
+
+  // update charges for LES
+  comm->forward_comm();
 
   // calculate force contributions beta_i*dB_i/dR_j
 
@@ -394,3 +404,13 @@ double PairMLIAP::memory_usage()
   return bytes;
 }
 
+
+void *PairMLIAP::extract(const char *str, int &iarg)
+{
+  if (strcmp(str,"cut_coul") == 0) {
+    iarg = 0;
+    return (void *) &cutoff_coul;
+  }
+
+  return nullptr;
+}
