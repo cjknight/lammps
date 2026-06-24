@@ -118,11 +118,14 @@ cdef public void MLIAPPY_compute_gradients(MLIAPModelPython * c_model, MLIAPData
     en_np = np.asarray(<double[:n_a]> &data.eatoms[0])
 
     # Invoke python model on numpy arrays.
-    
     model(elem_np,desc_np,beta_np,en_np,charges_np)
 
-    # for i in range(n_a):
-    #     print(data.get_charges()[i]);
+    print("Energies:")
+    print(en_np)
+
+    print("Charges:")
+    for i in range(n_a):
+        print(data.get_charges()[i]);
     # update charges in kspace:
     data.update_charges()
 

@@ -29,6 +29,7 @@ class MLIAPDescriptorMTP : public MLIAPDescriptor {
   void compute_descriptor_gradients(class MLIAPData *) override;
   void compute_forces(class MLIAPData *) override;
   void compute_force_gradients(class MLIAPData *) override;
+  bool printed = false;
 
  protected:
   enum BasisType {

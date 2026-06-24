@@ -662,6 +662,20 @@ void MLIAPDescriptorMTP::compute_descriptors(MLIAPData *data)
       data->descriptors[ii][k++] = val;
     }
   }
+
+  // Debug printing
+  if (printed) return;
+  printed = true;
+  // Print atom positions and box
+
+  printf("====================================\n");
+  // printf("Descriptors:\n");
+  // for (int ii = 0; ii < nlistatoms; ii++) {
+  //   for (int k = 0; k < ndescriptors; k++) {
+  //     printf("%f,\t", data->descriptors[ii][k]);  
+  //   }
+  //   printf("\n");
+  //}
 }
 
 

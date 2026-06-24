@@ -165,6 +165,7 @@ class KSpace : protected Pointers {
   void modify_params(int, char **);
   void *extract(const char *);
   void compute_dummy(int eflag, int vflag, int alloc = 1);
+  void set_gewaldflag() { gewaldflag = 1; }
 
   // triclinic
 

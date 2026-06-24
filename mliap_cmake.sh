@@ -21,8 +21,8 @@ cd ${BASE}
     -D PKG_ML-PACE=ON \
     -D PKG_PYTHON=ON \
     -D Python_FIND_VIRTUALENV=ONLY \
-    -D PYTHON_EXECUTABLE=/Users/geraldc/Desktop/lammps/.venv/bin/python3.12 \
-    -D PYTHONPATH=/Users/geraldc/Desktop/lammps/.venv/lib/python3.12/site-packages \
+    -D PYTHON_EXECUTABLE=/Users/gcollom/Desktop/lammps/.venv/bin/python3.11 \
+    -D PYTHONPATH=/Users/gcollom/Desktop/lammps/.venv/lib/python3.11/site-packages \
     ../cmake
 
 

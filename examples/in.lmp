@@ -1,16 +1,16 @@
-units           real
+units           metal
 atom_style      charge
 
 boundary        p p p
 
-read_data       lmp.data
+read_data       hf27.data
 
 pair_style      mliap model mliappy hfo2_model_wrapped.pt descriptor mtp 
 pair_coeff       * * Hf O
 
-kspace_style    pppm 1e-6
-kspace_modify   order 6
-kspace_modify   gewald 0.25
+#kspace_style    ewald 1e-9
+#kspace_modify mesh 128 128 128
+kspace_style pppm 1.0e-9
 
 neighbor        0.3 bin
 neigh_modify    delay 0 every 20 check no
@@ -21,6 +21,8 @@ dump            1 all custom 1 lmp.lammpstrj id type q x y z fx fy fz
 dump_modify     1 sort id
 
 thermo          1
+#thermo_style custom step pe epair emol elong
+thermo_style custom pe etotal epair evdwl ecoul elong
 
 run             0
 
