@@ -666,6 +666,17 @@ void PPPM::reset_grid()
 
 void PPPM::compute(int eflag, int vflag)
 {
+  double qsum_local = 0.0;
+  for (int i = 0; i < atom->nlocal; i++)
+    qsum_local += atom->q[i];
+
+  double qsum_ghost = 0.0;
+  for (int i = atom->nlocal; i < atom->nlocal + atom->nghost; i++)
+    qsum_ghost += atom->q[i];
+
+  printf("LOCAL QSUM = %g\n", qsum_local);
+  printf("GHOST QSUM = %g\n", qsum_ghost);
+
   int i,j;
 
   // set energy/virial flags

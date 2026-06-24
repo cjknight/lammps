@@ -61,8 +61,6 @@ PairMLIAP::PairMLIAP(LAMMPS *lmp) :
   pppmflag = 1;
   ewaldflag = 1;
   msmflag = 1;
-  // TODO Cutoff is hardcoded to match example
-  cutoff_coul = 5.0; 
 }
 
 /* ---------------------------------------------------------------------- */
@@ -114,6 +112,10 @@ void PairMLIAP::compute(int eflag, int vflag)
 
   // update charges for LES
   comm->forward_comm();
+  printf("==================\n");
+  printf("atom->nghost=%d\n", atom->nghost);
+  for (int i = atom->nlocal; i < atom->nlocal + atom->nghost; i++)
+    printf("ghost %d q=%f\n", i, atom->q[i]);
 
   // calculate force contributions beta_i*dB_i/dR_j
 
@@ -290,6 +292,9 @@ void PairMLIAP::coeff(int narg, char **arg)
 
   model->init();
   descriptor->init();
+
+  // Set cutoff_coul from the descriptor's active cutoff
+  cutoff_coul = descriptor->cutmax;
   constexpr int gradgradflag = -1;
   delete data;
   data = new MLIAPData(lmp, gradgradflag, map, model, descriptor, this);
