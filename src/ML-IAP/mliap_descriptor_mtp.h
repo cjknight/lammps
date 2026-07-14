@@ -28,6 +28,7 @@ class MLIAPDescriptorMTP : public MLIAPDescriptor {
   void compute_descriptors(class MLIAPData *) override;
   void compute_descriptor_gradients(class MLIAPData *) override;
   void compute_forces(class MLIAPData *) override;
+  void compute_forces_from_coeffs(class MLIAPData *, double **coeffs, double *phi = nullptr);
   void compute_force_gradients(class MLIAPData *) override;
   bool printed = false;
 
@@ -75,6 +76,7 @@ class MLIAPDescriptorMTP : public MLIAPDescriptor {
                                 int itype,
                                 int jtype,
                                 std::vector<double> &fmu);
+
 };    // namespace LAMMPS_NS
 
 }

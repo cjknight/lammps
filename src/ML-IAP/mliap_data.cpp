@@ -74,6 +74,7 @@ MLIAPData::MLIAPData(LAMMPS *lmp, int gradgradflag_in, int *map_in, class MLIAPM
 MLIAPData::~MLIAPData()
 {
   memory->destroy(betas);
+  memory->destroy(charge_betas);
   memory->destroy(descriptors);
   memory->destroy(eatoms);
   memory->destroy(gamma_row_index);
@@ -143,6 +144,7 @@ void MLIAPData::generate_neighdata(NeighList *list_in, int eflag_in, int vflag_i
   nlistatoms = list->inum;
   if (nlistatoms_max < nlistatoms) {
     memory->grow(betas, nlistatoms, ndescriptors, "MLIAPData:betas");
+    memory->grow(charge_betas, nlistatoms, ndescriptors, "MLIAPData:charge_betas");
     memory->grow(descriptors, nlistatoms, ndescriptors, "MLIAPData:descriptors");
     memory->grow(eatoms, nlistatoms, "MLIAPData:eatoms");
     nlistatoms_max = nlistatoms;

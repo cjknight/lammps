@@ -112,10 +112,6 @@ void PairMLIAP::compute(int eflag, int vflag)
 
   // update charges for LES
   comm->forward_comm();
-  printf("==================\n");
-  printf("atom->nghost=%d\n", atom->nghost);
-  for (int i = atom->nlocal; i < atom->nlocal + atom->nghost; i++)
-    printf("ghost %d q=%f\n", i, atom->q[i]);
 
   // calculate force contributions beta_i*dB_i/dR_j
 
@@ -418,4 +414,12 @@ void *PairMLIAP::extract(const char *str, int &iarg)
   }
 
   return nullptr;
+}
+
+void PairMLIAP::compute_charge_response_forces(double *phi)
+{
+    MLIAPDescriptorMTP *mtp = dynamic_cast<MLIAPDescriptorMTP *>(descriptor);
+    if (!mtp) return;
+
+    mtp->compute_forces_from_coeffs(data, data->charge_betas, phi);
 }
