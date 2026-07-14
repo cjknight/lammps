@@ -33,6 +33,10 @@
 #include "timer.h"
 #include "update.h"
 
+#include "pair_mliap.h"
+#include "pppm.h"
+#include "mliap_descriptor_mtp.h"
+
 #include <cstring>
 
 using namespace LAMMPS_NS;
@@ -151,6 +155,15 @@ void Verlet::setup(int flag)
     force->kspace->setup();
     if (kspace_compute_flag) force->kspace->compute(eflag,vflag);
     else force->kspace->compute_dummy(eflag,vflag);
+  }
+
+  // Add force correction for charges dependent on position
+  //   Hard-coded for MLIAP and PPPM for now
+  PairMLIAP *pair_mliap = dynamic_cast<PairMLIAP *>(force->pair);
+  PPPM *pppm = dynamic_cast<PPPM *>(force->kspace);
+
+  if (pair_mliap && pppm) {
+    pair_mliap->compute_charge_response_forces(pppm->phi);
   }
 
   modify->setup_pre_reverse(eflag,vflag);
@@ -328,6 +341,15 @@ void Verlet::run(int n)
     if (kspace_compute_flag) {
       force->kspace->compute(eflag,vflag);
       timer->stamp(Timer::KSPACE);
+    }
+
+    // Add force correction for charges dependent on position
+    //   Hard-coded for MLIAP and PPPM for now
+    PairMLIAP *pair_mliap = dynamic_cast<PairMLIAP *>(force->pair);
+    PPPM *pppm = dynamic_cast<PPPM *>(force->kspace);
+
+    if (pair_mliap && pppm) {
+      pair_mliap->compute_charge_response_forces(pppm->phi);
     }
 
     if (n_pre_reverse) {

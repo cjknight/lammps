@@ -36,6 +36,8 @@
 #include "pair.h"
 #include "remap_wrap.h"
 
+#include "comm.h"
+
 #include <cmath>
 #include <cstring>
 
@@ -104,11 +106,13 @@ PPPM::PPPM(LAMMPS *lmp) : KSpace(lmp),
   nzhi_in = nzlo_in = nzhi_out = nzlo_out = 0;
 
   density_brick = vdx_brick = vdy_brick = vdz_brick = nullptr;
+  phi_brick = nullptr;
   density_fft = nullptr;
   u_brick = nullptr;
   v0_brick = v1_brick = v2_brick = v3_brick = v4_brick = v5_brick = nullptr;
   greensfn = nullptr;
-  work1 = work2 = nullptr;
+  work1 = work2 = work3 = nullptr;
+  phi = nullptr;
   vg = nullptr;
   fkx = fky = fkz = nullptr;
 
@@ -654,16 +658,16 @@ void PPPM::reset_grid()
 
 void PPPM::compute(int eflag, int vflag)
 {
-  double qsum_local = 0.0;
-  for (int i = 0; i < atom->nlocal; i++)
-    qsum_local += atom->q[i];
+  // double qsum_local = 0.0;
+  // for (int i = 0; i < atom->nlocal; i++)
+  //   qsum_local += atom->q[i];
 
-  double qsum_ghost = 0.0;
-  for (int i = atom->nlocal; i < atom->nlocal + atom->nghost; i++)
-    qsum_ghost += atom->q[i];
+  // double qsum_ghost = 0.0;
+  // for (int i = atom->nlocal; i < atom->nlocal + atom->nghost; i++)
+  //   qsum_ghost += atom->q[i];
 
-  printf("LOCAL QSUM = %g\n", qsum_local);
-  printf("GHOST QSUM = %g\n", qsum_ghost);
+  // printf("LOCAL QSUM = %g\n", qsum_local);
+  // printf("GHOST QSUM = %g\n", qsum_ghost);
 
   int i,j;
 
@@ -729,7 +733,7 @@ void PPPM::compute(int eflag, int vflag)
     gc->forward_comm(Grid3d::KSPACE,this,FORWARD_AD,1,sizeof(FFT_SCALAR),
                      gc_buf1,gc_buf2,MPI_FFT_SCALAR);
   else
-    gc->forward_comm(Grid3d::KSPACE,this,FORWARD_IK,3,sizeof(FFT_SCALAR),
+    gc->forward_comm(Grid3d::KSPACE,this,FORWARD_IK,4,sizeof(FFT_SCALAR),
                      gc_buf1,gc_buf2,MPI_FFT_SCALAR);
 
   // extra per-atom energy/virial communication
@@ -831,10 +835,13 @@ void PPPM::allocate()
   gc->setup_comm(ngc_buf1,ngc_buf2);
 
   if (differentiation_flag) npergrid = 1;
-  else npergrid = 3;
+  else npergrid = 4; // TODO: check if condition needed here to switch to 3 or 4
 
   memory->create(gc_buf1,npergrid*ngc_buf1,"pppm:gc_buf1");
   memory->create(gc_buf2,npergrid*ngc_buf2,"pppm:gc_buf2");
+  // printf("rank %d npergrid=%d ngc_buf1=%d ngc_buf2=%d buf1=%p buf2=%p\n",
+  //      comm->me, npergrid, ngc_buf1, ngc_buf2,
+  //      (void*)gc_buf1, (void*)gc_buf2);
 
   // tally local grid sizes
   // ngrid = count of owned+ghost grid cells on this proc
@@ -863,6 +870,8 @@ void PPPM::allocate()
   memory->create(greensfn,nfft_both,"pppm:greensfn");
   memory->create(work1,2*nfft_both,"pppm:work1");
   memory->create(work2,2*nfft_both,"pppm:work2");
+  memory->create(work3,2*nfft_both,"pppm:work3");
+  memory->create(phi,atom->nmax,"pppm:phi");
   memory->create(vg,nfft_both,6,"pppm:vg");
 
   if (triclinic == 0) {
@@ -893,6 +902,8 @@ void PPPM::allocate()
                             nxlo_out,nxhi_out,"pppm:vdy_brick");
     memory->create3d_offset(vdz_brick,nzlo_out,nzhi_out,nylo_out,nyhi_out,
                             nxlo_out,nxhi_out,"pppm:vdz_brick");
+    memory->create3d_offset(phi_brick,nzlo_out,nzhi_out,nylo_out,nyhi_out,
+                            nxlo_out,nxhi_out,"pppm:phi_brick");
   }
 
   // summation coeffs
@@ -952,12 +963,15 @@ void PPPM::deallocate()
     memory->destroy3d_offset(vdx_brick,nzlo_out,nylo_out,nxlo_out);
     memory->destroy3d_offset(vdy_brick,nzlo_out,nylo_out,nxlo_out);
     memory->destroy3d_offset(vdz_brick,nzlo_out,nylo_out,nxlo_out);
+    memory->destroy3d_offset(phi_brick,nzlo_out,nylo_out,nxlo_out);
   }
 
   memory->destroy(density_fft);
   memory->destroy(greensfn);
   memory->destroy(work1);
   memory->destroy(work2);
+  memory->destroy(work3);
+  memory->destroy(phi);
   memory->destroy(vg);
 
   if (triclinic == 0) {
@@ -1592,6 +1606,7 @@ void PPPM::compute_gf_ik()
 
 void PPPM::compute_gf_ik_triclinic()
 {
+  // printf("triclinic\n");
   double snx,sny,snz;
   double argx,argy,argz,wx,wy,wz,sx,sy,sz,qx,qy,qz;
   double sum1,dot1,dot2;
@@ -2041,6 +2056,23 @@ void PPPM::poisson_ik()
     work1[n++] *= scaleinv * greensfn[i];
   }
 
+  // ------------------------------------------------------------
+  // Compute scalar potential phi(r)
+  // work1 currently contains V(k)
+  // ------------------------------------------------------------
+
+  memcpy(work3, work1, 2 * nfft * sizeof(FFT_SCALAR));
+
+  fft2->compute(work3, work3, FFT3d::BACKWARD);
+
+  n = 0;
+  for (k = nzlo_in; k <= nzhi_in; k++)
+    for (j = nylo_in; j <= nyhi_in; j++)
+      for (i = nxlo_in; i <= nxhi_in; i++) {
+        phi_brick[k][j][i] = work3[n];
+        n += 2;
+      }
+
   // extra FFTs for per-atom energy/virial
 
   if (evflag_atom) poisson_peratom();
@@ -2417,9 +2449,11 @@ void PPPM::fieldforce()
 
 void PPPM::fieldforce_ik()
 {
+  // printf("fieldforce_ik called\n");
   int i,l,m,n,nx,ny,nz,mx,my,mz;
   FFT_SCALAR dx,dy,dz,x0,y0,z0;
   FFT_SCALAR ekx,eky,ekz;
+  FFT_SCALAR phii;
 
   // loop over my charges, interpolate electric field from nearby grid points
   // (nx,ny,nz) = global coords of grid pt to "lower left" of charge
@@ -2433,6 +2467,15 @@ void PPPM::fieldforce_ik()
 
   int nlocal = atom->nlocal;
 
+  // Debug to isolate kspace force
+  // double (*fkspace)[3] = new double[nlocal][3];
+
+  // for (i = 0; i < nlocal; i++) {
+  //   fkspace[i][0] = 0.0;
+  //   fkspace[i][1] = 0.0;
+  //   fkspace[i][2] = 0.0;
+  // }
+
   for (i = 0; i < nlocal; i++) {
     nx = part2grid[i][0];
     ny = part2grid[i][1];
@@ -2443,7 +2486,7 @@ void PPPM::fieldforce_ik()
 
     compute_rho1d(dx,dy,dz);
 
-    ekx = eky = ekz = ZEROF;
+    ekx = eky = ekz = phii = ZEROF;
     for (n = nlower; n <= nupper; n++) {
       mz = n+nz;
       z0 = rho1d[2][n];
@@ -2456,6 +2499,7 @@ void PPPM::fieldforce_ik()
           ekx -= x0*vdx_brick[mz][my][mx];
           eky -= x0*vdy_brick[mz][my][mx];
           ekz -= x0*vdz_brick[mz][my][mx];
+          phii += x0*phi_brick[mz][my][mx];
         }
       }
     }
@@ -2463,6 +2507,17 @@ void PPPM::fieldforce_ik()
     // convert E-field to force
 
     const double qfactor = qqrd2e * scale * q[i];
+
+    phi[i] = phii;
+    phi[i] += (-2.0 * g_ewald * q[i] / MY_PIS);
+
+    // LES-compatible background derivative
+    if (fabs(qsum) > SMALL) {
+      phi[i] += (2.0 * MY_PI2 * qsum /
+                (g_ewald*g_ewald*volume));
+    }
+    phi[i] *= qqrd2e * scale;
+
     f[i][0] += qfactor*ekx;
     f[i][1] += qfactor*eky;
     if (slabflag != 2) f[i][2] += qfactor*ekz;
@@ -2635,10 +2690,12 @@ void PPPM::pack_forward_grid(int flag, void *vbuf, int nlist, int *list)
     FFT_SCALAR *xsrc = &vdx_brick[nzlo_out][nylo_out][nxlo_out];
     FFT_SCALAR *ysrc = &vdy_brick[nzlo_out][nylo_out][nxlo_out];
     FFT_SCALAR *zsrc = &vdz_brick[nzlo_out][nylo_out][nxlo_out];
+    FFT_SCALAR *psrc = &phi_brick[nzlo_out][nylo_out][nxlo_out];
     for (int i = 0; i < nlist; i++) {
       buf[n++] = xsrc[list[i]];
       buf[n++] = ysrc[list[i]];
       buf[n++] = zsrc[list[i]];
+      buf[n++] = psrc[list[i]];
     }
   } else if (flag == FORWARD_AD) {
     FFT_SCALAR *src = &u_brick[nzlo_out][nylo_out][nxlo_out];
@@ -2695,10 +2752,12 @@ void PPPM::unpack_forward_grid(int flag, void *vbuf, int nlist, int *list)
     FFT_SCALAR *xdest = &vdx_brick[nzlo_out][nylo_out][nxlo_out];
     FFT_SCALAR *ydest = &vdy_brick[nzlo_out][nylo_out][nxlo_out];
     FFT_SCALAR *zdest = &vdz_brick[nzlo_out][nylo_out][nxlo_out];
+    FFT_SCALAR *pdest = &phi_brick[nzlo_out][nylo_out][nxlo_out];
     for (int i = 0; i < nlist; i++) {
       xdest[list[i]] = buf[n++];
       ydest[list[i]] = buf[n++];
       zdest[list[i]] = buf[n++];
+      pdest[list[i]] = buf[n++];
     }
   } else if (flag == FORWARD_AD) {
     FFT_SCALAR *dest = &u_brick[nzlo_out][nylo_out][nxlo_out];
