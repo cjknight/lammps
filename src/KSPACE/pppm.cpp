@@ -36,8 +36,6 @@
 #include "pair.h"
 #include "remap_wrap.h"
 
-#include "comm.h"
-
 #include <cmath>
 #include <cstring>
 
@@ -658,16 +656,6 @@ void PPPM::reset_grid()
 
 void PPPM::compute(int eflag, int vflag)
 {
-  // double qsum_local = 0.0;
-  // for (int i = 0; i < atom->nlocal; i++)
-  //   qsum_local += atom->q[i];
-
-  // double qsum_ghost = 0.0;
-  // for (int i = atom->nlocal; i < atom->nlocal + atom->nghost; i++)
-  //   qsum_ghost += atom->q[i];
-
-  // printf("LOCAL QSUM = %g\n", qsum_local);
-  // printf("GHOST QSUM = %g\n", qsum_ghost);
 
   int i,j;
 
@@ -2466,15 +2454,6 @@ void PPPM::fieldforce_ik()
   double **f = atom->f;
 
   int nlocal = atom->nlocal;
-
-  // Debug to isolate kspace force
-  // double (*fkspace)[3] = new double[nlocal][3];
-
-  // for (i = 0; i < nlocal; i++) {
-  //   fkspace[i][0] = 0.0;
-  //   fkspace[i][1] = 0.0;
-  //   fkspace[i][2] = 0.0;
-  // }
 
   for (i = 0; i < nlocal; i++) {
     nx = part2grid[i][0];
