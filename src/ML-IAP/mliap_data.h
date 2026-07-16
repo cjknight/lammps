@@ -29,6 +29,8 @@ class MLIAPData : protected Pointers {
   virtual void generate_neighdata(class NeighList *, int = 0, int = 0);
   virtual void grow_neigharrays();
   double memory_usage();
+  double *get_charges();
+  void update_charges();
 
   int size_array_rows, size_array_cols;
   int natoms;
@@ -38,6 +40,7 @@ class MLIAPData : protected Pointers {
   double **f;
   double **gradforce;
   double **betas;          // betas for all atoms in list
+  double **charge_betas;   // charge betas for all atoms in list
   double **descriptors;    // descriptors for all atoms in list
   double *eatoms;          // energies for all atoms in list
   double energy;           // energy

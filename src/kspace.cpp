@@ -312,6 +312,7 @@ void KSpace::qsum_qsq(int warning_flag)
   MPI_Allreduce(&qsum_local,&qsum,1,MPI_DOUBLE,MPI_SUM,world);
   MPI_Allreduce(&qsqsum_local,&qsqsum,1,MPI_DOUBLE,MPI_SUM,world);
 
+  warn_nocharge = 0;
   if ((qsqsum == 0.0) && (comm->me == 0) && warn_nocharge && warning_flag) {
     error->warning(FLERR,"Using kspace solver on system with no charge");
     warn_nocharge = 0;

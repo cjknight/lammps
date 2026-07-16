@@ -39,6 +39,7 @@ class PPPM : public KSpace {
   double memory_usage() override;
 
   void compute_group_group(int, int, int) override;
+  double *phi;
 
  protected:
   int me, nprocs;
@@ -61,6 +62,7 @@ class PPPM : public KSpace {
 
   FFT_SCALAR ***density_brick;
   FFT_SCALAR ***vdx_brick, ***vdy_brick, ***vdz_brick;
+  FFT_SCALAR ***phi_brick;
   FFT_SCALAR ***u_brick;
   FFT_SCALAR ***v0_brick, ***v1_brick, ***v2_brick;
   FFT_SCALAR ***v3_brick, ***v4_brick, ***v5_brick;
@@ -68,7 +70,7 @@ class PPPM : public KSpace {
   double **vg;
   double *fkx, *fky, *fkz;
   FFT_SCALAR *density_fft;
-  FFT_SCALAR *work1, *work2;
+  FFT_SCALAR *work1, *work2, *work3;
 
   double *gf_b;
   FFT_SCALAR **rho1d, **rho_coeff, **drho1d, **drho_coeff;

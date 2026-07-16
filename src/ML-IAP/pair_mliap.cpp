@@ -24,6 +24,7 @@
 #ifdef MLIAP_ACE
 #include "mliap_descriptor_ace.h"
 #endif
+#include "mliap_descriptor_mtp.h"
 #include "mliap_model_linear.h"
 #include "mliap_model_nn.h"
 #include "mliap_model_quadratic.h"
@@ -33,6 +34,7 @@
 #endif
 
 #include "atom.h"
+#include "comm.h"
 #include "error.h"
 #include "force.h"
 #include "info.h"
@@ -55,6 +57,10 @@ PairMLIAP::PairMLIAP(LAMMPS *lmp) :
   manybody_flag = 1;
   is_child = false;
   centroidstressflag = CENTROID_NOTAVAIL;
+
+  pppmflag = 1;
+  ewaldflag = 1;
+  msmflag = 1;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -103,6 +109,9 @@ void PairMLIAP::compute(int eflag, int vflag)
   // compute E_i and beta_i = dE_i/dB_i for all i in list
 
   model->compute_gradients(data);
+
+  // update charges for LES
+  comm->forward_comm();
 
   // calculate force contributions beta_i*dB_i/dR_j
 
@@ -192,6 +201,15 @@ void PairMLIAP::settings(int narg, char ** arg)
         iarg += 3;
       }
 #endif
+//#ifdef MLIAP_MTP
+        else if (strcmp(arg[iarg+1], "mtp") == 0) {
+          // TODO require mtp param file?
+          //if (iarg+3 > narg) utils::missing_cmd_args(FLERR, "pair_style mliap descriptor mtp", error);
+          //descriptor = new MLIAPDescriptorMTP(lmp,arg[iarg+2]);
+          descriptor = new MLIAPDescriptorMTP(lmp);
+          iarg += 2;
+        }
+//#endif
       else error->all(FLERR,"Illegal pair_style mliap command");
     } else if (strcmp(arg[iarg], "unified") == 0) {
 #ifdef MLIAP_PYTHON
@@ -270,6 +288,9 @@ void PairMLIAP::coeff(int narg, char **arg)
 
   model->init();
   descriptor->init();
+
+  // Set cutoff_coul from the descriptor's active cutoff
+  cutoff_coul = descriptor->cutmax;
   constexpr int gradgradflag = -1;
   delete data;
   data = new MLIAPData(lmp, gradgradflag, map, model, descriptor, this);
@@ -384,3 +405,21 @@ double PairMLIAP::memory_usage()
   return bytes;
 }
 
+
+void *PairMLIAP::extract(const char *str, int &iarg)
+{
+  if (strcmp(str,"cut_coul") == 0) {
+    iarg = 0;
+    return (void *) &cutoff_coul;
+  }
+
+  return nullptr;
+}
+
+void PairMLIAP::compute_charge_response_forces(double *phi)
+{
+    MLIAPDescriptorMTP *mtp = dynamic_cast<MLIAPDescriptorMTP *>(descriptor);
+    if (!mtp) return;
+
+    mtp->compute_forces_from_coeffs(data, data->charge_betas, phi);
+}

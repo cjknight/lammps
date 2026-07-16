@@ -36,6 +36,8 @@ class PairMLIAP : public Pair {
   void init_style() override;
   double init_one(int, int) override;
   double memory_usage() override;
+  void *extract(const char *str, int &iarg);
+  void compute_charge_response_forces(double *phi);
 
  protected:
   virtual void allocate();
@@ -44,6 +46,7 @@ class PairMLIAP : public Pair {
   class MLIAPDescriptor *descriptor;
   class MLIAPData *data;
   bool is_child;
+  double cutoff_coul;
 };
 
 }    // namespace LAMMPS_NS
