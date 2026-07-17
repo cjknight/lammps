@@ -23,6 +23,9 @@
 #include "pair_mliap.h"
 #include "mliap_data.h"
 
+#include <algorithm>
+#include <cmath>
+
 // #include "comm.h"
 
 using namespace LAMMPS_NS;

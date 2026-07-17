@@ -35,7 +35,7 @@ MLIAPData::MLIAPData(LAMMPS *lmp, int gradgradflag_in, int *map_in, class MLIAPM
     gamma(nullptr), gamma_row_index(nullptr), gamma_col_index(nullptr), egradient(nullptr),
     numneighs(nullptr), iatoms(nullptr), ielems(nullptr), itypes(nullptr), pair_i(nullptr),
     jatoms(nullptr), jelems(nullptr), elems(nullptr), lmp_firstneigh(nullptr), rij(nullptr),
-    graddesc(nullptr), model(nullptr), descriptor(nullptr), list(nullptr)
+    graddesc(nullptr), model(nullptr), descriptor(nullptr), list(nullptr), charge_betas(nullptr)
 {
   gradgradflag = gradgradflag_in;
   map = map_in;
