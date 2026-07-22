@@ -805,7 +805,6 @@ void MLIAPDescriptorMTP::compute_descriptors(MLIAPData *data)
       data->descriptors[ii][k++] = val;
     }
   }
-  
   // tagint *tag = atom->tag;
 
   // std::vector<std::pair<tagint,int>> order;

@@ -325,3 +325,4 @@ void MLIAPData::update_charges() {
   if (force->kspace)
         force->kspace->qsum_qsq(1);
 }
+
