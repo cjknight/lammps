@@ -62,6 +62,7 @@ struct TagPPPM_poisson_ik7{};
 struct TagPPPM_poisson_ik8{};
 struct TagPPPM_poisson_ik9{};
 struct TagPPPM_poisson_ik10{};
+struct TagPPPM_poisson_ik11{};
 struct TagPPPM_poisson_ik_triclinic1{};
 struct TagPPPM_poisson_ik_triclinic2{};
 struct TagPPPM_poisson_ik_triclinic3{};
@@ -211,6 +212,10 @@ class PPPMKokkos : public PPPM, public KokkosBaseFFT {
 // NOLINTNEXTLINE
   KOKKOS_INLINE_FUNCTION
   void operator()(TagPPPM_poisson_ik10, const int&) const;
+
+// NOLINTNEXTLINE
+  KOKKOS_INLINE_FUNCTION
+  void operator()(TagPPPM_poisson_ik11, const int&) const;
 
 // NOLINTNEXTLINE
   KOKKOS_INLINE_FUNCTION
@@ -411,6 +416,7 @@ class PPPMKokkos : public PPPM, public KokkosBaseFFT {
 
   typename FFT_AT::t_FFT_SCALAR_3d d_density_brick;
   typename FFT_AT::t_FFT_SCALAR_3d d_vdx_brick,d_vdy_brick,d_vdz_brick;
+  typename FFT_AT::t_FFT_SCALAR_3d d_phi_brick;
   typename FFT_AT::t_FFT_SCALAR_3d d_u_brick;
   typename FFT_AT::t_FFT_SCALAR_3d d_v0_brick,d_v1_brick,d_v2_brick;
   typename FFT_AT::t_FFT_SCALAR_3d d_v3_brick,d_v4_brick,d_v5_brick;
@@ -422,9 +428,13 @@ class PPPMKokkos : public PPPM, public KokkosBaseFFT {
   FFT_DAT::tdual_FFT_SCALAR_1d k_density_fft;
   FFT_DAT::tdual_FFT_SCALAR_1d k_work1;
   FFT_DAT::tdual_FFT_SCALAR_1d k_work2;
+  FFT_DAT::tdual_FFT_SCALAR_1d k_work3;
+  DAT::tdual_double_1d k_phi;
   typename FFT_AT::t_FFT_SCALAR_1d d_density_fft;
   typename FFT_AT::t_FFT_SCALAR_1d d_work1;
   typename FFT_AT::t_FFT_SCALAR_1d d_work2;
+  typename FFT_AT::t_FFT_SCALAR_1d d_work3;
+  typename AT::t_double_1d d_phi;
 
   DAT::tdual_double_1d k_gf_b;
   typename AT::t_double_1d d_gf_b;

@@ -785,7 +785,7 @@ void PPPMKokkos<DeviceType>::allocate()
 
   gc->setup_comm(ngc_buf1,ngc_buf2);
 
-  npergrid = 3;
+  npergrid = 4;
 
   k_gc_buf1 = FFT_DAT::tdual_FFT_SCALAR_1d("pppm:gc_buf1",npergrid*ngc_buf1);
   k_gc_buf2 = FFT_DAT::tdual_FFT_SCALAR_1d("pppm:gc_buf2",npergrid*ngc_buf2);
@@ -818,8 +818,12 @@ void PPPMKokkos<DeviceType>::allocate()
   d_greensfn = typename AT::t_kkfloat_1d("pppm:greensfn",nfft_both);
   memoryKK->create_kokkos(k_work1,work1,2*nfft_both,"pppm:work1");
   memoryKK->create_kokkos(k_work2,work2,2*nfft_both,"pppm:work2");
+  memoryKK->create_kokkos(k_work3,work3,2*nfft_both,"pppm:work3");
+  memoryKK->create_kokkos(k_phi,phi,atom->nmax,"pppm:phi");
   d_work1 = k_work1.view<DeviceType>();
   d_work2 = k_work2.view<DeviceType>();
+  d_work3 = k_work3.view<DeviceType>();
+  d_phi = k_phi.view<DeviceType>();
   d_vg = typename AT::t_kkfloat_1d_6("pppm:vg",nfft_both);
 
   if (triclinic == 0) {
@@ -835,6 +839,7 @@ void PPPMKokkos<DeviceType>::allocate()
   d_vdx_brick = typename FFT_AT::t_FFT_SCALAR_3d("pppm:d_vdx_brick",nzhi_out-nzlo_out+1,nyhi_out-nylo_out+1,nxhi_out-nxlo_out+1);
   d_vdy_brick = typename FFT_AT::t_FFT_SCALAR_3d("pppm:d_vdy_brick",nzhi_out-nzlo_out+1,nyhi_out-nylo_out+1,nxhi_out-nxlo_out+1);
   d_vdz_brick = typename FFT_AT::t_FFT_SCALAR_3d("pppm:d_vdz_brick",nzhi_out-nzlo_out+1,nyhi_out-nylo_out+1,nxhi_out-nxlo_out+1);
+  d_phi_brick = typename FFT_AT::t_FFT_SCALAR_3d("pppm:d_phi_brick",nzhi_out-nzlo_out+1,nyhi_out-nylo_out+1,nxhi_out-nxlo_out+1);
 
   // summation coeffs
 
@@ -886,6 +891,8 @@ void PPPMKokkos<DeviceType>::deallocate()
   memoryKK->destroy_kokkos(d_density_fft,density_fft);
   memoryKK->destroy_kokkos(d_work1,work1);
   memoryKK->destroy_kokkos(d_work2,work2);
+  memoryKK->destroy_kokkos(k_work3,work3);
+  memoryKK->destroy_kokkos(k_phi,phi);
 
   delete fft1;
   fft1 = nullptr;
@@ -1514,6 +1521,17 @@ void PPPMKokkos<DeviceType>::poisson_ik()
   Kokkos::parallel_for(Kokkos::RangePolicy<DeviceType, TagPPPM_poisson_ik4>(0,nfft),*this);
   copymode = 0;
 
+  fft2->compute(d_work1,d_work3,FFT3dKokkos<DeviceType>::BACKWARD);
+
+  numz_inout = (nzhi_in-nzlo_out)-(nzlo_in-nzlo_out) + 1;
+  numy_inout = (nyhi_in-nylo_out)-(nylo_in-nylo_out) + 1;
+  numx_inout = (nxhi_in-nxlo_out)-(nxlo_in-nxlo_out) + 1;
+  const int inum_inout = numz_inout*numy_inout*numx_inout;
+
+  copymode = 1;
+  Kokkos::parallel_for(Kokkos::RangePolicy<DeviceType, TagPPPM_poisson_ik11>(0,inum_inout),*this);
+  copymode = 0;
+
   // extra FFTs for per-atom energy/virial
 
   if (evflag_atom) poisson_peratom();
@@ -1535,11 +1553,6 @@ void PPPMKokkos<DeviceType>::poisson_ik()
   numy_fft = nyhi_fft-nylo_fft + 1;
   numx_fft = nxhi_fft-nxlo_fft + 1;
   const int inum_fft = numz_fft*numy_fft*numx_fft;
-
-  numz_inout = (nzhi_in-nzlo_out)-(nzlo_in-nzlo_out) + 1;
-  numy_inout = (nyhi_in-nylo_out)-(nylo_in-nylo_out) + 1;
-  numx_inout = (nxhi_in-nxlo_out)-(nxlo_in-nxlo_out) + 1;
-  const int inum_inout = numz_inout*numy_inout*numx_inout;
 
   // x direction gradient
 
@@ -1697,6 +1710,21 @@ void PPPMKokkos<DeviceType>::operator()(TagPPPM_poisson_ik10, const int &ii) con
   j += nylo_in-nylo_out;
   i += nxlo_in-nxlo_out;
   d_vdz_brick(k,j,i) = d_work2[n];
+}
+
+template<class DeviceType>
+// NOLINTNEXTLINE
+KOKKOS_INLINE_FUNCTION
+void PPPMKokkos<DeviceType>::operator()(TagPPPM_poisson_ik11, const int &ii) const
+{
+  const int n = ii*2;
+  int k = ii/(numy_inout*numx_inout);
+  int j = (ii - k*numy_inout*numx_inout) / numx_inout;
+  int i = ii - k*numy_inout*numx_inout - j*numx_inout;
+  k += nzlo_in-nzlo_out;
+  j += nylo_in-nylo_out;
+  i += nxlo_in-nxlo_out;
+  d_phi_brick(k,j,i) = d_work3[n];
 }
 
 /* ----------------------------------------------------------------------
@@ -2171,6 +2199,9 @@ void PPPMKokkos<DeviceType>::fieldforce_ik()
   copymode = 1;
   Kokkos::parallel_for(Kokkos::RangePolicy<DeviceType, TagPPPM_fieldforce_ik>(0,nlocal),*this);
   copymode = 0;
+
+  k_phi.template modify<DeviceType>();
+  k_phi.sync_host();
 }
 
 template<class DeviceType>
@@ -2180,7 +2211,7 @@ void PPPMKokkos<DeviceType>::operator()(TagPPPM_fieldforce_ik, const int &i) con
 {
   int l,m,n,nx,ny,nz,mx,my,mz;
   FFT_SCALAR x0,y0,z0;
-  FFT_SCALAR ekx,eky,ekz;
+  FFT_SCALAR ekx,eky,ekz,phii;
 
   nx = d_part2grid(i,0);
   ny = d_part2grid(i,1);
@@ -2190,7 +2221,7 @@ void PPPMKokkos<DeviceType>::operator()(TagPPPM_fieldforce_ik, const int &i) con
   ny -= nylo_out;
   nx -= nxlo_out;
 
-  ekx = eky = ekz = ZEROF;
+  ekx = eky = ekz = phii = ZEROF;
   for (n = nlower; n <= nupper; n++) {
     mz = n+nz;
     z0 = d_rho1d(i,n+order/2,2);
@@ -2203,6 +2234,7 @@ void PPPMKokkos<DeviceType>::operator()(TagPPPM_fieldforce_ik, const int &i) con
         ekx -= x0*d_vdx_brick(mz,my,mx);
         eky -= x0*d_vdy_brick(mz,my,mx);
         ekz -= x0*d_vdz_brick(mz,my,mx);
+        phii += x0*d_phi_brick(mz,my,mx);
       }
     }
   }
@@ -2210,6 +2242,14 @@ void PPPMKokkos<DeviceType>::operator()(TagPPPM_fieldforce_ik, const int &i) con
   // convert E-field to force
 
   const KK_FLOAT qfactor = qscale_kk * q[i];
+  KK_FLOAT phi_kk = static_cast<KK_FLOAT>(phii);
+  phi_kk += static_cast<KK_FLOAT>(-2.0 * g_ewald_kk * q[i] / static_cast<KK_FLOAT>(MY_PIS));
+  if (Kokkos::fabs(static_cast<KK_FLOAT>(qsum)) > static_cast<KK_FLOAT>(SMALL)) {
+    phi_kk += static_cast<KK_FLOAT>(2.0 * MY_PI2 * qsum /
+      (g_ewald_kk * g_ewald_kk * static_cast<KK_FLOAT>(volume)));
+  }
+  phi_kk *= qscale_kk;
+  d_phi[i] = phi_kk;
   f(i,0) += static_cast<KK_ACC_FLOAT>(qfactor*static_cast<KK_FLOAT>(ekx));
   f(i,1) += static_cast<KK_ACC_FLOAT>(qfactor*static_cast<KK_FLOAT>(eky));
   if (slabflag != 2) f(i,2) += static_cast<KK_ACC_FLOAT>(qfactor*static_cast<KK_FLOAT>(ekz));
@@ -2333,9 +2373,10 @@ void PPPMKokkos<DeviceType>::operator()(TagPPPM_pack_forward1, const int &i) con
   const int iz = static_cast<int>(dlist/(nx*ny));
   const int iy = static_cast<int>((dlist - iz*nx*ny)/nx);
   const int ix = d_list_index[i] - iz*nx*ny - iy*nx;
-  d_buf[3*i] = d_vdx_brick(iz,iy,ix);
-  d_buf[3*i+1] = d_vdy_brick(iz,iy,ix);
-  d_buf[3*i+2] = d_vdz_brick(iz,iy,ix);
+  d_buf[4*i] = d_vdx_brick(iz,iy,ix);
+  d_buf[4*i+1] = d_vdy_brick(iz,iy,ix);
+  d_buf[4*i+2] = d_vdz_brick(iz,iy,ix);
+  d_buf[4*i+3] = d_phi_brick(iz,iy,ix);
 }
 
 template<class DeviceType>
@@ -2392,9 +2433,10 @@ void PPPMKokkos<DeviceType>::operator()(TagPPPM_unpack_forward1, const int &i) c
   const int iz = static_cast<int>(dlist/(nx*ny));
   const int iy = static_cast<int>((dlist - iz*nx*ny)/nx);
   const int ix = d_list_index[i] - iz*nx*ny - iy*nx;
-  d_vdx_brick(iz,iy,ix) = d_buf[3*i   + unpack_offset];
-  d_vdy_brick(iz,iy,ix) = d_buf[3*i+1 + unpack_offset];
-  d_vdz_brick(iz,iy,ix) = d_buf[3*i+2 + unpack_offset];
+  d_vdx_brick(iz,iy,ix) = d_buf[4*i   + unpack_offset];
+  d_vdy_brick(iz,iy,ix) = d_buf[4*i+1 + unpack_offset];
+  d_vdz_brick(iz,iy,ix) = d_buf[4*i+2 + unpack_offset];
+  d_phi_brick(iz,iy,ix) = d_buf[4*i+3 + unpack_offset];
 }
 
 template<class DeviceType>

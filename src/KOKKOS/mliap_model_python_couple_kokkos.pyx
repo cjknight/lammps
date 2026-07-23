@@ -195,3 +195,4 @@ cdef public void MLIAPPYKokkos_compute_gradients(MLIAPModelPythonKokkosDevice * 
         energy = dpnp.sum(en_cp)
     data.energy[0] = <double> energy
     return
+
