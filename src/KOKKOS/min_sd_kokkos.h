@@ -32,7 +32,8 @@ class MinSDKokkos : public MinLineSearchKokkos {
   MinSDKokkos(class LAMMPS *);
   int iterate(int) override;
 
- private:
+ // Won't compile w/ CUDA; similar to min_linesearch_kokkos.h
+ //private:
   void set_search_direction();
 };
 
