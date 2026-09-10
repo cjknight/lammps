@@ -513,6 +513,11 @@ whether an extra library is needed to build and use the package:
      - :doc:`compute XXX/tally <compute_tally>`
      - ``PACKAGES/tally``
      - no
+   * - :ref:`TETHER <PKG-TETHER>`
+     - frozen-Hessian long-timestep integrator
+     - :doc:`fix baoab/tether <fix_baoab_tether>`
+     - n/a
+     - no
    * - :ref:`UEF <PKG-UEF>`
      - extensional flow
      - :doc:`fix nvt/uef <fix_nh_uef>`

@@ -116,6 +116,7 @@ gives those details.
    * :ref:`SPIN <PKG-SPIN>`
    * :ref:`SRD <PKG-SRD>`
    * :ref:`TALLY <PKG-TALLY>`
+   * :ref:`TETHER <PKG-TETHER>`
    * :ref:`UEF <PKG-UEF>`
    * :ref:`VORONOI <PKG-VORONOI>`
    * :ref:`VTK <PKG-VTK>`
@@ -3013,6 +3014,26 @@ stress, etc) about individual interactions.
 * ``src/TALLY/README``
 * :doc:`compute \*/tally <compute_tally>`
 * ``examples/PACKAGES/tally``
+
+----------
+
+.. _PKG-TETHER:
+
+TETHER package
+------------------
+
+**Contents:**
+
+A single fix, :doc:`fix baoab/tether <fix_baoab_tether>`, that integrates
+atoms in its group as though tethered to a frozen harmonic center for
+whichever local vibrational eigenmodes are currently stiff relative to the
+timestep, allowing longer timesteps while preserving dynamical information.
+It is derived from and requires :doc:`fix baoab <fix_baoab>`.
+
+**Supporting info:**
+
+* ``src/TETHER``: filenames -> commands
+* :doc:`fix baoab/tether <fix_baoab_tether>`
 
 ----------
 

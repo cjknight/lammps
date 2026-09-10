@@ -935,6 +935,8 @@
 /fix_ave_correlate_long.h
 /fix_baoab.cpp
 /fix_baoab.h
+/fix_baoab_tether.cpp
+/fix_baoab_tether.h
 /fix_bocs.cpp
 /fix_bocs.h
 /fix_bond_break.cpp
