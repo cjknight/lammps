@@ -16,7 +16,7 @@ Syntax
 * damp = damping parameter (time units)
 * seed = random number seed (positive integer)
 * two or more keyword/value pairs must be appended
-* keyword = *theta* or *refresh* or *eps*
+* keyword = *theta* or *refresh* or *eps* or *mollify* or *newton_iters* or *newton_damp* or *solve_tol_rel* or *adapt* or *c_acc* or *dt_min* or *dt_max* or *ke_rel* or *gamma_quench*
 
   .. parsed-literal::
 
@@ -25,6 +25,36 @@ Syntax
        *eps* value = finite-difference probe displacement (distance units),
          must be > 0 (optional; default is a small fraction of the
          neighbor skin)
+       *mollify* value = *yes* or *no* (optional; default *no*)
+       *newton_iters* value = minimum number of Newton solver iterations
+         per timestep, must be >= 1 (optional; default 8; only used if
+         *mollify* is *yes*)
+       *newton_damp* value = initial Newton step damping factor, must be
+         in the range (0,1] (optional; default 0.6; only used if
+         *mollify* is *yes*)
+       *solve_tol_rel* value = Newton convergence tolerance, relative to
+         the thermal vibrational amplitude of an atom's stiffest mode,
+         must be > 0 (optional; default 0.005; only used if *mollify*
+         is *yes*)
+       *adapt* value = *yes* or *no* (optional; default *no*)
+       *c_acc* value = target accuracy for the fastest mode this fix is
+         not treating analytically, dimensionless, must be > 0
+         (optional; default 0.25; only used if *adapt* is *yes*)
+       *dt_min* value = smallest timestep the adaptive controller may
+         select (time units), must be > 0 (optional; default 0.02 times
+         the timestep in effect when this fix was defined; only used if
+         *adapt* is *yes*)
+       *dt_max* value = largest timestep the adaptive controller may
+         select (time units), must be > 0 (optional; default the
+         timestep in effect when this fix was defined; only used if
+         *adapt* is *yes*)
+       *ke_rel* value = kinetic-energy over-excitation threshold for the
+         event guard, in multiples of :math:`k_B T`, must be > 0
+         (optional; default 12.0; only used if *adapt* is *yes*)
+       *gamma_quench* value = friction coefficient applied to an atom
+         while it is cooling down after a demotion event (time units,
+         inverse), must be > 0 (optional; default 20.0; only used if
+         *adapt* is *yes*)
 
 Examples
 """"""""
@@ -33,6 +63,11 @@ Examples
 
    fix 1 stiff baoab/tether 300.0 300.0 100.0 12345 theta 1.8 refresh 20
    fix 2 rest nve
+   fix 1 stiff baoab/tether 300.0 300.0 100.0 12345 theta 1.8 refresh 20 &
+         mollify yes newton_iters 8 newton_damp 0.6 solve_tol_rel 0.005
+   fix 1 stiff baoab/tether 300.0 300.0 100.0 12345 theta 1.8 refresh 20 &
+         mollify yes adapt yes c_acc 0.25 dt_min 0.0002 dt_max 0.01 &
+         ke_rel 12.0 gamma_quench 20.0
 
 .. versionadded:: TBD
 
@@ -40,15 +75,20 @@ Description
 """""""""""
 
 This fix is a variant of :doc:`fix baoab <fix_baoab>` that integrates each
-atom in the fix group as though it were tethered to a frozen harmonic
-center for whichever of its three local vibrational eigenmodes are
-currently stiff relative to the timestep, while every other mode of that
-same atom, and every atom outside the group, is integrated exactly as
-:doc:`fix baoab <fix_baoab>` would integrate it. It is the stage-1
-(fixed stiff-atom group, no adaptive timestep, no mollifier) implementation
-of the frozen-Hessian mollified integrator described in the project's
-design notes; later stages will add dynamic stiff/soft reclassification,
-adaptive timestep selection, and event handling on top of this core.
+atom in the fix group as though it were tethered to a harmonic center for
+whichever of its three local vibrational eigenmodes are currently stiff
+relative to the timestep, while every other mode of that same atom, and
+every atom outside the group, is integrated exactly as :doc:`fix baoab
+<fix_baoab>` would integrate it. It implements the frozen-Hessian
+mollified integrator described in the project's design notes. By default
+(*mollify no*) the harmonic center for each stiff mode is the atom's own
+position at the last curvature refresh, held fixed until the next
+refresh; the *mollify yes* keyword instead re-solves each stiff atom's
+instantaneous equilibrium every timestep, as described further below.
+Group membership is fixed (no dynamic stiff/soft reclassification) in
+every mode. By default (*adapt no*) the timestep is also fixed, with no
+event handling; the *adapt yes* keyword, described further below, adds
+both adaptive timestep selection and event handling on top of this core.
 
 Every *refresh* steps, this fix recomputes a local, per-atom, block-diagonal
 curvature estimate for every atom in the group: three finite-difference
@@ -70,6 +110,118 @@ space; soft modes and all other atoms are unaffected. The half-step
 velocity kicks from conservative forces, at the start and end of the
 timestep, are identical for every atom regardless of group membership.
 
+----------
+
+.. versionadded:: TBD
+
+The *mollify* keyword selects the Newton mollifier. When set to *yes*,
+the harmonic center for each stiff mode is not held fixed at the last
+refresh position but is instead re-solved every timestep as that atom's
+instantaneous constrained equilibrium, using the current positions of
+its real pairwise neighbors as the effective cage. This is found with a
+damped Newton iteration, warm-started from the atom's own previously
+converged center, using only local force evaluations over that atom's
+existing neighbor list rather than a global force recomputation per
+iteration. *newton_iters* sets the minimum number of Newton iterations
+performed each timestep. *newton_damp* sets the initial damping factor
+applied to each Newton step; the damping is halved, down to a floor of
+0.05, whenever an iteration's residual grows instead of shrinking.
+*solve_tol_rel* sets the Newton convergence tolerance, relative to the
+thermal vibrational amplitude of the atom's stiffest mode; values of
+:math:`\omega\,dt` (*theta*) well below the 2.2 near-harmonic limit can
+use the default, but values approaching that limit require a smaller
+*solve_tol_rel* (of order 0.005 or tighter) to remain stable.
+
+Enabling *mollify yes* also applies a force correction to each stiff
+atom's neighbors, so that the neighbors feel the true gradient of the
+mollified potential rather than the force evaluated at the stiff atom's
+un-relaxed position. This fix also computes three per-atom self-evaluation
+diagnostics each timestep (Newton non-convergence, a large jump ("flip")
+in the solved center, and over-excited harmonic energy); they are always
+available as output quantities (see below) for monitoring, but are only
+acted on -- demoting the atom back to unmollified integration -- when
+*adapt* is *yes*.
+
+----------
+
+.. versionadded:: TBD
+
+The *adapt* keyword enables adaptive timestep selection together with an
+event-handling mechanism that demotes individual atoms out of stiff-mode
+treatment when they misbehave, and quenches them back to thermal
+equilibrium afterward. It is only meaningful combined with *mollify yes*.
+
+With *adapt yes*, the stiff/soft split for each atom's three eigenmodes
+is no longer decided by comparing :math:`\omega\,dt` against the fixed
+*theta* threshold. Instead, the first time this fix refreshes curvature
+blocks under *adapt yes*, it collects every group atom's eigenfrequencies
+on this MPI rank, sorts them, and looks for the largest multiplicative
+gap in the upper half of that sorted list; the geometric mean of the two
+frequencies straddling the gap becomes a global split frequency that is
+held fixed for the remainder of the run. An atom's three modes are
+treated as stiff only if all three are well above this split frequency;
+otherwise every mode of that atom falls back to ordinary free drift, the
+same as a soft mode in *adapt no* mode.
+
+Also with *adapt yes*, at every curvature refresh this fix recomputes the
+timestep from the fastest eigenmode it is not currently treating stiffly,
+targeting a user-specified accuracy (*c_acc*), and clamped so the fastest
+mode it does treat stiffly stays comfortably inside the harmonic
+integrator's own stability limit. The resulting timestep is restricted to
+a small set of powers of two of *dt_max* (never smaller than *dt_min*),
+and changes only one step at a size at a time, shrinking immediately when
+warranted but growing back only after a run of margin, so that it does
+not chatter step to step. Changing the timestep this way is applied with
+the same bookkeeping as the :doc:`fix dt/reset <fix_dt_reset>` command,
+so elapsed simulation time, pair-style internal state, and other fixes
+all stay consistent across the change.
+
+Two further event checks run only when *adapt* is *yes*. First, the three
+per-atom self-evaluation diagnostics described above (Newton
+non-convergence, center "flip", over-excited harmonic energy) now trigger
+an actual demotion when tripped: the offending atom's stiff modes are
+dropped back to ordinary free drift for a cooldown period that grows,
+capped, after repeated offenses from the same atom, and shrinks again
+after a long enough period of good behavior. Second, every timestep, each
+stiff atom's kinetic energy in its own stiff modes is compared against a
+threshold (*ke_rel*, in multiples of :math:`k_B T`); an atom that exceeds
+it is demoted the same way. In either case, an atom whose excess energy
+looks like a genuine physical event rather than a numerical artifact is
+also given a brief, strong-friction thermostat kick (*gamma_quench*)
+while it cools down, so that legitimate kinetic energy does not linger in
+its now-unconstrained modes.
+
+This fix currently detects the spectral gap and picks the timestep using
+only the atoms present on the calling MPI rank, without combining results
+across ranks; see Restrictions below.
+
+----------
+
+Restart, fix_modify, output, run start/stop, minimize info
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+No information about this fix is written to :doc:`binary restart files
+<restart>` (see the curvature-refresh restriction below).
+
+This fix computes a global vector of length 7, which can be accessed by
+various :doc:`output commands <Howto_output>`. The values are, in order:
+the running count of Newton non-convergence guard trips, the running
+count of center "flip" guard trips, the running count of over-excited
+harmonic energy guard trips, the running count of local partial-force
+evaluations performed by the Newton solver, the running count of full
+local force recomputations performed by this fix, the running count of
+demotion events from any cause, and the running count of demotion events
+from the kinetic over-excitation guard specifically (a subset of the
+previous value). The 4th and 5th entries are a per-rank, halo-local proxy
+for the fix's force-evaluation cost. All seven entries are 0 unless
+*mollify* is *yes*; the 6th and 7th are additionally 0 unless *adapt* is
+also *yes*. The first three and the last two entries are diagnostic only
+except when *adapt* is *yes*, in which case the first three drive actual
+demotion events (see above). The vector values calculated by this fix are
+"extensive".
+
+This fix is not invoked during :doc:`energy minimization <minimize>`.
+
 Restrictions
 """"""""""""
 
@@ -79,7 +231,23 @@ built with that package; that package's :doc:`fix baoab/tether
 it derives from and reuses :doc:`fix baoab <fix_baoab>`. See the
 :doc:`Build package <Build_package>` page for more info.
 
-This fix currently supports a single MPI rank only.
+This fix currently supports a single MPI rank only. This restriction is
+especially relevant to *adapt yes*: the spectral-gap split frequency and
+the adaptive timestep are both currently chosen from only the atoms on
+the calling rank, with no cross-rank communication.
+
+With *adapt yes*, the accuracy-limited timestep ceiling (the
+:math:`c_{\rm acc}/\omega_{\rm unres}` term) is computed only from this
+fix's own group's per-atom curvature, since the fix has no visibility
+into the curvature of atoms outside its group (e.g. a heavier bath
+integrated by a separate, ordinary time-integration fix on the rest of
+the system). Whenever this group's own unresolved band sits at a higher
+frequency than that outside bath, this fix will select a smaller
+timestep than an integrator with full-system curvature visibility would
+choose for the same accuracy target. This is expected and is a direct
+consequence of this fix's halo-local, per-group design: it makes the
+selected timestep more conservative (safe, but potentially smaller than
+optimal), never less conservative.
 
 Curvature-block refresh does not yet have restart support: after reading a
 restart file, this fix re-acquires curvature blocks for the whole group on
@@ -108,3 +276,9 @@ Default
 """""""
 
 *eps* defaults to :math:`10^{-4}` times the neighbor skin distance.
+*mollify* defaults to *no*. *newton_iters* defaults to 8. *newton_damp*
+defaults to 0.6. *solve_tol_rel* defaults to 0.005. *adapt* defaults to
+*no*. *c_acc* defaults to 0.25. *dt_min* defaults to 0.02 times the
+timestep in effect when this fix was defined. *dt_max* defaults to the
+timestep in effect when this fix was defined. *ke_rel* defaults to 12.0.
+*gamma_quench* defaults to 20.0.
