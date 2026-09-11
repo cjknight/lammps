@@ -51,6 +51,8 @@ class FixBAOABTether : public FixBAOAB {
   void copy_arrays(int, int, int) override;
   int pack_exchange(int, double *) override;
   int unpack_exchange(int, double *) override;
+  int pack_forward_comm(int, int *, double *, int, int *) override;
+  void unpack_forward_comm(int, int, double *) override;
 
  private:
   double theta;          // dimensionless omega*dt stiff/soft threshold
@@ -115,6 +117,14 @@ class FixBAOABTether : public FixBAOAB {
   // stage-3 event counters (0 unless adapt == 1)
   bigint n_demoted, n_kinetic_guard;
 
+  // stage-4 (ghost/MPI communication) diagnostic: counts times a stored
+  // sparse-block neighbor (Jtag[i][kk]) could not be resolved via
+  // atom->map() because it had drifted outside the current ghost cutoff
+  // since the last refresh -- the back-reaction contribution is silently
+  // dropped (fails safe) rather than crashing; see force_moll(). Always 0
+  // on a single rank with a generous cutoff/skin.
+  bigint n_ghost_miss;
+
   // halo-locality cost accounting (plan Sec 6.1 honest force-call cost):
   // partial_force() calls (Newton inner loop, mollify=yes) vs. full local
   // recompute_forces_local() calls -- exposed via compute_vector().
@@ -127,7 +137,8 @@ class FixBAOABTether : public FixBAOAB {
 
   // stage-2 additions
   void solve_center(int i, double mi, double kT, double *cnew);
-  bool partial_force(int i, const double *xtrial, double *fout) const;
+  bool partial_force(int i, const double *xtrial, double *fout, double *fneigh = nullptr,
+                      bool live_neighbor_positions = false) const;
   void force_moll();
 
   // stage-3 additions

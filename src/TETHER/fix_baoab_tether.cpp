@@ -192,6 +192,25 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   n_guard_newton = n_guard_flip = n_guard_energy = 0;
   n_demoted = n_kinetic_guard = 0;
   n_partial_force_calls = n_recompute_calls = 0;
+  n_ghost_miss = 0;
+
+  // stage-4: this fix owns a private per-atom array (c[]) that partial_force()
+  // reads for possibly-ghost neighbors -- register it for standard forward
+  // comm (pack/unpack below) so a ghost's copy is never stale/garbage under
+  // real multi-rank. See initial_integrate()/final_integrate() for the call
+  // site and force_moll() comments for the matching reverse-comm fix.
+  comm_forward = 3;
+
+  // stage-4: pack_exchange()/unpack_exchange() write a per-atom payload far
+  // larger (and variable-size, up to the JMAX cap) than the base Fix class's
+  // default maxexchange of 0 -- left unset, Comm::init_exchange() undercounts
+  // this fix's contribution to bufextra and a heavily-blocked atom's
+  // pack_exchange() can overrun comm's send buffer during a real cross-rank
+  // migration (invisible on 1 rank, where exchange() is never exercised).
+  // Static (not maxexchange_dynamic), sized from the fixed worst case: x0(3)
+  // + c(3) + evecs(9) + om(3) + nJ-count(1) + JMAX*(tag(1)+block(9)) +
+  // demote_count/last_demote/demote_cool/quench_exempt(4) + last_ke(1).
+  maxexchange = 3 + 3 + 9 + 3 + 1 + JMAX * (1 + 9) + 4 + 1;
 
   // diagnostic vector (plan Sec 6.1 event forensics / honest cost report):
   // [0..2] self-evaluation guard counts (Newton non-convergence, center
@@ -202,9 +221,12 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   // full local force pass each) -- ratio of [3] to [4]*nlocal is a first
   // halo-locality sanity number ahead of MPI work; [5] total demotion
   // events (any cause, adapt=yes only); [6] demotion events specifically
-  // from the kinetic over-excitation guard (subset of [5]).
+  // from the kinetic over-excitation guard (subset of [5]); [7] stage-4
+  // ghost-miss count (stored sparse-block neighbor drifted outside the
+  // ghost cutoff before its back-reaction was applied, contribution
+  // dropped -- see n_ghost_miss in the header).
   vector_flag = 1;
-  size_vector = 7;
+  size_vector = 8;
   extvector = 0;
 
   // per-atom persistent state (curvature-block eigenvectors/frequencies,
@@ -308,15 +330,32 @@ void FixBAOABTether::initial_integrate(int /*vflag*/)
 
   compute_target();
 
-  if (need_refresh || (update->ntimestep - last_refresh_step) >= refresh_every) {
-    refresh_blocks();
-    last_refresh_step = update->ntimestep;
-    need_refresh = 0;
+  // stage-4: need_refresh can be forced to 1 on this rank alone (e.g. a
+  // local atom's demote_atom() call in solve_center()/the kinetic guard --
+  // adapt=yes only, and which atoms demote is inherently rank-local under
+  // real domain decomposition). refresh_blocks() and, when adapt is on,
+  // update_dt() both make their own collective MPI calls internally, so
+  // every rank MUST enter refresh_blocks() on the same step or those
+  // collectives desynchronize and hang. Allreduce the gating decision
+  // itself so it is identical on every rank before anyone acts on it.
+  {
+    int local_refresh = (need_refresh || (update->ntimestep - last_refresh_step) >= refresh_every) ? 1 : 0;
+    int global_refresh = local_refresh;
+    if (comm->nprocs > 1) MPI_Allreduce(&local_refresh, &global_refresh, 1, MPI_INT, MPI_MAX, world);
+    if (global_refresh) {
+      refresh_blocks();
+      last_refresh_step = update->ntimestep;
+      need_refresh = 0;
+    }
   }
 
   double kT = force->boltz * t_target / force->mvv2e;
 
   if (mollify) {
+    // stage-4: refresh ghost copies of c[] from the previous step's
+    // fully-converged values BEFORE any local atom's Newton solve below can
+    // touch its own c[i] this step -- see pack_forward_comm() above.
+    comm->forward_comm(this);
     for (int i = 0; i < nlocal; i++) {
       if (!(mask[i] & groupbit)) continue;
       double mi = rmass ? rmass[i] : mass[type[i]];
@@ -524,6 +563,9 @@ void FixBAOABTether::final_integrate()
 
   if (mollify) {
     double kT = force->boltz * t_target / force->mvv2e;
+    // stage-4: see the matching comm->forward_comm(this) note in
+    // initial_integrate() -- same reasoning applies here.
+    comm->forward_comm(this);
     for (int i = 0; i < nlocal; i++) {
       if (!(mask[i] & groupbit)) continue;
       double mi = rmass ? rmass[i] : mass[type[i]];
@@ -677,23 +719,22 @@ void FixBAOABTether::modal_force_correction(int i, double mi, double *fcorr) con
 void FixBAOABTether::refresh_blocks()
 {
   double **x = atom->x;
-  double **f = atom->f;
   int *mask = atom->mask;
   double *mass = atom->mass;
   double *rmass = atom->rmass;
   int *type = atom->type;
   int nlocal = atom->nlocal;
 
-  // the probes below repeatedly clobber atom->f; stash the production
-  // forces so the B-step immediately following this call sees the same
-  // f[] it would have without any curvature refresh happening at all
-  double **f_saved;
-  memory->create(f_saved, MAX(atom->nmax, 1), 3, "baoab/tether:f_saved");
-  for (int i = 0; i < nlocal; i++) {
-    f_saved[i][0] = f[i][0];
-    f_saved[i][1] = f[i][1];
-    f_saved[i][2] = f[i][2];
-  }
+  // stage-4: both FD-probe loops below now go entirely through the local,
+  // no-comm partial_force() kernel -- they read/write only local scratch
+  // (xt[]/fplus[]/fminus[]/fj_plus[]/fj_minus[]), never atom->x or
+  // atom->f, so there is nothing to stash and restore here any more (the
+  // old whole-system recompute_forces_local()-based probe clobbered
+  // atom->f and needed a save/restore dance; that whole mechanism is gone
+  // along with it -- see the loops below and partial_force()'s own
+  // updated doc comment for why this also fixes the multi-rank crash a
+  // per-atom-count-dependent number of forward/reverse_comm() calls used
+  // to cause).
 
   // one-time bootstrap (adapt=yes only, before om_split has ever been set):
   // mode_is_stiff()'s per-mode mask below needs om_split, but om_split
@@ -717,26 +758,16 @@ void FixBAOABTether::refresh_blocks()
 
       for (int b = 0; b < 3; b++) {
         double fplus[3], fminus[3];
+        double xt[3] = {xi[0], xi[1], xi[2]};
 
-        x[i][b] = xi[b] + eps;
-        comm->forward_comm();
-        recompute_forces_local();
-        fplus[0] = f[i][0];
-        fplus[1] = f[i][1];
-        fplus[2] = f[i][2];
+        xt[b] = xi[b] + eps;
+        partial_force(i, xt, fplus, nullptr, true);
 
-        x[i][b] = xi[b] - eps;
-        comm->forward_comm();
-        recompute_forces_local();
-        fminus[0] = f[i][0];
-        fminus[1] = f[i][1];
-        fminus[2] = f[i][2];
-
-        x[i][b] = xi[b];
+        xt[b] = xi[b] - eps;
+        partial_force(i, xt, fminus, nullptr, true);
 
         for (int a = 0; a < 3; a++) H[a][b] = -(fplus[a] - fminus[a]) / (2.0 * eps);
       }
-      comm->forward_comm();
 
       double Hs[3][3];
       for (int a = 0; a < 3; a++)
@@ -772,38 +803,29 @@ void FixBAOABTether::refresh_blocks()
     std::vector<double> Hc;
     if (jnum > 0) Hc.assign((size_t) jnum * 9, 0.0);
 
+    std::vector<double> fj_plus, fj_minus;
+    if (jnum > 0) {
+      fj_plus.resize((size_t) jnum * 3);
+      fj_minus.resize((size_t) jnum * 3);
+    }
+
     for (int b = 0; b < 3; b++) {
       double fplus[3], fminus[3];
+      double xt[3] = {xi[0], xi[1], xi[2]};
 
-      x[i][b] = xi[b] + eps;
-      comm->forward_comm();
-      recompute_forces_local();
-      fplus[0] = f[i][0];
-      fplus[1] = f[i][1];
-      fplus[2] = f[i][2];
-      for (int k = 0; k < jnum; k++) {
-        int j = jlist[k] & NEIGHMASK;
-        for (int a = 0; a < 3; a++) Hc[(size_t) k * 9 + 3 * a + b] = f[j][a];
-      }
+      xt[b] = xi[b] + eps;
+      partial_force(i, xt, fplus, jnum > 0 ? fj_plus.data() : nullptr, true);
 
-      x[i][b] = xi[b] - eps;
-      comm->forward_comm();
-      recompute_forces_local();
-      fminus[0] = f[i][0];
-      fminus[1] = f[i][1];
-      fminus[2] = f[i][2];
-      for (int k = 0; k < jnum; k++) {
-        int j = jlist[k] & NEIGHMASK;
-        for (int a = 0; a < 3; a++)
-          Hc[(size_t) k * 9 + 3 * a + b] =
-              (Hc[(size_t) k * 9 + 3 * a + b] - f[j][a]) / (2.0 * eps);
-      }
-
-      x[i][b] = xi[b];
+      xt[b] = xi[b] - eps;
+      partial_force(i, xt, fminus, jnum > 0 ? fj_minus.data() : nullptr, true);
 
       for (int a = 0; a < 3; a++) H[a][b] = -(fplus[a] - fminus[a]) / (2.0 * eps);
+
+      for (int k = 0; k < jnum; k++)
+        for (int a = 0; a < 3; a++)
+          Hc[(size_t) k * 9 + 3 * a + b] =
+              (fj_plus[(size_t) k * 3 + a] - fj_minus[(size_t) k * 3 + a]) / (2.0 * eps);
     }
-    comm->forward_comm();    // restore atom i's ghost images to xi
 
     double Hs[3][3];
     for (int a = 0; a < 3; a++)
@@ -874,13 +896,6 @@ void FixBAOABTether::refresh_blocks()
   }
 
   if (adapt) update_dt();
-
-  for (int i = 0; i < nlocal; i++) {
-    f[i][0] = f_saved[i][0];
-    f[i][1] = f_saved[i][1];
-    f[i][2] = f_saved[i][2];
-  }
-  memory->destroy(f_saved);
 }
 
 /* ----------------------------------------------------------------------
@@ -890,9 +905,9 @@ void FixBAOABTether::refresh_blocks()
    half of the sorted list -- direct port of the Python reference's own
    one-time om_split bootstrap in refresh(). Held fixed after this single
    call (see the header) so it cannot drift with instantaneous thermal
-   fluctuations. Single-rank scope only: no Allreduce across ranks yet --
-   the one genuinely-global reduction this fix still needs before
-   multi-rank support, per D.11.1's own callout.
+   fluctuations. Stage-4: under multi-rank, every rank's local frequency
+   list is merged via MPI_Allgatherv before the gap search below runs, so
+   every rank picks the identical om_split -- see the merge block inline.
 ------------------------------------------------------------------------- */
 
 void FixBAOABTether::compute_om_split()
@@ -906,6 +921,25 @@ void FixBAOABTether::compute_om_split()
     if (!(mask[i] & groupbit)) continue;
     for (int m = 0; m < 3; m++)
       if (om[i][m] > 0.0) freqs.push_back(om[i][m]);
+  }
+
+  // stage-4: this is a one-shot (om_split_set latches after this call)
+  // spectral-gap detection over the WHOLE group's frequency spectrum
+  // (D.11.1) -- under multi-rank each rank only sees its own flagged
+  // atoms, so merge every rank's local list via Allgatherv before sorting,
+  // and every rank then runs the identical deterministic serial gap search
+  // below on the same merged array, giving every rank the same om_split.
+  if (comm->nprocs > 1) {
+    int n_local = (int) freqs.size();
+    std::vector<int> recvcounts(comm->nprocs), displs(comm->nprocs);
+    MPI_Allgather(&n_local, 1, MPI_INT, recvcounts.data(), 1, MPI_INT, world);
+    displs[0] = 0;
+    for (int p = 1; p < comm->nprocs; p++) displs[p] = displs[p - 1] + recvcounts[p - 1];
+    int n_total = displs[comm->nprocs - 1] + recvcounts[comm->nprocs - 1];
+    std::vector<double> freqs_all(n_total);
+    MPI_Allgatherv(freqs.data(), n_local, MPI_DOUBLE, freqs_all.data(), recvcounts.data(),
+                   displs.data(), MPI_DOUBLE, world);
+    freqs.swap(freqs_all);
   }
 
   // degenerate group (too few modes for a gap to mean anything) -- fall
@@ -947,9 +981,12 @@ void FixBAOABTether::compute_om_split()
    "rounded away" and a return to softness is not chased eagerly enough to
    thrash -- direct port of the reference's own hysteresis. If the
    resulting dt differs from update->dt, applies it via the exact
-   fix_dt_reset.cpp notification sequence. Single-rank scope only (see
-   compute_om_split()) -- om_unres/om_analytic_max below are this rank's
-   local maxima, not yet Allreduce'd across ranks.
+   fix_dt_reset.cpp notification sequence. Stage-4: om_unres/om_analytic_max
+   below are Allreduce'd (MPI_MAX) across ranks before dt_c is computed, so
+   every rank derives the identical dt_new and takes the identical
+   update->dt branch -- without this, different ranks could each compute
+   a different local maximum and try to set different values into the
+   single shared update->dt scalar.
 ------------------------------------------------------------------------- */
 
 void FixBAOABTether::update_dt()
@@ -969,7 +1006,15 @@ void FixBAOABTether::update_dt()
     }
   }
 
-  // no unresolved mode on this rank at all (every flagged mode is either
+  if (comm->nprocs > 1) {
+    double local[2] = {om_unres, om_analytic_max};
+    double global[2];
+    MPI_Allreduce(local, global, 2, MPI_DOUBLE, MPI_MAX, world);
+    om_unres = global[0];
+    om_analytic_max = global[1];
+  }
+
+  // no unresolved mode on ANY rank at all (every flagged mode is either
   // analytic or zero) -- fall back to a floor that keeps dt_c well inside
   // [dt_min, dt_max] rather than dividing by zero.
   if (om_unres <= 0.0) om_unres = c_acc / dt_max;
@@ -1165,9 +1210,42 @@ void FixBAOABTether::solve_center(int i, double mi, double kT, double *cnew)
    minimum_image() here would collapse two distinct neighbor-list entries
    for the same periodic image pair onto the same vector whenever cutoff
    > L/2, corrupting the force sum.
+
+   stage-4: optional fneigh output (nullptr for the Newton-solve callers,
+   unaffected) returns, per neighbor jj in the SAME order as
+   list->firstneigh[i], the reaction force that neighbor receives from the
+   i-j pair at xtrial (i.e. -delx*fpair, by Newton's third law for a
+   pairwise-additive interaction). This is what lets refresh_blocks()'s
+   finite-difference Hessian probe (both the atom-i block H and the
+   neighbor cross-derivative blocks Hc) run entirely off this one local,
+   no-comm kernel instead of a whole-system pair->compute() + forward/
+   reverse_comm() per probe -- the latter is a swap-based, call-count-
+   synchronized routine, and under real multi-rank the number of local
+   flagged atoms (hence the number of probe calls) generally differs
+   between ranks, which desynchronizes those swaps. A local kernel has no
+   such requirement: every rank calls it however many times it needs to,
+   independently.
+
+   stage-4: live_neighbor_positions (default false, preserving the Newton-
+   solve callers' existing behavior below) overrides the c[j]-for-flagged-
+   neighbors substitution to always use the neighbor's real, current x[j]
+   instead. refresh_blocks()'s FD-Hessian probe MUST pass true here: it is
+   estimating the actual instantaneous local curvature of the real system
+   (the quantity that sets the integrator's stiff/soft classification and
+   timescale), not solving an implicit equation that needs adjacent
+   rattlers decoupled from each other's fast phase. Using c[j] there was a
+   real bug (not just an inconsistency): whenever a probed atom's neighbor
+   list happens to include another flagged atom whose clamped center sits
+   at a different distance than its live position, the FD probe samples
+   the pair potential's curvature at the WRONG separation -- for a steep
+   repulsive potential like LJ this can inflate a single atom's estimated
+   frequency by nearly 2x (see the stage-4 regression investigation:
+   atom om jumped from ~149 to ~284 solely from this substitution),
+   corrupting the one-shot om_split spectral-gap split for the whole run.
 ------------------------------------------------------------------------- */
 
-bool FixBAOABTether::partial_force(int i, const double *xtrial, double *fout) const
+bool FixBAOABTether::partial_force(int i, const double *xtrial, double *fout, double *fneigh,
+                                    bool live_neighbor_positions) const
 {
   fout[0] = fout[1] = fout[2] = 0.0;
   if (!list) return false;
@@ -1196,19 +1274,27 @@ bool FixBAOABTether::partial_force(int i, const double *xtrial, double *fout) co
     // analogous fix for the Newton solve itself, complementing (not
     // duplicating) the rattler-rattler Jblk exclusion in refresh_blocks(),
     // which only concerns the back-reaction operator.
-    const double *xj = (mask[j] & groupbit) ? c[j] : x[j];
+    const double *xj = (!live_neighbor_positions && (mask[j] & groupbit)) ? c[j] : x[j];
 
     double delx = xtrial[0] - xj[0];
     double dely = xtrial[1] - xj[1];
     double delz = xtrial[2] - xj[2];
     double rsq = delx * delx + dely * dely + delz * delz;
-    if (rsq >= cutsq[itype][jtype]) continue;
+    if (rsq >= cutsq[itype][jtype]) {
+      if (fneigh) fneigh[3 * jj] = fneigh[3 * jj + 1] = fneigh[3 * jj + 2] = 0.0;
+      continue;
+    }
 
     double fpair = 0.0;
     force->pair->single(i, j, itype, jtype, rsq, 1.0, 1.0, fpair);
     fout[0] += delx * fpair;
     fout[1] += dely * fpair;
     fout[2] += delz * fpair;
+    if (fneigh) {
+      fneigh[3 * jj + 0] = -delx * fpair;
+      fneigh[3 * jj + 1] = -dely * fpair;
+      fneigh[3 * jj + 2] = -delz * fpair;
+    }
   }
   return true;
 }
@@ -1255,6 +1341,16 @@ void FixBAOABTether::force_moll()
 
   recompute_forces_local();
 
+  // stage-4: recompute_forces_local()'s own comm->reverse_comm() above
+  // (inside its final line) already sent home every ghost's raw
+  // pair-force contribution -- but AtomVec::unpack_reverse() only adds
+  // into the OWNER's f[], it never clears the GHOST's own f[] slot
+  // afterward. Zero the ghost region now so the back-reaction loop below
+  // writes into a clean slate; the second comm->reverse_comm() after that
+  // loop then sends home exactly the NEW back-reaction contribution, with
+  // no double-counting of the already-reconciled raw pair force.
+  if (atom->nghost) memset(&f[atom->nlocal][0], 0, 3 * sizeof(double) * atom->nghost);
+
   for (size_t k = 0; k < flagged.size(); k++) {
     int i = flagged[k];
 
@@ -1266,7 +1362,13 @@ void FixBAOABTether::force_moll()
     // exactly zero here.
     for (int kk = 0; kk < nJ[i]; kk++) {
       int j = atom->map(Jtag[i][kk]);
-      if (j < 0) continue;
+      if (j < 0) {
+        // stage-4: neighbor drifted outside the current ghost cutoff
+        // since the last refresh -- fails safe (drop this contribution)
+        // rather than crash; see n_ghost_miss in the header.
+        n_ghost_miss++;
+        continue;
+      }
       double contrib[3];
       mat3_matvec(Jblk[i][kk], gi, contrib);
       f[j][0] += contrib[0];
@@ -1284,6 +1386,14 @@ void FixBAOABTether::force_moll()
       for (int a = 0; a < 3; a++) f[i][a] -= evecs[i][3 * m + a] * gm;
     }
   }
+
+  // stage-4: send the new back-reaction contributions written into
+  // possibly-ghost f[] slots above home to their owning rank.
+  // Unconditional -- unlike recompute_forces_local()'s own
+  // "if (force->newton) comm->reverse_comm()", this loop writes directly
+  // into f[j] itself regardless of the pair style's newton setting, so it
+  // always needs the trip home.
+  comm->reverse_comm();
 
   for (size_t k = 0; k < flagged.size(); k++) {
     int i = flagged[k];
@@ -1334,11 +1444,14 @@ double FixBAOABTether::memory_usage()
 }
 
 /* ----------------------------------------------------------------------
-   diagnostic vector, this MPI rank's local counts only (single-rank scope,
-   see the header): [0..2] self-evaluation guard counts, [3] partial_force()
-   calls, [4] recompute_forces_local() calls, [5] total demotion events
-   (any cause, adapt=yes only), [6] demotion events from the kinetic
-   over-excitation guard specifically (subset of [5]).
+   diagnostic vector, this MPI rank's local counts only: [0..2]
+   self-evaluation guard counts, [3] partial_force() calls, [4]
+   recompute_forces_local() calls, [5] total demotion events (any cause,
+   adapt=yes only), [6] demotion events from the kinetic over-excitation
+   guard specifically (subset of [5]), [7] stage-4 ghost-miss count (a
+   stored sparse-block neighbor could not be resolved via atom->map(),
+   see n_ghost_miss in the header -- always 0 on a single rank with a
+   generous cutoff/skin).
 ------------------------------------------------------------------------- */
 
 double FixBAOABTether::compute_vector(int n)
@@ -1351,6 +1464,7 @@ double FixBAOABTether::compute_vector(int n)
     case 4: return (double) n_recompute_calls;
     case 5: return (double) n_demoted;
     case 6: return (double) n_kinetic_guard;
+    case 7: return (double) n_ghost_miss;
     default: return 0.0;
   }
 }
@@ -1456,4 +1570,65 @@ int FixBAOABTether::unpack_exchange(int nlocal, double *buf)
   quench_exempt[nlocal] = (bigint) ubuf(buf[m++]).i;
   last_ke[nlocal] = buf[m++];
   return m;
+}
+
+/* ----------------------------------------------------------------------
+   stage-4: forward comm of this fix's private c[] array, so a ghost
+   neighbor's c[j] read by partial_force() (line ~1199) reflects the
+   owning rank's actual last-converged center instead of stale/garbage
+   ghost-buffer memory. c[] holds raw Cartesian positions in the same
+   frame as atom->x, so it needs the identical periodic-image shift
+   AtomVec::pack_comm() applies to x[] when pbc_flag is set (triclinic
+   tilt included) -- otherwise a ghost that crosses a periodic boundary
+   would have a c[] in the wrong image relative to its own (correctly
+   shifted) x[], corrupting the minimum-image reconstruction in
+   solve_center(). Called once per step, before the local solve_center()
+   loop -- see initial_integrate()/final_integrate() -- so a ghost's c[]
+   reflects the previous step's fully-converged value, matching how a
+   not-yet-reached local neighbor behaves in the same loop (deliberate
+   Gauss-Seidel-consistent choice, see the plan).
+------------------------------------------------------------------------- */
+
+int FixBAOABTether::pack_forward_comm(int n, int *list, double *buf, int pbc_flag, int *pbc)
+{
+  int m = 0;
+  if (pbc_flag == 0) {
+    for (int i = 0; i < n; i++) {
+      int j = list[i];
+      buf[m++] = c[j][0];
+      buf[m++] = c[j][1];
+      buf[m++] = c[j][2];
+    }
+  } else {
+    double dx, dy, dz;
+    if (domain->triclinic == 0) {
+      dx = pbc[0] * domain->xprd;
+      dy = pbc[1] * domain->yprd;
+      dz = pbc[2] * domain->zprd;
+    } else {
+      dx = pbc[0] * domain->xprd + pbc[5] * domain->xy + pbc[4] * domain->xz;
+      dy = pbc[1] * domain->yprd + pbc[3] * domain->yz;
+      dz = pbc[2] * domain->zprd;
+    }
+    for (int i = 0; i < n; i++) {
+      int j = list[i];
+      buf[m++] = c[j][0] + dx;
+      buf[m++] = c[j][1] + dy;
+      buf[m++] = c[j][2] + dz;
+    }
+  }
+  return m;
+}
+
+/* ---------------------------------------------------------------------- */
+
+void FixBAOABTether::unpack_forward_comm(int n, int first, double *buf)
+{
+  int m = 0;
+  int last = first + n;
+  for (int i = first; i < last; i++) {
+    c[i][0] = buf[m++];
+    c[i][1] = buf[m++];
+    c[i][2] = buf[m++];
+  }
 }

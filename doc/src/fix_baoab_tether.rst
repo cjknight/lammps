@@ -191,9 +191,15 @@ also given a brief, strong-friction thermostat kick (*gamma_quench*)
 while it cools down, so that legitimate kinetic energy does not linger in
 its now-unconstrained modes.
 
-This fix currently detects the spectral gap and picks the timestep using
-only the atoms present on the calling MPI rank, without combining results
-across ranks; see Restrictions below.
+.. versionchanged:: TBD
+
+This fix detects the spectral gap and picks the timestep from the
+combined atoms on every MPI rank: the per-rank local frequency lists are
+gathered once, at the first refresh, and every rank runs the same
+deterministic gap search against the merged result, and the accuracy-
+limited timestep ceiling described above is reduced across ranks the same
+way every step. See Restrictions below for the remaining, narrower
+cross-*group* limitation this does not address.
 
 ----------
 
@@ -203,22 +209,30 @@ Restart, fix_modify, output, run start/stop, minimize info
 No information about this fix is written to :doc:`binary restart files
 <restart>` (see the curvature-refresh restriction below).
 
-This fix computes a global vector of length 7, which can be accessed by
+.. versionchanged:: TBD
+
+This fix computes a global vector of length 8, which can be accessed by
 various :doc:`output commands <Howto_output>`. The values are, in order:
 the running count of Newton non-convergence guard trips, the running
 count of center "flip" guard trips, the running count of over-excited
 harmonic energy guard trips, the running count of local partial-force
 evaluations performed by the Newton solver, the running count of full
 local force recomputations performed by this fix, the running count of
-demotion events from any cause, and the running count of demotion events
+demotion events from any cause, the running count of demotion events
 from the kinetic over-excitation guard specifically (a subset of the
-previous value). The 4th and 5th entries are a per-rank, halo-local proxy
-for the fix's force-evaluation cost. All seven entries are 0 unless
-*mollify* is *yes*; the 6th and 7th are additionally 0 unless *adapt* is
-also *yes*. The first three and the last two entries are diagnostic only
-except when *adapt* is *yes*, in which case the first three drive actual
-demotion events (see above). The vector values calculated by this fix are
-"extensive".
+previous value), and the running count of stored back-reaction neighbors
+that could not be resolved on the calling rank because they had drifted
+outside the current ghost cutoff since the last curvature refresh (see
+Restrictions below; that contribution is silently dropped rather than
+causing an error). The 4th and 5th entries are a per-rank, halo-local
+proxy for the fix's force-evaluation cost. All eight entries are 0 unless
+*mollify* is *yes*; the 6th, 7th, and 8th are additionally 0 unless
+*adapt* is also *yes* (the 8th can in principle occur with *mollify yes*
+alone, but in practice only matters once *adapt* keeps a fixed curvature
+block in play across enough steps for it to be exercised). The first
+three and the 6th/7th entries are diagnostic only except when *adapt* is
+*yes*, in which case the first three drive actual demotion events (see
+above). The vector values calculated by this fix are "extensive".
 
 This fix is not invoked during :doc:`energy minimization <minimize>`.
 
@@ -231,23 +245,39 @@ built with that package; that package's :doc:`fix baoab/tether
 it derives from and reuses :doc:`fix baoab <fix_baoab>`. See the
 :doc:`Build package <Build_package>` page for more info.
 
-This fix currently supports a single MPI rank only. This restriction is
-especially relevant to *adapt yes*: the spectral-gap split frequency and
-the adaptive timestep are both currently chosen from only the atoms on
-the calling rank, with no cross-rank communication.
+.. versionchanged:: TBD
+
+This fix supports multiple MPI ranks: this fix's own private per-atom
+clamped-center state is forwarded to ghost atoms, back-reaction
+contributions written into ghost atoms' forces are returned to their
+owning rank, and (with *adapt yes*) the spectral-gap split frequency and
+the adaptive timestep ceiling are both computed from the combined atoms
+on every rank rather than only the calling rank's own local atoms.
+
+A curvature-block back-reaction neighbor recorded at the last refresh can
+still drift outside the current ghost cutoff before the next refresh,
+particularly under a small ghost cutoff/skin relative to how far an atom
+moves in *refresh* steps; when this happens, that neighbor's contribution
+is silently dropped for the remainder of the current refresh interval
+rather than causing an error. The 8th entry of this fix's global vector
+(above) counts how often this occurs, so it can be monitored; it is 0 for
+a sufficiently generous cutoff/skin relative to *refresh* and the
+system's own mobility.
 
 With *adapt yes*, the accuracy-limited timestep ceiling (the
-:math:`c_{\rm acc}/\omega_{\rm unres}` term) is computed only from this
-fix's own group's per-atom curvature, since the fix has no visibility
-into the curvature of atoms outside its group (e.g. a heavier bath
-integrated by a separate, ordinary time-integration fix on the rest of
-the system). Whenever this group's own unresolved band sits at a higher
-frequency than that outside bath, this fix will select a smaller
-timestep than an integrator with full-system curvature visibility would
-choose for the same accuracy target. This is expected and is a direct
-consequence of this fix's halo-local, per-group design: it makes the
-selected timestep more conservative (safe, but potentially smaller than
-optimal), never less conservative.
+:math:`c_{\rm acc}/\omega_{\rm unres}` term) is still computed only from
+this fix's own group's per-atom curvature (now combined correctly across
+every rank that owns part of the group, but still not including atoms
+outside the group), since the fix has no visibility into the curvature of
+atoms outside its group (e.g. a heavier bath integrated by a separate,
+ordinary time-integration fix on the rest of the system). Whenever this
+group's own unresolved band sits at a higher frequency than that outside
+bath, this fix will select a smaller timestep than an integrator with
+full-system curvature visibility would choose for the same accuracy
+target. This is expected and is a direct consequence of this fix's
+halo-local, per-group design: it makes the selected timestep more
+conservative (safe, but potentially smaller than optimal), never less
+conservative.
 
 Curvature-block refresh does not yet have restart support: after reading a
 restart file, this fix re-acquires curvature blocks for the whole group on
