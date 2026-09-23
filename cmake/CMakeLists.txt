@@ -1112,9 +1112,3 @@ if(ENABLE_TESTING)
     message(STATUS "Collecting code coverage data")
   endif()
 endif()
-
-add_subdirectory(/Users/cjknight/Documents/soft/apps/symmetrix/pair_symmetrix/../libsymmetrix libsymmetrix)
-target_include_directories(lammps PRIVATE /Users/cjknight/Documents/soft/apps/symmetrix/pair_symmetrix/../libsymmetrix/source)
-target_link_libraries(lammps PRIVATE symmetrix)
-install(TARGETS symmetrix EXPORT LAMMPS_Targets)
-
