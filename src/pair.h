@@ -51,10 +51,11 @@ class Pair : protected Pointers {
   int comm_reverse;        // size of reverse communication (0 if none)
   int comm_reverse_off;    // size of reverse comm even if newton off
 
-  int single_enable;            // 1 if single() routine exists
-  int born_matrix_enable;       // 1 if born_matrix() routine exists
-  int single_hessian_enable;    // 1 if single_hessian() routine exists
-  int atomic_energy_enable;     // 1 if compute_atomic_energy() routine exists
+  int single_enable;              // 1 if single() routine exists
+  int born_matrix_enable;         // 1 if born_matrix() routine exists
+  int single_hessian_enable;      // 1 if single_hessian() routine exists
+  int atomic_energy_enable;       // 1 if compute_atomic_energy() routine exists
+  int has_local_partial_force;    // 1 if local_partial_force() routine exists
 
   int restartinfo;                // 1 if pair style writes restart info
   int respa_enable;               // 1 if inner/middle/outer rRESPA routines
@@ -182,6 +183,23 @@ class Pair : protected Pointers {
                            double /*factor_coul*/, double /*factor_lj*/, double &du, double &du2)
   {
     du = du2 = 0.0;
+  }
+
+  // local re-evaluation of the force on atom i if displaced to xtrial, with
+  // every other atom held at its real position -- the many-body analog of
+  // single(), for pair styles (e.g. message-passing MLIPs) whose per-atom
+  // force does not decompose into independent pairwise single(i,j) terms.
+  // fneigh (optional, nullptr allowed) receives, in jlist's order, the
+  // reaction force each of atom i's jnum listed neighbors feels from the
+  // same trial perturbation. Default no-op mirrors single()'s pattern for
+  // pair styles that don't implement it (see has_local_partial_force).
+  virtual bool local_partial_force(int /*i*/, const double * /*xtrial*/, int jnum,
+                                    const int * /*jlist*/, double *fout, double *fneigh)
+  {
+    fout[0] = fout[1] = fout[2] = 0.0;
+    if (fneigh)
+      for (int jj = 0; jj < jnum; jj++) fneigh[3 * jj] = fneigh[3 * jj + 1] = fneigh[3 * jj + 2] = 0.0;
+    return false;
   }
 
   virtual void finish() {}

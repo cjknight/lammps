@@ -48,6 +48,8 @@ class PairSymmetrixMACE : public Pair {
   void compute_mpi_message_passing(int, int);
   void compute_no_mpi_message_passing(int, int);
 
+  bool local_partial_force(int, const double *, int, const int *, double *, double *) override;
+
  protected:
   std::string mode;
 

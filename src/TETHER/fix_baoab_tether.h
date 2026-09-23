@@ -64,6 +64,7 @@ class FixBAOABTether : public FixBAOAB {
   int newton_iters;      // minimum damped-Newton iterations
   double newton_damp;    // initial Newton damping factor
   double solve_tol_rel;  // Newton convergence tol, relative to thermal amplitude
+  int use_local_partial_force;   // 0 = pair->single() loop, 1 = pair->local_partial_force()
 
   // stage-3 adaptive-dt + event machinery (all inert when adapt == 0)
   int adapt;              // 0 = stage-1/2 fixed dt, 1 = adaptive dt + demote/quench/forgive
@@ -76,7 +77,10 @@ class FixBAOABTether : public FixBAOAB {
   int om_split_set;   // 0 until compute_om_split() has run once
   int dt_lvl;          // current rung on the dt_max/2^dt_lvl ladder, -1 = uninitialized
 
-  static constexpr int JMAX = 96;    // per-atom response-block neighbor cap
+  // MACE's much larger r_cut (vs. EAM/LJ) puts a bulk Pd atom's full
+  // neighbor list around ~150 within 8 A; 96 was sized for the shorter
+  // pairwise cutoffs this fix was originally validated against.
+  static constexpr int JMAX = 256;    // per-atom response-block neighbor cap
 
   bigint last_refresh_step;
   int need_refresh;

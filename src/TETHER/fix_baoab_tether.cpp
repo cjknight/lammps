@@ -95,6 +95,7 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   newton_iters = 8;
   newton_damp = 0.6;
   solve_tol_rel = 0.005;
+  use_local_partial_force = 0;
 
   adapt = 0;
   c_acc = 0.25;
@@ -276,8 +277,10 @@ void FixBAOABTether::init()
 
   if (mollify) {
     if (!force->pair) error->all(FLERR, "Fix baoab/tether mollify yes requires a pair style");
-    if (!force->pair->single_enable)
-      error->all(FLERR, "Fix baoab/tether mollify yes requires a pair style that supports single()");
+    use_local_partial_force = force->pair->has_local_partial_force;
+    if (!use_local_partial_force && !force->pair->single_enable)
+      error->all(FLERR, "Fix baoab/tether mollify yes requires a pair style that supports "
+                         "either single() or local_partial_force()");
     if (atom->map_style == Atom::MAP_NONE)
       error->all(FLERR, "Fix baoab/tether mollify yes requires atom_modify map (yes|array)");
 
@@ -1258,6 +1261,25 @@ bool FixBAOABTether::partial_force(int i, const double *xtrial, double *fout, do
 
   int *jlist = list->firstneigh[i];
   int jnum = list->numneigh[i];
+
+  if (use_local_partial_force) {
+    // The clamped-center substitution above (real x[j] -> c[j] for a
+    // flagged neighbor) has no equivalent here -- local_partial_force()
+    // only ever sees real positions. Fail loud rather than silently
+    // computing the wrong curvature if a flagged neighbor is within jlist
+    // itself; a flagged atom reachable only through the pair style's own
+    // further hop is a residual, undetected gap (see pair_symmetrix_mace.cpp).
+    if (!live_neighbor_positions) {
+      for (int jj = 0; jj < jnum; jj++) {
+        int j = jlist[jj] & NEIGHMASK;
+        if (mask[j] & groupbit)
+          error->one(FLERR, "Fix baoab/tether: local_partial_force() does not support a "
+                             "flagged neighbor within the pair style's cutoff (clamped-center "
+                             "substitution unimplemented for this pair style)");
+      }
+    }
+    return force->pair->local_partial_force(i, xtrial, jnum, jlist, fout, fneigh);
+  }
 
   for (int jj = 0; jj < jnum; jj++) {
     int j = jlist[jj] & NEIGHMASK;
