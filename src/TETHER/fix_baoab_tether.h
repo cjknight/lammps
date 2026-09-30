@@ -20,7 +20,10 @@ FixStyle(baoab/tether,FixBAOABTether);
 #define LMP_FIX_BAOAB_TETHER_H
 
 #include "fix_baoab.h"
+#include "safe_pointers.h"
 #include "update.h"
+
+#include <string>
 
 namespace LAMMPS_NS {
 
@@ -42,8 +45,10 @@ class FixBAOABTether : public FixBAOAB {
 
   void init() override;
   void init_list(int, class NeighList *) override;
+  int setmask() override;
   void initial_integrate(int) override;
   void final_integrate() override;
+  void end_of_step() override;
 
   double memory_usage() override;
   double compute_vector(int) override;
@@ -60,6 +65,15 @@ class FixBAOABTether : public FixBAOAB {
   double eps;            // finite-difference probe displacement
   int eps_was_set;       // 1 if user gave "eps", else default from skin
 
+  // thermally-averaged effective curvature (CLAUDE.md convention #3):
+  // 0 (default) = legacy per-refresh instantaneous curvature, unchanged.
+  // >0 = accumulate the raw Hessian over this many refresh cycles; the
+  // atom stays masked/tethered throughout using a stable working estimate
+  // (om[i]/evecs[i] updated only at the first and last sample -- never
+  // thrashed every refresh), then freezes the N-sample average permanently;
+  // see refresh_blocks().
+  int heff_samples;
+
   int mollify;           // 0 = stage-1 static center, 1 = Newton mollifier
   int newton_iters;      // minimum damped-Newton iterations
   double newton_damp;    // initial Newton damping factor
@@ -73,6 +87,39 @@ class FixBAOABTether : public FixBAOAB {
   double ke_rel;          // kinetic over-excitation threshold, multiples of kT
   double gamma_quench;    // strong-friction OU coefficient during cooldown
 
+  // excursion guard for unmasked/soft modes (Stage 5, adapt == 1 only):
+  // 0 (default) = legacy behavior, kinetic_guard_and_quench() only watches
+  // currently-masked modes exactly as before. >0 = also (a) include soft
+  // modes in the kinetic-energy check and (b) re-tether and locally
+  // sub-step an atom's remaining drift for the rest of THIS step, before
+  // its next scheduled refresh, once it has drifted this far (minimum-
+  // imaged) from x0[i] (its position at the last refresh) -- soft modes
+  // have no analytic tether and are otherwise invisible to every existing
+  // guard; see kinetic_guard_and_quench() and sub_step_free_atom().
+  double refresh_skin;
+
+  // how a drift_hot trip (refresh_skin > 0 only) is handled:
+  // 0 (retether, default) = legacy Attempt 3-5 behavior, unchanged --
+  // re-tether in place and locally sub-step this atom's remaining dtby2
+  // via sub_step_free_atom(). 1 (preshrink) = take NO action mid-step at
+  // all (not even a bookkeeping refresh -- see kinetic_guard_and_quench()'s
+  // doc comment for why calling refresh_one_atom() without reprojecting
+  // q1[]/p1[] is unsound); this atom finishes the current step completely
+  // unperturbed, and end_of_step() lowers update->dt system-wide before
+  // the NEXT step instead if the drift is still there once the step ends.
+  int drift_response;
+
+  // permanent per-atom/per-event diagnostic log (plan Sec 6.1's required
+  // per-step/per-event log): empty (default) = disabled, zero overhead --
+  // every log_event() call site is gated on a plain "if (event_log_fp)"
+  // check via SafeFilePtr's implicit nullptr conversion. When set, each
+  // MPI rank opens its OWN file (comm->me-suffixed when nprocs > 1, so
+  // this stays correct/halo-local under future domain decomposition with
+  // no gather/collective) and logs REFRESH/GUARD_KE/GUARD_DRIFT/DEMOTE/
+  // PRESHRINK events as they occur; see log_event().
+  std::string event_log_filename;
+  SafeFilePtr event_log_fp;
+
   double om_split;    // spectral-gap-detected stiff/soft split, one-shot (adapt==1 only)
   int om_split_set;   // 0 until compute_om_split() has run once
   int dt_lvl;          // current rung on the dt_max/2^dt_lvl ladder, -1 = uninitialized
@@ -85,6 +132,26 @@ class FixBAOABTether : public FixBAOAB {
   bigint last_refresh_step;
   int need_refresh;
 
+  // set by end_of_step()'s emergency dt-shrink (drift_response == preshrink
+  // only) to ntimestep + a short backoff; guards update_dt()'s own relax-up
+  // hysteresis so a scheduled refresh_blocks() call can't raise dt_lvl back
+  // down before the atom that justified the shrink has actually cleared --
+  // update_dt()'s om_unres is blind to which atom that was. -1 = no active
+  // floor (default; never blocks relax-up).
+  bigint dt_floor_until;
+
+  // rank-local trigger, set by sub_step_free_atom() when a drift_hot atom's
+  // local excursion would exceed the neighbor list's trust radius (see
+  // sub_step_free_atom()'s doc comment) -- Allreduced to a same-on-every-
+  // rank decision at the end of initial_integrate(), same pattern as
+  // need_refresh above, then translated into the standard Fix::force_
+  // reneighbor/next_reneighbor request so neighbor->decide() forces a real,
+  // synchronized reneighboring (comm->exchange()/borders()/neighbor->build())
+  // before the NEXT step's initial_integrate() runs -- not a new collective
+  // call invented here, just the existing LAMMPS mechanism fix_deposit.cpp
+  // etc. already use for the same purpose.
+  int need_reneighbor;
+
   class NeighList *list;    // full, non-occasional: this atom's own pair neighbors
 
   // per-atom persistent state (only meaningful for group atoms with a
@@ -96,6 +163,17 @@ class FixBAOABTether : public FixBAOAB {
                       //   evecs[i][3*m+k] = k-th Cartesian component of
                       //   the m-th eigenvector of atom i's block (nmax x 9)
   double **om;        // per-mode angular frequency, 0 if unset (nmax x 3)
+
+  // thermally-averaged effective curvature accumulator (heff_samples > 0
+  // only): Hacc is the running SUM of the raw (pre-diagonalization) 3x3
+  // mass-normalized symmetrized Hessian, row-major 9 doubles/atom. om[i]/
+  // evecs[i] are (re)diagonalized from Hacc/n_hess_samples[i] only at the
+  // first sample and once more when n_hess_samples[i] reaches heff_samples
+  // (frozen from then on) -- never on the samples in between, so the
+  // atom's mask decision stays stable through the whole window instead of
+  // thrashing every refresh; see refresh_blocks().
+  double **Hacc;            // running Hessian sum (nmax x 9)
+  int *n_hess_samples;      // samples accumulated so far, 0..heff_samples (nmax)
 
   // sparse per-atom response blocks J_i (mollify=yes only): for each group
   // atom i, nJ[i] (neighbor local index, 3x3 block) pairs restricted to
@@ -135,6 +213,7 @@ class FixBAOABTether : public FixBAOAB {
   bigint n_partial_force_calls, n_recompute_calls;
 
   void refresh_blocks();
+  void refresh_one_atom(int i, const double *xi, bool instantaneous);
   void force_clear_local();
   void recompute_forces_local();
   void modal_force_correction(int i, double mi, double *fcorr) const;
@@ -146,6 +225,7 @@ class FixBAOABTether : public FixBAOAB {
   void force_moll();
 
   // stage-3 additions
+
   inline bool mode_is_stiff(int i, int m) const
   {
     if (!adapt) return (om[i][m] * update->dt) > theta;
@@ -157,9 +237,19 @@ class FixBAOABTether : public FixBAOAB {
   }
   void compute_om_split();
   void update_dt();
-  void demote_atom(int i, bigint backoff_steps);
-  void kinetic_guard_and_quench(int i, double mi, double kT, bool *msk, const double *p1,
-                                 bool &quench_active);
+  void apply_new_dt(double dt_new);
+  void demote_atom(int i, bigint backoff_steps, const char *source);
+  void kinetic_guard_and_quench(int i, double mi, double kT, bool *msk, double *q1, double *p1,
+                                 bool &quench_active, bool &sub_stepped);
+  void sub_step_free_atom(int i, double mi, const double *x_mid, const double *v_mid,
+                           double remaining_dt, double kT);
+
+  // Attempt-8 diagnostic logging: no-op when event_log_fp is unset (see
+  // event_log_filename above). ke/ke_cap/drift/skin/om/dt use -1.0 as the
+  // "not applicable to this event" sentinel (every logged quantity is
+  // physically non-negative).
+  void log_event(const char *event, tagint tag, double ke, double ke_cap, double drift,
+                 double skin, const double *om, double dt, const std::string &note);
 };
 
 }    // namespace LAMMPS_NS

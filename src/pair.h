@@ -193,8 +193,18 @@ class Pair : protected Pointers {
   // reaction force each of atom i's jnum listed neighbors feels from the
   // same trial perturbation. Default no-op mirrors single()'s pattern for
   // pair styles that don't implement it (see has_local_partial_force).
+  //
+  // clamp_groupbit/clamp_c (both optional, default off): when
+  // clamp_groupbit != 0 and clamp_c != nullptr, any subgraph atom j (j !=
+  // i) with atom->mask[j] & clamp_groupbit uses clamp_c[j] instead of
+  // atom->x[j]. This lets a many-body pair style honor the same "flagged
+  // neighbor uses its clamped center" substitution the single()-based
+  // caller already applies per-pair, for pair styles whose force is a
+  // genuinely multi-hop function of the neighborhood and so cannot express
+  // the substitution via jlist/fneigh alone.
   virtual bool local_partial_force(int /*i*/, const double * /*xtrial*/, int jnum,
-                                    const int * /*jlist*/, double *fout, double *fneigh)
+                                    const int * /*jlist*/, double *fout, double *fneigh,
+                                    int /*clamp_groupbit*/ = 0, double *const * /*clamp_c*/ = nullptr)
   {
     fout[0] = fout[1] = fout[2] = 0.0;
     if (fneigh)

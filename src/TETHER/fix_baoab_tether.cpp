@@ -83,13 +83,15 @@ inline void mat3_matmat(const double a[9], const double b[9], double out[9])
 
 FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
     FixBAOAB(lmp, check_base_args(lmp, narg), arg), list(nullptr), x0(nullptr), c(nullptr),
-    evecs(nullptr), om(nullptr), nJ(nullptr), Jtag(nullptr), Jblk(nullptr), demote_count(nullptr),
-    last_demote(nullptr), demote_cool(nullptr), quench_exempt(nullptr), last_ke(nullptr)
+    evecs(nullptr), om(nullptr), Hacc(nullptr), n_hess_samples(nullptr), nJ(nullptr),
+    Jtag(nullptr), Jblk(nullptr), demote_count(nullptr), last_demote(nullptr),
+    demote_cool(nullptr), quench_exempt(nullptr), last_ke(nullptr)
 {
   theta = -1.0;
   refresh_every = -1;
   eps = 0.0;
   eps_was_set = 0;
+  heff_samples = 0;
 
   mollify = 0;
   newton_iters = 8;
@@ -103,6 +105,8 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   dt_max = -1.0;    // sentinel: default the fix-creation-time dt, resolved below
   ke_rel = 12.0;
   gamma_quench = 20.0;
+  refresh_skin = 0.0;
+  drift_response = 0;
   om_split = 0.0;
   om_split_set = 0;
   dt_lvl = -1;
@@ -121,6 +125,10 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether eps", error);
       eps = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
       eps_was_set = 1;
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "heff_samples") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether heff_samples", error);
+      heff_samples = utils::inumeric(FLERR, arg[iarg + 1], false, lmp);
       iarg += 2;
     } else if (strcmp(arg[iarg], "mollify") == 0) {
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether mollify", error);
@@ -162,6 +170,23 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether gamma_quench", error);
       gamma_quench = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
       iarg += 2;
+    } else if (strcmp(arg[iarg], "refresh_skin") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether refresh_skin", error);
+      refresh_skin = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "drift_response") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether drift_response", error);
+      if (strcmp(arg[iarg + 1], "retether") == 0)
+        drift_response = 0;
+      else if (strcmp(arg[iarg + 1], "preshrink") == 0)
+        drift_response = 1;
+      else
+        error->all(FLERR, iarg + 1, "Fix baoab/tether drift_response must be retether or preshrink");
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "event_log") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether event_log", error);
+      event_log_filename = arg[iarg + 1];
+      iarg += 2;
     } else {
       error->all(FLERR, iarg, "Unknown fix baoab/tether keyword {}", arg[iarg]);
     }
@@ -170,10 +195,33 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   if (theta <= 0.0) error->all(FLERR, "Fix baoab/tether theta must be > 0");
   if (refresh_every <= 0) error->all(FLERR, "Fix baoab/tether refresh must be > 0");
   if (eps_was_set && eps <= 0.0) error->all(FLERR, "Fix baoab/tether eps must be > 0");
+  if (heff_samples < 0) error->all(FLERR, "Fix baoab/tether heff_samples must be >= 0");
   if (newton_iters < 1) error->all(FLERR, "Fix baoab/tether newton_iters must be >= 1");
   if (newton_damp <= 0.0 || newton_damp > 1.0)
     error->all(FLERR, "Fix baoab/tether newton_damp must be in (0,1]");
   if (solve_tol_rel <= 0.0) error->all(FLERR, "Fix baoab/tether solve_tol_rel must be > 0");
+  if (refresh_skin < 0.0) error->all(FLERR, "Fix baoab/tether refresh_skin must be >= 0");
+
+  // permanent per-atom/per-event diagnostic log (plan Sec 6.1): opened once
+  // here, for the fix's whole lifetime, matching fix_print's single-fopen-
+  // in-constructor lifecycle -- this fix has no multi-run-command re-open
+  // logic to preserve. Each rank opens its OWN file so this stays correct
+  // under future MPI domain decomposition with no gather/collective added
+  // to any per-step code path.
+  if (!event_log_filename.empty()) {
+    std::string fname = event_log_filename;
+    if (comm->nprocs > 1) fname += fmt::format(".{}", comm->me);
+    event_log_fp = fopen(fname.c_str(), "w");
+    if (!event_log_fp)
+      error->one(FLERR, "Fix baoab/tether: cannot open event_log file {}: {}", fname,
+                 utils::getsyserror());
+    fputs(fmt::format("# fix baoab/tether event log, rank {}\n"
+                       "# event step tag ke ke_cap drift skin om0 om1 om2 dt note\n",
+                       comm->me)
+              .c_str(),
+          event_log_fp);
+    fflush(event_log_fp);
+  }
 
   if (adapt) {
     // dt_max defaults to the fix-creation-time timestep (the ceiling the
@@ -190,10 +238,19 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
 
   last_refresh_step = -1;
   need_refresh = 1;
+  need_reneighbor = 0;
+  dt_floor_until = -1;
   n_guard_newton = n_guard_flip = n_guard_energy = 0;
   n_demoted = n_kinetic_guard = 0;
   n_partial_force_calls = n_recompute_calls = 0;
   n_ghost_miss = 0;
+
+  // request-a-real-reneighbor plumbing (Fix base class members): see
+  // need_reneighbor's doc comment in the header. next_reneighbor starts at
+  // a sentinel that can never match a real (>= 0) update->ntimestep, so
+  // Neighbor::decide() only forces a reneighbor once we explicitly ask.
+  force_reneighbor = 1;
+  next_reneighbor = -1;
 
   // stage-4: this fix owns a private per-atom array (c[]) that partial_force()
   // reads for possibly-ghost neighbors -- register it for standard forward
@@ -209,9 +266,10 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   // pack_exchange() can overrun comm's send buffer during a real cross-rank
   // migration (invisible on 1 rank, where exchange() is never exercised).
   // Static (not maxexchange_dynamic), sized from the fixed worst case: x0(3)
-  // + c(3) + evecs(9) + om(3) + nJ-count(1) + JMAX*(tag(1)+block(9)) +
-  // demote_count/last_demote/demote_cool/quench_exempt(4) + last_ke(1).
-  maxexchange = 3 + 3 + 9 + 3 + 1 + JMAX * (1 + 9) + 4 + 1;
+  // + c(3) + evecs(9) + om(3) + Hacc(9) + n_hess_samples(1) + nJ-count(1) +
+  // JMAX*(tag(1)+block(9)) + demote_count/last_demote/demote_cool/
+  // quench_exempt(4) + last_ke(1).
+  maxexchange = 3 + 3 + 9 + 3 + 9 + 1 + 1 + JMAX * (1 + 9) + 4 + 1;
 
   // diagnostic vector (plan Sec 6.1 event forensics / honest cost report):
   // [0..2] self-evaluation guard counts (Newton non-convergence, center
@@ -251,6 +309,8 @@ FixBAOABTether::~FixBAOABTether()
   memory->destroy(c);
   memory->destroy(evecs);
   memory->destroy(om);
+  memory->destroy(Hacc);
+  memory->destroy(n_hess_samples);
   memory->destroy(nJ);
   memory->destroy(Jtag);
   memory->destroy(Jblk);
@@ -259,6 +319,37 @@ FixBAOABTether::~FixBAOABTether()
   memory->destroy(demote_cool);
   memory->destroy(quench_exempt);
   memory->destroy(last_ke);
+
+  // event_log_fp is a SafeFilePtr member: its own destructor closes the
+  // file (if opened) automatically, no explicit fclose() needed here.
+}
+
+/* ---------------------------------------------------------------------- */
+
+// Attempt-8 diagnostic logging (plan Sec 6.1's required per-step/per-event
+// log): no-op when event_log_fp is unset, via SafeFilePtr's implicit
+// nullptr conversion -- every call site below is unconditionally reached,
+// zero overhead when the "event_log" keyword is not given. Fields not
+// meaningful for a given event use the -1.0 sentinel (ke/ke_cap/drift/
+// skin/om/dt are all physically non-negative when actually logged).
+// Always fflush(): the entire point of this log is to have forensic data
+// survive up to the moment of a crash like the one it was built to
+// diagnose, so buffered-but-lost output on a fatal error is not
+// acceptable; events are rare relative to per-step compute cost (only on
+// trips/refreshes/demotes, not every atom every step), so the extra
+// fflush() cost is not a concern.
+void FixBAOABTether::log_event(const char *event, tagint tag, double ke, double ke_cap,
+                                double drift, double skin, const double *om, double dt,
+                                const std::string &note)
+{
+  if (!event_log_fp) return;
+  fputs(fmt::format("{} step={} tag={} ke={:.6g} ke_cap={:.6g} drift={:.6g} skin={:.6g} "
+                     "om0={:.6g} om1={:.6g} om2={:.6g} dt={:.6g} note={}\n",
+                     event, update->ntimestep, tag, ke, ke_cap, drift, skin,
+                     om ? om[0] : -1.0, om ? om[1] : -1.0, om ? om[2] : -1.0, dt, note)
+            .c_str(),
+        event_log_fp);
+  fflush(event_log_fp);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -301,6 +392,15 @@ void FixBAOABTether::init()
 void FixBAOABTether::init_list(int /*id*/, NeighList *ptr)
 {
   list = ptr;
+}
+
+/* ---------------------------------------------------------------------- */
+
+int FixBAOABTether::setmask()
+{
+  int mask = FixBAOAB::setmask();
+  mask |= END_OF_STEP;
+  return mask;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -445,7 +545,16 @@ void FixBAOABTether::initial_integrate(int /*vflag*/)
     // friction quench kick applied in the O step below instead of the
     // ordinary analytic-mode OU.
     bool quench_active = false;
-    if (adapt) kinetic_guard_and_quench(i, mi, kT, msk, p1, quench_active);
+    bool sub_stepped = false;
+    if (adapt) kinetic_guard_and_quench(i, mi, kT, msk, q1, p1, quench_active, sub_stepped);
+
+    // drift_hot (refresh_skin > 0 only): kinetic_guard_and_quench() has
+    // already advanced atom->x[i]/atom->v[i] all the way to the end of
+    // this step itself, via local sub-stepping at a Verlet-safe dt_sub
+    // (see sub_step_free_atom()) -- the O sub-step and second-half drift
+    // below, which assume the shared per-atom pipeline's q1[]/p1[] are
+    // still meaningful, must not run for this atom this step.
+    if (sub_stepped) continue;
 
     // ---- O: exact OU update. Masked (stiff) modes get the ordinary
     // analytic-mode c1/c2 kick, same as FixBAOAB; a quench-active atom
@@ -538,6 +647,21 @@ void FixBAOABTether::initial_integrate(int /*vflag*/)
     }
   }
 
+  // sub_step_free_atom() may have set need_reneighbor (rank-local) if a
+  // drift_hot atom's local excursion hit its safe-displacement cap this
+  // step. Allreduce before acting -- same requirement as need_refresh
+  // above: every rank must agree, since next_reneighbor feeds directly
+  // into Neighbor::decide()'s (unreduced) per-rank check, and disagreeing
+  // ranks would desynchronize the collective comm/neighbor rebuild it
+  // triggers.
+  {
+    int local_reneighbor = need_reneighbor ? 1 : 0;
+    int global_reneighbor = local_reneighbor;
+    if (comm->nprocs > 1) MPI_Allreduce(&local_reneighbor, &global_reneighbor, 1, MPI_INT, MPI_MAX, world);
+    if (global_reneighbor) next_reneighbor = update->ntimestep + 1;
+    need_reneighbor = 0;
+  }
+
   energy += energy_onestep;
 }
 
@@ -593,6 +717,89 @@ void FixBAOABTether::final_integrate()
 }
 
 /* ----------------------------------------------------------------------
+   synchronous dt-shrink-retry (Attempt 7 Part B; adapt=yes, refresh_skin>0
+   and drift_response==preshrink only): decide, one Verlet step ahead of
+   time, whether update->dt needs to drop before any flagged atom's drift
+   crosses refresh_skin. x[i] here is bit-identical to x[i] at the top of
+   next step's initial_integrate(), so a shrink decided here is visible to
+   every fix's initial_integrate() next step regardless of fix declaration
+   order in the input script -- unlike an inline pre-pass inside this fix's
+   own initial_integrate() (see setmask()).
+
+   This is deliberately NOT the same same-step response
+   kinetic_guard_and_quench()'s drift_hot branch takes under the default
+   drift_response==retether: Attempt 7 Part A showed that a tight enough
+   refresh_skin to catch a close encounter early instead fires that local
+   re-tether/sub-step response on nearly every step from ordinary thermal
+   jitter alone, and each trip's own approximation error compounds into
+   the very encounter it was meant to prevent (see the plan file). Acting
+   here, one step ahead, never calls sub_step_free_atom() -- its only
+   effect is a smaller update->dt for the ordinary shared pipeline
+   everyone already uses, so it cannot suffer that same self-reinforcing
+   pathology no matter how often it fires.
+
+   Deliberately does NOT reuse update_dt()'s om_unres-driven formula: a
+   freshly-probed om[i]=0,0,0 (non-positive-definite curvature, the common
+   signature right at a close encounter) contributes nothing to om_unres,
+   and om_unres's own zero-fallback (c_acc/dt_max) would pick the LARGEST
+   allowed dt -- the opposite of a shrink (confirmed: this is exactly why
+   an earlier "force need_refresh=1" experiment had zero effect). Reuses
+   sub_step_free_atom()'s formula instead, which already falls back
+   correctly to dt_min for this case.
+------------------------------------------------------------------------- */
+
+void FixBAOABTether::end_of_step()
+{
+  if (!adapt || refresh_skin <= 0.0 || drift_response != 1) return;
+
+  bigint ntimestep = update->ntimestep;
+  if (ntimestep == last_refresh_step) return;    // x0[i] was just reset
+
+  double **x = atom->x;
+  int *mask = atom->mask;
+  int nlocal = atom->nlocal;
+  if (igroup == atom->firstgroup) nlocal = atom->nfirst;
+
+  double dt_local = dt_max;
+  int i_trigger = -1;
+  for (int i = 0; i < nlocal; i++) {
+    if (!(mask[i] & groupbit)) continue;
+
+    double dx0[3] = {x[i][0] - x0[i][0], x[i][1] - x0[i][1], x[i][2] - x0[i][2]};
+    domain->minimum_image(FLERR, dx0);
+    double drift2 = dx0[0] * dx0[0] + dx0[1] * dx0[1] + dx0[2] * dx0[2];
+    if (drift2 <= refresh_skin * refresh_skin) continue;
+
+    refresh_one_atom(i, x[i], true);
+
+    double om_max_new = MAX(om[i][0], MAX(om[i][1], om[i][2]));
+    double dt_target = (om_max_new > 0.0) ? MIN(dt_min, 2.2 / om_max_new) : dt_min;
+    if (dt_target < dt_local) {
+      dt_local = dt_target;
+      i_trigger = i;
+    }
+  }
+
+  double dt_global = dt_local;
+  if (comm->nprocs > 1) MPI_Allreduce(&dt_local, &dt_global, 1, MPI_DOUBLE, MPI_MIN, world);
+
+  if (dt_global >= dt_max) return;    // no candidate on any rank this step
+
+  // same shrink-only hysteresis update_dt() uses for its own dt_lvl++
+  // branch -- never relax up here; relaxation is update_dt()'s job alone,
+  // and only once dt_floor_until has passed.
+  double rung_dt = dt_max / pow(2.0, MAX(dt_lvl, 0));
+  if (dt_global < 0.85 * rung_dt) {
+    dt_lvl = MAX(dt_lvl + 1, (int) ceil(log(dt_max / dt_global) / log(2.0)));
+    double dt_new = MAX(dt_min, MIN(dt_max, dt_max / pow(2.0, dt_lvl)));
+    apply_new_dt(dt_new);
+    dt_floor_until = ntimestep + 3 * (bigint) refresh_every;
+    log_event("PRESHRINK", i_trigger >= 0 ? atom->tag[i_trigger] : -1, -1.0, -1.0, -1.0, -1.0,
+              nullptr, dt_new, fmt::format("old_dt={:.6g}", rung_dt));
+  }
+}
+
+/* ----------------------------------------------------------------------
    shared demotion bookkeeping (adapt=yes only): bumps the chronic-failure
    counter, records the step for forgiveness, and exiles this atom from
    analytic/Verlet treatment (mode_is_stiff() returns false for it, this
@@ -603,7 +810,7 @@ void FixBAOABTether::final_integrate()
    flat 3*refresh_every with no backoff -- matching the reference exactly.
 ------------------------------------------------------------------------- */
 
-void FixBAOABTether::demote_atom(int i, bigint backoff_steps)
+void FixBAOABTether::demote_atom(int i, bigint backoff_steps, const char *source)
 {
   bigint ntimestep = update->ntimestep;
   demote_count[i]++;
@@ -611,24 +818,91 @@ void FixBAOABTether::demote_atom(int i, bigint backoff_steps)
   demote_cool[i] = ntimestep + backoff_steps;
   n_demoted++;
   need_refresh = 1;
+  log_event("DEMOTE", atom->tag[i], -1.0, -1.0, -1.0, -1.0, nullptr, -1.0,
+            fmt::format("backoff={} source={}", backoff_steps, source));
 }
 
 /* ----------------------------------------------------------------------
    kinetic over-excitation guard + quench (D.11.3, adapt=yes only): called
    from initial_integrate() between the first drift half-step and the O
    sub-step, exactly where lj_longstep_prototype.py's run() inserts the
-   same check. p1[] is this atom's post-first-half-drift modal velocity
-   (already computed by the caller); msk[] is this atom's current per-mode
-   stiff mask, mutated in place on a trip so the O sub-step and second
-   drift half-step immediately below both see the demotion.
+   same check. q1[]/p1[] are this atom's post-first-half-drift modal
+   position/velocity (already computed by the caller, in the CURRENT
+   eigenbasis evecs[i]); msk[] is this atom's current per-mode stiff mask.
+   All three are mutated in place on a trip so the O sub-step and second
+   drift half-step immediately below see its effect.
 
-   ke_max is the largest per-mode kinetic energy among this atom's
-   currently-masked modes only (an atom with no masked modes -- soft, or
-   already cooling down -- has ke_max 0 and never trips). "hot" compares it
-   to a fixed multiple of kT; "sudden" additionally requires a large jump
-   since the last step's value, distinguishing a genuine impulsive event
-   (which should be quenched hard right away, hence quench_exempt) from a
-   slow gradual heating (left to the ordinary, gentler quench treatment).
+   ke_max is, by default (refresh_skin == 0, legacy behavior), the largest
+   per-mode kinetic energy among this atom's currently-masked modes only
+   (an atom with no masked modes -- soft, or already cooling down -- has
+   ke_max 0 and never trips). This is a structural blind spot: a soft mode
+   has no analytic tether and its curvature estimate (om[i]/evecs[i]) is
+   frozen at whatever it was at the last refresh, so nothing watches it
+   between refreshes even as it drifts. Stage 5's refresh_skin > 0 opt-in
+   closes that gap two ways: (1) ke_max is computed over ALL modes, not
+   just masked ones (ke_hot), and (2) independently, this atom is also
+   flagged if it has drifted (minimum-imaged) farther than refresh_skin
+   from x0[i] (its position at the last refresh -- drift_hot) --
+   empirically the earlier and more useful signal, since a genuine runaway
+   drift shows up as a growing displacement many steps before the kinetic
+   energy itself spikes (which, for an unmollified soft mode heading into
+   a close contact, tends to happen only on the same step as the resulting
+   force blowup, too late to act on).
+
+   The two triggers get DIFFERENT responses, confirmed necessary
+   empirically: a first implementation reused demote_atom()'s full
+   unmask+exile for both, and that made drift_hot crash *worse* (step 4-5,
+   vs. the original bug's step 21) than doing nothing at all. The reason:
+   by the time ke_hot fires, the dangerous close encounter has (per its own
+   raw-force spike) already happened this step, so releasing the tether for
+   the rest of the step is harmless -- but drift_hot fires *before* any
+   force spike, while the atom is still approaching a close contact, and
+   releasing its tether right then lets it drift further in, unmollified,
+   for the remainder of THIS SAME step, exploding the very next kick on the
+   real MACE force. So ke_hot keeps the original demote_atom() unmask+exile
+   response (danger already passed, cool the atom down and let the next
+   scheduled refresh re-evaluate it); drift_hot instead does an immediate,
+   single-atom, out-of-cadence curvature refresh at this atom's CURRENT
+   position (refresh_one_atom(), instantaneous=true -- still useful going
+   forward, since it updates c[i]/x0[i]/om[i]/evecs[i] for how this atom is
+   treated starting next step) followed by LOCAL SUB-STEPPING
+   (sub_step_free_atom()) of this atom's remaining dtby2 of physical time
+   as plain Cartesian velocity-Verlet at a much smaller, locally
+   Verlet-safe dt, using real single-atom forces
+   (partial_force(..., live_neighbor_positions=true)) -- NOT by
+   re-projecting the refreshed q1[]/p1[] into the new eigenbasis and
+   handing the atom back to the shared per-atom pipeline (O sub-step +
+   analytic second-half drift) at the full production dt. Two earlier
+   attempts tried exactly that hand-back -- with and without also forcing
+   need_refresh for the next step's dt ladder -- and both crashed at the
+   identical step with a bit-identical thermo trace to the original
+   unmask+exile design: the freshly-probed curvature at a genuine close
+   encounter is essentially always ineligible for masking
+   (mode_is_stiff()'s all-3-modes floor, and lj_longstep_prototype.py's
+   matching "eligible" gate/comment: masking a mid-collision atom in only
+   one direction "was observed to destabilize the run"), so re-projecting
+   into the shared pipeline just hands the atom back to the SAME
+   free-particle-at-10-fs treatment that the very first falsified design
+   (full-unmask during heff_samples accumulation) already showed is
+   unconditionally unstable. Sub-stepping that same "free particle, no
+   thermostat" treatment (an ordinary unmasked, non-quench atom already
+   gets zero O-step friction/noise -- see the "else p2[m] = p1[m];" branch
+   in initial_integrate()) at a safe local dt instead of the full
+   production dt is a discretization fix, not a physics change. Because
+   atom->x[i] itself is not updated until the very end of
+   initial_integrate()'s per-atom loop, the sub-stepping's own starting
+   point is reconstructed from q1[]/p1[] (this atom's already-computed
+   post-first-half-drift state) projected back to Cartesian around the OLD
+   center/eigenbasis; the fresh refresh_one_atom() center is placed to
+   coincide with that point exactly. The caller must skip the rest of
+   initial_integrate()'s per-atom pipeline for this atom this step once
+   sub_stepped comes back true, since atom->x[i]/atom->v[i] are already
+   fully advanced.
+
+   "sudden" (a large jump in ke_max since the last step) and the strong-
+   friction quench_exempt path stay tied to ke_hot only -- drift_hot is a
+   preemptive, still-tethered correction, not an exile, so it does not
+   itself request a quench kick.
 
    Separately (regardless of whether this call's own guard trips), reports
    via quench_active whether this atom should receive the strong-friction
@@ -638,33 +912,268 @@ void FixBAOABTether::demote_atom(int i, bigint backoff_steps)
    itself (mask override) and should not also take a quench kick the same
    step it happened, mirroring the reference's exclusion of its currently-
    eligible atom set from the same-step quench pass.
+
+   Attempt 9 fix (event_log-diagnosed): ke_hot re-tripping on a
+   CONSECUTIVE step, while this atom is still inside an already-active
+   demote_cool window from a PRIOR trip, must NOT call demote_atom()
+   again. demote_atom() unconditionally resets last_demote[i] =
+   ntimestep, and quench_active's own exclusion above
+   (last_demote[i] != ntimestep) then reads as "just demoted, skip the
+   quench" -- correct for the atom's first trip into a cooldown episode,
+   but if ke_hot keeps tripping every single step (empirically the
+   common case for a genuinely hot light atom under MACE, per the
+   event_log diagnostic: median/min gap between consecutive DEMOTEs was
+   1 step for the atoms that triggered this bug), re-demoting every step
+   keeps last_demote[i] pinned at ntimestep forever, so quench_active is
+   permanently false and the atom's only real cooling mechanism (the
+   O-step quench kick) never actually engages -- it is left unmasked
+   (no analytic tether) AND unthermostatted (no quench friction) for as
+   long as it stays hot, with nothing acting to bring it back down. Only
+   call demote_atom() -- which logs a new DEMOTE, resets last_demote[i],
+   and extends demote_cool[i] -- when this is a genuinely NEW episode
+   (demote_cool[i] <= ntimestep, i.e. not already exiled from a prior
+   trip); a re-trip while still inside an existing cooldown window keeps
+   msk[] forced false (redundant but harmless -- it is already false)
+   and otherwise leaves demote_cool[i]/last_demote[i] untouched, so
+   quench_active can engage on this and subsequent hot-but-not-freshly-
+   demoted steps exactly as originally intended.
 ------------------------------------------------------------------------- */
 
 void FixBAOABTether::kinetic_guard_and_quench(int i, double mi, double kT, bool *msk,
-                                               const double *p1, bool &quench_active)
+                                               double *q1, double *p1, bool &quench_active,
+                                               bool &sub_stepped)
 {
   bigint ntimestep = update->ntimestep;
+  sub_stepped = false;
 
   double ke_max = 0.0;
   for (int m = 0; m < 3; m++) {
-    if (!msk[m]) continue;
+    if (!msk[m] && refresh_skin <= 0.0) continue;
     double ke = 0.5 * force->mvv2e * mi * p1[m] * p1[m];
     if (ke > ke_max) ke_max = ke;
   }
 
-  bool hot = ke_max > ke_rel * kT;
-  bool sudden = (ke_max - last_ke[i]) > 0.5 * ke_rel * kT;
+  // kT here is boltz*t_target/mvv2e (native mass-velocity^2 units, matching
+  // p1[]/invmass elsewhere in this fix), NOT an energy in eV. ke_max above
+  // is already multiplied by mvv2e, i.e. in eV -- both caps below need the
+  // same mvv2e factor to compare like with like (mirrors sub_step_free_atom()'s
+  // ke_cap).
+  double ke_cap = ke_rel * kT * force->mvv2e;
+  bool ke_hot = ke_max > ke_cap;
+
+  bool drift_hot = false;
+  double drift_mag = -1.0;
+  if (!ke_hot && refresh_skin > 0.0) {
+    double **x = atom->x;
+    double dx0[3] = {x[i][0] - x0[i][0], x[i][1] - x0[i][1], x[i][2] - x0[i][2]};
+    domain->minimum_image(FLERR, dx0);
+    double drift2 = dx0[0] * dx0[0] + dx0[1] * dx0[1] + dx0[2] * dx0[2];
+    if (drift2 > refresh_skin * refresh_skin) {
+      drift_hot = true;
+      drift_mag = sqrt(drift2);
+    }
+  }
+
+  bool sudden = (ke_max - last_ke[i]) > 0.5 * ke_cap;
   last_ke[i] = ke_max;
 
-  if (hot) {
+  if (ke_hot) {
     for (int m = 0; m < 3; m++) msk[m] = false;
-    demote_atom(i, 3 * (bigint) refresh_every);
+    log_event("GUARD_KE", atom->tag[i], ke_max, ke_cap, -1.0, -1.0, nullptr, -1.0,
+              sudden ? "sudden" : "");
     n_kinetic_guard++;
+    // Only start a NEW demotion episode (and its cooldown/last_demote
+    // reset) if this atom isn't already inside one -- see the Attempt 9
+    // doc comment above. A re-trip during an existing episode leaves
+    // demote_cool[i]/last_demote[i] alone so quench_active can engage.
+    if (demote_cool[i] <= ntimestep) demote_atom(i, 3 * (bigint) refresh_every, "kinetic_guard");
     if (sudden) quench_exempt[i] = demote_cool[i];
+  } else if (drift_hot) {
+    log_event("GUARD_DRIFT", atom->tag[i], -1.0, -1.0, drift_mag, refresh_skin, nullptr, -1.0,
+              drift_response == 0 ? "retether" : "preshrink");
+    if (drift_response == 0) {
+      // retether (default): Do NOT re-project v_mid into the new eigenbasis
+      // and hand this atom back to the shared pipeline (O sub-step +
+      // second-half drift) below -- both falsified predecessors of this
+      // design did exactly that, and both crashed identically to the
+      // original unmask+exile bug (see the doc comment above). Instead,
+      // locally sub-step this atom's own remaining dtby2 of physical time
+      // as plain Cartesian velocity-Verlet, writing directly into
+      // atom->x[i]/atom->v[i], and tell the caller to skip the rest of
+      // this step's shared pipeline for this atom.
+      double dx_mid[3] = {0.0, 0.0, 0.0}, v_mid[3] = {0.0, 0.0, 0.0};
+      for (int m = 0; m < 3; m++)
+        for (int k = 0; k < 3; k++) {
+          dx_mid[k] += evecs[i][3 * m + k] * q1[m];
+          v_mid[k] += evecs[i][3 * m + k] * p1[m];
+        }
+      double x_mid[3] = {c[i][0] + dx_mid[0], c[i][1] + dx_mid[1], c[i][2] + dx_mid[2]};
+
+      refresh_one_atom(i, x_mid, true);
+      n_kinetic_guard++;
+
+      sub_step_free_atom(i, mi, x_mid, v_mid, dtby2, kT);
+      sub_stepped = true;
+
+      // Force the next initial_integrate() to run a full refresh_blocks()
+      // (same rank-local-trigger pattern as demote_atom() above; the
+      // MPI_Allreduce(MAX) at that call site keeps all ranks entering it
+      // together), so update_dt() re-evaluates om_unres with this atom's
+      // newly-probed om[i] included and the dt ladder can drop before the
+      // next close encounter -- independent of, and in addition to, the
+      // same-step protection sub_step_free_atom() just gave this one atom.
+      need_refresh = 1;
+    }
+    // else: preshrink -- take NO action at all here, not even the
+    // refresh_one_atom() bookkeeping call an earlier revision of this
+    // branch made unconditionally. refresh_one_atom(instantaneous=true)
+    // overwrites c[i]/x0[i]/om[i]/evecs[i] IN PLACE (see its tail), but
+    // q1[]/p1[] are this atom's modal coordinates in the OLD eigenbasis
+    // relative to the OLD center -- they do not automatically stay valid
+    // just because nobody reprojects them. Calling refresh_one_atom() here
+    // without also reprojecting q1[]/p1[] (which is exactly the sub-
+    // stepping-free "re-tether in place" design already falsified above)
+    // leaves the rest of THIS step's shared pipeline reconstructing
+    // Cartesian state from stale modal coefficients against a brand-new
+    // center/basis -- confirmed empirically to produce "Non-numeric atom
+    // coords" within 2 steps, a worse failure than any prior attempt.
+    // Under preshrink this atom must finish the CURRENT step completely
+    // unperturbed -- q1[]/p1[]/msk[]/c[i]/x0[i]/evecs[i] all exactly as
+    // they were before this call, as if drift_hot had never fired.
+    // end_of_step() (below) independently re-checks the same |x[i]-x0[i]|
+    // drift AFTER the full step completes, using the atom's genuinely
+    // final position and its OWN refresh_one_atom() call, and shrinks
+    // update->dt for the NEXT step if still warranted -- that is the only
+    // place preshrink is allowed to act.
   }
 
   quench_active = (demote_cool[i] > ntimestep) && (quench_exempt[i] <= ntimestep) &&
                   (last_demote[i] != ntimestep);
+}
+
+/* ----------------------------------------------------------------------
+   drift_hot response (Stage 5, adapt=yes && refresh_skin>0 only): integrate
+   this ONE atom's remaining dtby2 of physical time as plain Cartesian
+   velocity-Verlet, sub-cycled at a locally Verlet-safe dt_sub, using real
+   single-atom forces from partial_force() (the same halo-local real-force
+   kernel already used by every FD curvature probe elsewhere in this fix).
+   No thermostat is applied during this window -- see the doc comment on
+   kinetic_guard_and_quench() for why that is not a new approximation (an
+   ordinary unmasked, non-quench atom already gets zero O-step friction/
+   noise for the remainder of the shared pipeline). Writes the result
+   directly into atom->x[i]/atom->v[i]; the caller must not run the rest of
+   initial_integrate()'s per-atom pipeline for this atom this step.
+
+   dt_sub falls back to dt_min (the floor of the existing adaptive dt
+   ladder, already trusted to be Verlet-stable) whenever the curvature
+   refresh_one_atom() just probed is non-positive-definite in every
+   direction (om_max_new == 0), which is the common case right at a close
+   encounter -- see the falsified re-tether-in-place debug trace. n_sub is
+   rounded up and dt_sub reduced so the remaining_dt window divides evenly,
+   with no leftover fractional sub-step.
+
+   Neighbor-skin safety cap (fixes the crash Attempt 4 -- pure sub-stepping,
+   no cap -- was empirically falsified with): partial_force()'s own doc
+   comment states it is "valid as long as |xtrial - x[i]| stays well inside
+   the neighbor skin," because it sums only over list->firstneigh[i]/
+   numneigh[i], the SAME neighbor topology fixed once at the top of this
+   whole (production-dt) step -- not rebuilt per sub-step. A genuinely
+   violent drift_hot excursion can carry this atom multiple Angstrom in a
+   handful of sub-steps (observed: 2.6 A over 25 sub-steps, tag 112, step 4
+   of /tmp/sub4_skin), enough to reach a real neighbor this cached list
+   never included, which the local force sum is then structurally blind to
+   -- the atom free-falls with no repulsive wall from it, and
+   final_integrate()'s closing kick (using the real, but by then equally
+   stale-listed, global force) detonates it and its true neighbors.
+   Tracking cumulative displacement from x_mid and stopping the loop once
+   it would exceed half the neighbor skin -- the exact same trust radius
+   Neighbor::check_distance() already uses to decide when ordinary,
+   non-sub-stepped dynamics needs a rebuild -- keeps every partial_force()
+   call inside its documented validity region. The atom is left with
+   whatever fraction of remaining_dt it reached (a small, one-time, local
+   truncation of this one atom's clock this one step) and need_reneighbor
+   is set so the true, fresh environment is picked up cleanly starting the
+   very next step (see need_reneighbor's doc comment in the header and its
+   Allreduce site at the end of initial_integrate()).
+
+   Kinetic-energy sanity cap (the displacement cap alone is NOT sufficient --
+   empirically falsified, see /tmp/sub4_skin/debug3_new.txt): a missing
+   neighbor's repulsive wall does not need multiple Angstrom of travel to
+   matter -- x_mid itself can already be within a fraction of an Angstrom of
+   an unlisted neighbor's repulsive core (the om_max_new == 0 case above IS
+   this situation: a non-positive-definite probe at x_mid is itself a
+   transition-state/close-contact signature). The observed trace shows
+   ke_max-equivalent kinetic energy for tag 112 already exceeding ke_rel*kT
+   after the FIRST sub-step, and blowing past it by orders of magnitude
+   (~20 eV vs. a ~0.3 eV cap) by sub-step 2, while cumulative displacement
+   was still under 0.1 A -- an order of magnitude below the displacement
+   cap's trip point. So this atom's own kinetic energy, checked every
+   sub-step against the SAME ke_rel*kT over-excitation threshold
+   kinetic_guard_and_quench() already uses to decide "is this atom too hot"
+   (no new, arbitrary constant introduced), is the fast-tripping signal that
+   actually catches the runaway before it compounds; the displacement cap
+   above remains valuable in its own right (it is what request a real
+   reneighboring), but is a slower, secondary safety net for genuine
+   multi-Angstrom excursions, not the primary defense against this failure
+   mode.
+------------------------------------------------------------------------- */
+
+void FixBAOABTether::sub_step_free_atom(int i, double mi, const double *x_mid,
+                                         const double *v_mid, double remaining_dt, double kT)
+{
+  double om_max_new = MAX(om[i][0], MAX(om[i][1], om[i][2]));
+  double dt_sub = (om_max_new > 0.0) ? MIN(dt_min, 2.2 / om_max_new) : dt_min;
+  int n_sub = MAX(1, (int) ceil(remaining_dt / dt_sub));
+  dt_sub = remaining_dt / n_sub;
+
+  double safe_dispsq = 0.25 * neighbor->skin * neighbor->skin;    // (0.5*skin)^2
+  // kT here is boltz*t_target/mvv2e (native mass-velocity^2 units, matching
+  // p1[]/invmass elsewhere in this fix -- see kinetic_guard_and_quench()'s
+  // O-step noise draw), NOT an energy in eV. ke below is computed the same
+  // way ke_max is in kinetic_guard_and_quench() -- already multiplied by
+  // mvv2e, i.e. in eV -- so the cap needs the same mvv2e factor to compare
+  // like with like.
+  double ke_cap = ke_rel * kT * force->mvv2e;
+
+  double ftm2v = force->ftm2v;
+  double invmass = 1.0 / mi;
+  double xs[3] = {x_mid[0], x_mid[1], x_mid[2]};
+  double vs[3] = {v_mid[0], v_mid[1], v_mid[2]};
+
+  double fcur[3];
+  partial_force(i, xs, fcur, nullptr, true);
+  n_partial_force_calls++;
+
+  int s;
+  for (s = 0; s < n_sub; s++) {
+    for (int k = 0; k < 3; k++) vs[k] += 0.5 * dt_sub * ftm2v * invmass * fcur[k];
+    for (int k = 0; k < 3; k++) xs[k] += dt_sub * vs[k];
+
+    double fnext[3];
+    partial_force(i, xs, fnext, nullptr, true);
+    n_partial_force_calls++;
+
+    for (int k = 0; k < 3; k++) vs[k] += 0.5 * dt_sub * ftm2v * invmass * fnext[k];
+    for (int k = 0; k < 3; k++) fcur[k] = fnext[k];
+
+    double dispsq = (xs[0] - x_mid[0]) * (xs[0] - x_mid[0]) + (xs[1] - x_mid[1]) * (xs[1] - x_mid[1]) +
+                    (xs[2] - x_mid[2]) * (xs[2] - x_mid[2]);
+    double ke = 0.5 * force->mvv2e * mi * (vs[0] * vs[0] + vs[1] * vs[1] + vs[2] * vs[2]);
+    bool disp_hot = dispsq > safe_dispsq;
+    bool ke_hot_sub = ke > ke_cap;
+    if (disp_hot || ke_hot_sub) {
+      need_reneighbor = 1;
+      s++;
+      break;
+    }
+  }
+
+  atom->x[i][0] = xs[0];
+  atom->x[i][1] = xs[1];
+  atom->x[i][2] = xs[2];
+  atom->v[i][0] = vs[0];
+  atom->v[i][1] = vs[1];
+  atom->v[i][2] = vs[2];
 }
 
 /* ----------------------------------------------------------------------
@@ -739,7 +1248,7 @@ void FixBAOABTether::refresh_blocks()
   // per-atom-count-dependent number of forward/reverse_comm() calls used
   // to cause).
 
-  // one-time bootstrap (adapt=yes only, before om_split has ever been set):
+  // one-time bootstrap (adapt=yes, before om_split has ever been set):
   // mode_is_stiff()'s per-mode mask below needs om_split, but om_split
   // (D.11.1's spectral-gap split) is itself derived from the full group's
   // eigenfrequency census -- a chicken-and-egg problem only on the very
@@ -748,9 +1257,13 @@ void FixBAOABTether::refresh_blocks()
   // just-recomputed om[i], not the atom loop order. Resolved by running a
   // throwaway FD-probe pass first, touching only om[]/evecs[] (no Hc/Jblk,
   // no group-membership eligibility use yet), to seed the one-shot split;
-  // the main loop below then repeats the same probes (needed regardless,
-  // to also build Hc/Jblk) with om_split now available. This doubles the
-  // force-evaluation cost of exactly one refresh call, once per run.
+  // the main loop below then repeats the same probes (needed regardless, to
+  // also build Hc/Jblk) with om_split now available. This doubles the
+  // force-evaluation cost of exactly one refresh call, once per run. With
+  // heff_samples > 0 this throwaway estimate is also, harmlessly, this
+  // atom's "first sample" instantaneous om -- the main loop's own
+  // first-sample branch immediately re-derives the identical value through
+  // the Hacc accumulator right after, so state stays consistent.
   if (adapt && !om_split_set) {
     for (int i = 0; i < nlocal; i++) {
       if (!(mask[i] & groupbit)) continue;
@@ -788,100 +1301,8 @@ void FixBAOABTether::refresh_blocks()
 
   for (int i = 0; i < nlocal; i++) {
     if (!(mask[i] & groupbit)) continue;
-
-    double mi = rmass ? rmass[i] : mass[type[i]];
     double xi[3] = {x[i][0], x[i][1], x[i][2]};
-    double H[3][3];
-
-    int jnum = 0;
-    int *jlist = nullptr;
-    if (mollify && list) {
-      jlist = list->firstneigh[i];
-      jnum = list->numneigh[i];
-      if (jnum > JMAX)
-        error->one(FLERR, "Fix baoab/tether: atom exceeds JMAX ({}) neighbors for the "
-                           "sparse response block -- raise JMAX and recompile", JMAX);
-    }
-    // neighbor force-response columns: Hc[k][a][b] = dF_{jlist[k],a}/dx_{i,b}
-    std::vector<double> Hc;
-    if (jnum > 0) Hc.assign((size_t) jnum * 9, 0.0);
-
-    std::vector<double> fj_plus, fj_minus;
-    if (jnum > 0) {
-      fj_plus.resize((size_t) jnum * 3);
-      fj_minus.resize((size_t) jnum * 3);
-    }
-
-    for (int b = 0; b < 3; b++) {
-      double fplus[3], fminus[3];
-      double xt[3] = {xi[0], xi[1], xi[2]};
-
-      xt[b] = xi[b] + eps;
-      partial_force(i, xt, fplus, jnum > 0 ? fj_plus.data() : nullptr, true);
-
-      xt[b] = xi[b] - eps;
-      partial_force(i, xt, fminus, jnum > 0 ? fj_minus.data() : nullptr, true);
-
-      for (int a = 0; a < 3; a++) H[a][b] = -(fplus[a] - fminus[a]) / (2.0 * eps);
-
-      for (int k = 0; k < jnum; k++)
-        for (int a = 0; a < 3; a++)
-          Hc[(size_t) k * 9 + 3 * a + b] =
-              (fj_plus[(size_t) k * 3 + a] - fj_minus[(size_t) k * 3 + a]) / (2.0 * eps);
-    }
-
-    double Hs[3][3];
-    for (int a = 0; a < 3; a++)
-      for (int b = 0; b < 3; b++) Hs[a][b] = 0.5 * (H[a][b] + H[b][a]) / mi;
-
-    double eval[3], evec[3][3];
-    MathEigen::jacobi3(Hs, eval, evec);
-
-    for (int m = 0; m < 3; m++) {
-      om[i][m] = sqrt(MAX(eval[m], 0.0));
-      for (int a = 0; a < 3; a++) evecs[i][3 * m + a] = evec[a][m];
-    }
-    x0[i][0] = xi[0];
-    x0[i][1] = xi[1];
-    x0[i][2] = xi[2];
-    c[i][0] = xi[0];
-    c[i][1] = xi[1];
-    c[i][2] = xi[2];
-
-    // S_i = (1/mi) * W * diag(msk/om^2) * W^T -- the masked-mode Cartesian
-    // compliance block (D.10.4); zero contribution from soft/unmasked
-    // modes and from modes with (numerically) zero curvature.
-    double Si[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
-    for (int m = 0; m < 3; m++) {
-      if (!mode_is_stiff(i, m)) continue;
-      if (om[i][m] <= 0.0) continue;
-      double inv = 1.0 / (mi * om[i][m] * om[i][m]);
-      for (int a = 0; a < 3; a++)
-        for (int bb = 0; bb < 3; bb++)
-          Si[3 * a + bb] += evecs[i][3 * m + a] * evecs[i][3 * m + bb] * inv;
-    }
-
-    // Exclude neighbors that are themselves flagged (stiff/rattler) atoms:
-    // the adiabatic response must depend on slow (cage) coordinates only.
-    // Letting one rattler's clamped equilibrium respond to another
-    // rattler's own fast oscillation couples two fast modes through their
-    // response blocks -- a positive-feedback channel that parametrically
-    // pumps neighboring rattler pairs (matches
-    // lj_longstep_prototype.py's refresh(), "self.J[:, :, s, :] = 0.0" and
-    // its accompanying comment; this is the documented fix for exactly the
-    // slow light-atom heating this stage-2 port was showing).
-    int nk = 0;
-    for (int k = 0; k < jnum; k++) {
-      int j = jlist[k] & NEIGHMASK;
-      if (mask[j] & groupbit) continue;
-      Jtag[i][nk] = atom->tag[j];
-      const double *Hck = &Hc[(size_t) k * 9];
-      // Jblk_k = Hc_k . S_i, so that the back-reaction is a plain matvec
-      // at force_moll() time: f[j] += Jblk_k * g[i] (see force_moll()).
-      mat3_matmat(Hck, Si, Jblk[i][nk]);
-      nk++;
-    }
-    nJ[i] = nk;
+    refresh_one_atom(i, xi, false);
   }
 
   // forgiveness (D.11.1): an atom that has gone a while without tripping a
@@ -899,6 +1320,187 @@ void FixBAOABTether::refresh_blocks()
   }
 
   if (adapt) update_dt();
+}
+
+/* ----------------------------------------------------------------------
+   per-atom curvature-block refresh (group atom i only): the FD-probe body
+   factored out of refresh_blocks()'s scheduled loop so it can also be
+   called out-of-cadence, mid-step, for a single atom (Stage 5's
+   refresh_skin excursion-guard "re-tether in place" response -- see
+   kinetic_guard_and_quench()). Purely local: partial_force() makes no
+   comm calls and neither does anything below, so -- unlike refresh_blocks()
+   itself, which wraps this loop with the one-time om_split bootstrap and
+   the collective update_dt() call -- this function is safe to invoke from
+   a single rank on a single atom without desynchronizing the others.
+
+   xi is the Cartesian base point to probe around (the scheduled caller
+   passes the atom's current atom->x[i]; the excursion guard instead passes
+   this atom's post-first-half-drift mid-step position, since atom->x[i]
+   itself is not updated until the end of initial_integrate()'s per-atom
+   loop -- see there).
+
+   instantaneous=true forces an immediate jacobi3 diagonalization of THIS
+   probe's raw Hessian into the working om[i]/evecs[i], regardless of the
+   heff_samples averaging window's state, and leaves Hacc[i]/
+   n_hess_samples[i] untouched -- an emergency snapshot, not a scheduled
+   sample. instantaneous=false (the scheduled path) is the original
+   heff_samples-aware logic, unchanged: heff_samples==0 always
+   diagonalizes; heff_samples>0 only re-diagonalizes at the first and last
+   sample of the averaging window (see the inline comment below).
+------------------------------------------------------------------------- */
+
+void FixBAOABTether::refresh_one_atom(int i, const double *xi, bool instantaneous)
+{
+  int *mask = atom->mask;
+  double *mass = atom->mass;
+  double *rmass = atom->rmass;
+  int *type = atom->type;
+
+  double mi = rmass ? rmass[i] : mass[type[i]];
+  double H[3][3];
+
+  int jnum = 0;
+  int *jlist = nullptr;
+  if (mollify && list) {
+    jlist = list->firstneigh[i];
+    jnum = list->numneigh[i];
+    if (jnum > JMAX)
+      error->one(FLERR, "Fix baoab/tether: atom exceeds JMAX ({}) neighbors for the "
+                         "sparse response block -- raise JMAX and recompile", JMAX);
+  }
+  // neighbor force-response columns: Hc[k][a][b] = dF_{jlist[k],a}/dx_{i,b}
+  std::vector<double> Hc;
+  if (jnum > 0) Hc.assign((size_t) jnum * 9, 0.0);
+
+  std::vector<double> fj_plus, fj_minus;
+  if (jnum > 0) {
+    fj_plus.resize((size_t) jnum * 3);
+    fj_minus.resize((size_t) jnum * 3);
+  }
+
+  for (int b = 0; b < 3; b++) {
+    double fplus[3], fminus[3];
+    double xt[3] = {xi[0], xi[1], xi[2]};
+
+    xt[b] = xi[b] + eps;
+    partial_force(i, xt, fplus, jnum > 0 ? fj_plus.data() : nullptr, true);
+
+    xt[b] = xi[b] - eps;
+    partial_force(i, xt, fminus, jnum > 0 ? fj_minus.data() : nullptr, true);
+
+    for (int a = 0; a < 3; a++) H[a][b] = -(fplus[a] - fminus[a]) / (2.0 * eps);
+
+    for (int k = 0; k < jnum; k++)
+      for (int a = 0; a < 3; a++)
+        Hc[(size_t) k * 9 + 3 * a + b] =
+            (fj_plus[(size_t) k * 3 + a] - fj_minus[(size_t) k * 3 + a]) / (2.0 * eps);
+  }
+
+  double Hs[3][3];
+  for (int a = 0; a < 3; a++)
+    for (int b = 0; b < 3; b++) Hs[a][b] = 0.5 * (H[a][b] + H[b][a]) / mi;
+
+  // thermally-averaged effective curvature (CLAUDE.md convention #3):
+  // heff_samples==0 keeps the legacy instantaneous-every-refresh write
+  // below unchanged. heff_samples>0 accumulates the raw matrix every
+  // refresh cycle (direct port of set_effective_light_blocks(), which
+  // freezes the raw Hessian block, not the diagonalized frequencies --
+  // averaging the matrix is the SCHA-consistent operation across
+  // snapshots with different local eigenbases from anharmonic wobble),
+  // but only RE-DIAGONALIZES the working om[i]/evecs[i] -- the values
+  // mode_is_stiff() actually masks against -- at the FIRST sample (an
+  // ordinary instantaneous estimate, exactly like refresh #1 always was)
+  // and once more when the window closes (the full N-sample average,
+  // frozen forever after). Samples in between accumulate silently
+  // without ever touching om[i]/evecs[i]. This keeps the atom
+  // masked/tethered continuously through the whole window using a STABLE
+  // working estimate (no per-refresh thrash -> no coherent unmask flip),
+  // rather than running genuinely free dynamics on a stiff anharmonic
+  // mode at the production timestep, which is unconditionally unstable
+  // (confirmed empirically: forcing full-unmask during accumulation blew
+  // up worse, by step 4, than the original per-refresh-thrash bug this
+  // mechanism exists to fix). An instantaneous=true emergency re-tether
+  // always takes this same first branch, bypassing the averaging window
+  // entirely -- it needs the current local curvature right now, not a
+  // stale mid-window estimate -- without ever touching Hacc/
+  // n_hess_samples (that scheduled bookkeeping is left exactly as the next
+  // ordinary refresh_blocks() call would find it).
+  if (instantaneous || heff_samples == 0) {
+    double eval[3], evec[3][3];
+    MathEigen::jacobi3(Hs, eval, evec);
+    for (int m = 0; m < 3; m++) {
+      om[i][m] = sqrt(MAX(eval[m], 0.0));
+      for (int a = 0; a < 3; a++) evecs[i][3 * m + a] = evec[a][m];
+    }
+  } else if (n_hess_samples[i] < heff_samples) {
+    bool first_sample = (n_hess_samples[i] == 0);
+    for (int a = 0; a < 3; a++)
+      for (int b = 0; b < 3; b++) Hacc[i][3 * a + b] += Hs[a][b];
+    n_hess_samples[i]++;
+    bool window_closed = (n_hess_samples[i] == heff_samples);
+
+    if (first_sample || window_closed) {
+      double Havg[3][3];
+      for (int a = 0; a < 3; a++)
+        for (int b = 0; b < 3; b++) Havg[a][b] = Hacc[i][3 * a + b] / n_hess_samples[i];
+
+      double eval[3], evec[3][3];
+      MathEigen::jacobi3(Havg, eval, evec);
+      for (int m = 0; m < 3; m++) {
+        om[i][m] = sqrt(MAX(eval[m], 0.0));
+        for (int a = 0; a < 3; a++) evecs[i][3 * m + a] = evec[a][m];
+      }
+    }
+    // else: mid-window sample (2..N-1) -- accumulate only, om[i]/
+    // evecs[i] (and hence the mask decision) untouched.
+  }
+  // else: already frozen (n_hess_samples[i] == heff_samples) -- om[i]/
+  // evecs[i] keep their frozen values, no further write.
+
+  log_event("REFRESH", atom->tag[i], -1.0, -1.0, -1.0, -1.0, om[i], -1.0,
+            instantaneous ? "forced" : "scheduled");
+
+  x0[i][0] = xi[0];
+  x0[i][1] = xi[1];
+  x0[i][2] = xi[2];
+  c[i][0] = xi[0];
+  c[i][1] = xi[1];
+  c[i][2] = xi[2];
+
+  // S_i = (1/mi) * W * diag(msk/om^2) * W^T -- the masked-mode Cartesian
+  // compliance block (D.10.4); zero contribution from soft/unmasked
+  // modes and from modes with (numerically) zero curvature.
+  double Si[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+  for (int m = 0; m < 3; m++) {
+    if (!mode_is_stiff(i, m)) continue;
+    if (om[i][m] <= 0.0) continue;
+    double inv = 1.0 / (mi * om[i][m] * om[i][m]);
+    for (int a = 0; a < 3; a++)
+      for (int bb = 0; bb < 3; bb++)
+        Si[3 * a + bb] += evecs[i][3 * m + a] * evecs[i][3 * m + bb] * inv;
+  }
+
+  // Exclude neighbors that are themselves flagged (stiff/rattler) atoms:
+  // the adiabatic response must depend on slow (cage) coordinates only.
+  // Letting one rattler's clamped equilibrium respond to another
+  // rattler's own fast oscillation couples two fast modes through their
+  // response blocks -- a positive-feedback channel that parametrically
+  // pumps neighboring rattler pairs (matches
+  // lj_longstep_prototype.py's refresh(), "self.J[:, :, s, :] = 0.0" and
+  // its accompanying comment; this is the documented fix for exactly the
+  // slow light-atom heating this stage-2 port was showing).
+  int nk = 0;
+  for (int k = 0; k < jnum; k++) {
+    int j = jlist[k] & NEIGHMASK;
+    if (mask[j] & groupbit) continue;
+    Jtag[i][nk] = atom->tag[j];
+    const double *Hck = &Hc[(size_t) k * 9];
+    // Jblk_k = Hc_k . S_i, so that the back-reaction is a plain matvec
+    // at force_moll() time: f[j] += Jblk_k * g[i] (see force_moll()).
+    mat3_matmat(Hck, Si, Jblk[i][nk]);
+    nk++;
+  }
+  nJ[i] = nk;
 }
 
 /* ----------------------------------------------------------------------
@@ -1033,22 +1635,38 @@ void FixBAOABTether::update_dt()
     double rung_dt = dt_max / pow(2.0, dt_lvl);
     if (dt_c < 0.85 * rung_dt) {
       dt_lvl = MAX(dt_lvl + 1, (int) ceil(log(dt_max / dt_c) / log(2.0)));
-    } else if (dt_c > 1.25 * rung_dt && dt_lvl > 0) {
+    } else if (dt_c > 1.25 * rung_dt && dt_lvl > 0 && update->ntimestep >= dt_floor_until) {
+      // dt_floor_until (Attempt 7 Part B, preshrink only): skip relax-up
+      // while an end_of_step() emergency shrink's short backoff is still
+      // active -- om_unres above is blind to which atom justified that
+      // shrink, so without this guard a scheduled refresh right after it
+      // could raise dt_lvl back down before the atom has actually cleared
+      // the encounter.
       dt_lvl--;
     }
   }
 
   double dt_new = MAX(dt_min, MIN(dt_max, dt_max / pow(2.0, dt_lvl)));
+  apply_new_dt(dt_new);
+}
 
-  if (dt_new != update->dt) {
-    update->update_time();
-    update->dt = dt_new;
-    update->dt_default = 0;
-    if (utils::strmatch(update->integrate_style, "^respa")) update->integrate->reset_dt();
-    if (force->pair) force->pair->reset_dt();
-    for (const auto &ifix : modify->get_fix_list()) ifix->reset_dt();
-    output->reset_dt();
-  }
+/* ----------------------------------------------------------------------
+   single shared place that mutates update->dt (Attempt 7 Part B): factored
+   out of update_dt() so end_of_step()'s emergency shrink reuses the exact
+   same notification sequence (fix_dt_reset.cpp's own tail) instead of a
+   second, drifting copy of it.
+------------------------------------------------------------------------- */
+
+void FixBAOABTether::apply_new_dt(double dt_new)
+{
+  if (dt_new == update->dt) return;
+  update->update_time();
+  update->dt = dt_new;
+  update->dt_default = 0;
+  if (utils::strmatch(update->integrate_style, "^respa")) update->integrate->reset_dt();
+  if (force->pair) force->pair->reset_dt();
+  for (const auto &ifix : modify->get_fix_list()) ifix->reset_dt();
+  output->reset_dt();
 }
 
 /* ----------------------------------------------------------------------
@@ -1190,7 +1808,7 @@ void FixBAOABTether::solve_center(int i, double mi, double kT, double *cnew)
       int expo = MIN(demote_count[i], 6);
       bigint mult = ((bigint) 1) << expo;
       bigint backoff = MIN((bigint) refresh_every * 3 * mult, (bigint) 2000);
-      demote_atom(i, backoff);
+      demote_atom(i, backoff, "solve_center");
       for (int k = 0; k < 3; k++) cnew[k] = x[i][k];
     }
   }
@@ -1263,22 +1881,17 @@ bool FixBAOABTether::partial_force(int i, const double *xtrial, double *fout, do
   int jnum = list->numneigh[i];
 
   if (use_local_partial_force) {
-    // The clamped-center substitution above (real x[j] -> c[j] for a
-    // flagged neighbor) has no equivalent here -- local_partial_force()
-    // only ever sees real positions. Fail loud rather than silently
-    // computing the wrong curvature if a flagged neighbor is within jlist
-    // itself; a flagged atom reachable only through the pair style's own
-    // further hop is a residual, undetected gap (see pair_symmetrix_mace.cpp).
-    if (!live_neighbor_positions) {
-      for (int jj = 0; jj < jnum; jj++) {
-        int j = jlist[jj] & NEIGHMASK;
-        if (mask[j] & groupbit)
-          error->one(FLERR, "Fix baoab/tether: local_partial_force() does not support a "
-                             "flagged neighbor within the pair style's cutoff (clamped-center "
-                             "substitution unimplemented for this pair style)");
-      }
-    }
-    return force->pair->local_partial_force(i, xtrial, jnum, jlist, fout, fneigh);
+    // Mirror the clamped-center substitution used by the single()-based
+    // fallback below (real x[j] -> c[j] for a flagged neighbor, when
+    // !live_neighbor_positions): local_partial_force() applies this itself,
+    // internally, to every subgraph atom it reads (not just jlist), via the
+    // clamp_groupbit/clamp_c pair. c[] is kept forward-comm'd/PBC-shifted to
+    // match x[]'s image (see pack_forward_comm()/unpack_forward_comm()), so
+    // it is safe to hand to the pair style for ghost indices too.
+    int clamp_groupbit = live_neighbor_positions ? 0 : groupbit;
+    double *const *clamp_c = live_neighbor_positions ? nullptr : (double *const *) c;
+    return force->pair->local_partial_force(i, xtrial, jnum, jlist, fout, fneigh,
+                                             clamp_groupbit, clamp_c);
   }
 
   for (int jj = 0; jj < jnum; jj++) {
@@ -1499,6 +2112,8 @@ void FixBAOABTether::grow_arrays(int nmax)
   memory->grow(c, nmax, 3, "baoab/tether:c");
   memory->grow(evecs, nmax, 9, "baoab/tether:evecs");
   memory->grow(om, nmax, 3, "baoab/tether:om");
+  memory->grow(Hacc, nmax, 9, "baoab/tether:Hacc");
+  memory->grow(n_hess_samples, nmax, "baoab/tether:n_hess_samples");
   memory->grow(nJ, nmax, "baoab/tether:nJ");
   memory->grow(Jtag, nmax, JMAX, "baoab/tether:Jtag");
   memory->grow(Jblk, nmax, JMAX, 9, "baoab/tether:Jblk");
@@ -1515,12 +2130,24 @@ void FixBAOABTether::grow_arrays(int nmax)
   // existing atoms on the rare event of a mid-run atom-count growth (no fix
   // in this project's workloads inserts/removes atoms, so in practice this
   // only ever fires once, at construction, when it's a pure no-op).
+  //
+  // nJ must be zeroed here too: it is otherwise only ever written inside
+  // refresh_blocks() (once a block has actually been computed for that
+  // atom), so right after construction it holds whatever garbage malloc
+  // returned. copy_arrays()/pack_exchange()/unpack_exchange() all loop
+  // "for k < nJ[i]" over Jtag/Jblk -- and Atom::sort() can call
+  // copy_arrays() from inside Verlet::setup(), before refresh_blocks() has
+  // run for any atom. A garbage nJ[i] there is a real (and previously
+  // undetected) out-of-bounds read/write, not a hypothetical one.
   for (int i = 0; i < nmax; i++) {
     demote_count[i] = 0;
     last_demote[i] = 0;
     demote_cool[i] = 0;
     quench_exempt[i] = 0;
     last_ke[i] = 0.0;
+    nJ[i] = 0;
+    for (int a = 0; a < 9; a++) Hacc[i][a] = 0.0;
+    n_hess_samples[i] = 0;
   }
 }
 
@@ -1532,6 +2159,8 @@ void FixBAOABTether::copy_arrays(int i, int j, int /*delflag*/)
   for (int k = 0; k < 3; k++) c[j][k] = c[i][k];
   for (int k = 0; k < 9; k++) evecs[j][k] = evecs[i][k];
   for (int k = 0; k < 3; k++) om[j][k] = om[i][k];
+  for (int k = 0; k < 9; k++) Hacc[j][k] = Hacc[i][k];
+  n_hess_samples[j] = n_hess_samples[i];
 
   nJ[j] = nJ[i];
   for (int k = 0; k < nJ[i]; k++) {
@@ -1555,6 +2184,8 @@ int FixBAOABTether::pack_exchange(int i, double *buf)
   for (int k = 0; k < 3; k++) buf[m++] = c[i][k];
   for (int k = 0; k < 9; k++) buf[m++] = evecs[i][k];
   for (int k = 0; k < 3; k++) buf[m++] = om[i][k];
+  for (int k = 0; k < 9; k++) buf[m++] = Hacc[i][k];
+  buf[m++] = ubuf(n_hess_samples[i]).d;
 
   buf[m++] = ubuf(nJ[i]).d;
   for (int k = 0; k < nJ[i]; k++) {
@@ -1579,6 +2210,8 @@ int FixBAOABTether::unpack_exchange(int nlocal, double *buf)
   for (int k = 0; k < 3; k++) c[nlocal][k] = buf[m++];
   for (int k = 0; k < 9; k++) evecs[nlocal][k] = buf[m++];
   for (int k = 0; k < 3; k++) om[nlocal][k] = buf[m++];
+  for (int k = 0; k < 9; k++) Hacc[nlocal][k] = buf[m++];
+  n_hess_samples[nlocal] = (int) ubuf(buf[m++]).i;
 
   nJ[nlocal] = (int) ubuf(buf[m++]).i;
   for (int k = 0; k < nJ[nlocal]; k++) {

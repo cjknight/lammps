@@ -16,7 +16,7 @@ Syntax
 * damp = damping parameter (time units)
 * seed = random number seed (positive integer)
 * two or more keyword/value pairs must be appended
-* keyword = *theta* or *refresh* or *eps* or *mollify* or *newton_iters* or *newton_damp* or *solve_tol_rel* or *adapt* or *c_acc* or *dt_min* or *dt_max* or *ke_rel* or *gamma_quench*
+* keyword = *theta* or *refresh* or *eps* or *mollify* or *newton_iters* or *newton_damp* or *solve_tol_rel* or *adapt* or *c_acc* or *dt_min* or *dt_max* or *ke_rel* or *gamma_quench* or *refresh_skin* or *drift_response* or *event_log*
 
   .. parsed-literal::
 
@@ -55,6 +55,15 @@ Syntax
          while it is cooling down after a demotion event (time units,
          inverse), must be > 0 (optional; default 20.0; only used if
          *adapt* is *yes*)
+       *refresh_skin* value = excursion distance, beyond which an atom's
+         drift away from its last curvature refresh triggers an early
+         response (distance units), must be >= 0 (optional; default 0.0,
+         which disables this check entirely; only used if *adapt* is
+         *yes*)
+       *drift_response* value = *retether* or *preshrink* (optional;
+         default *retether*; only used if *refresh_skin* is > 0)
+       *event_log* value = filename for a per-atom/per-event diagnostic
+         log (optional; default none, which disables this log entirely)
 
 Examples
 """"""""
@@ -68,6 +77,10 @@ Examples
    fix 1 stiff baoab/tether 300.0 300.0 100.0 12345 theta 1.8 refresh 20 &
          mollify yes adapt yes c_acc 0.25 dt_min 0.0002 dt_max 0.01 &
          ke_rel 12.0 gamma_quench 20.0
+   fix 1 stiff baoab/tether 300.0 300.0 100.0 12345 theta 1.8 refresh 20 &
+         mollify yes adapt yes c_acc 0.25 dt_min 0.0002 dt_max 0.01 &
+         ke_rel 12.0 gamma_quench 20.0 refresh_skin 0.1 &
+         drift_response preshrink
 
 .. versionadded:: TBD
 
@@ -191,6 +204,53 @@ also given a brief, strong-friction thermostat kick (*gamma_quench*)
 while it cools down, so that legitimate kinetic energy does not linger in
 its now-unconstrained modes.
 
+----------
+
+.. versionadded:: TBD
+
+The *refresh_skin* keyword adds an early-warning excursion guard for an
+atom's soft (not currently stiff-treated) modes, which otherwise have no
+analytic tether and are invisible to the kinetic-energy-based event checks
+described above. Every timestep, while *refresh_skin* is greater than
+zero, each stiff atom's minimum-imaged displacement from its position at
+the last curvature refresh is compared against *refresh_skin*; exceeding
+it triggers the response selected by *drift_response* before the kinetic
+energy checks above run.
+
+With *drift_response* set to *preshrink* (the response validated for
+production use), no per-atom action is taken immediately. Instead, at the
+end of the timestep, this fix independently re-checks every candidate
+atom's drift against a freshly probed curvature estimate and, if any atom
+still needs it, lowers the timestep for the next step using the same
+quantized-power-of-two ladder *adapt yes* already uses elsewhere, so the
+atom's next step proceeds through the ordinary, unmodified integration
+path at a size small enough to keep it valid. A short-lived floor prevents
+the very next scheduled curvature refresh from relaxing the timestep back
+up before the atom that justified the shrink has had a chance to clear the
+encounter. With *drift_response* set to *retether* (the default, for
+backward compatibility with prior verification runs), the triggering
+atom instead has its curvature immediately re-probed at its current
+position and is handed a local, sub-stepped Cartesian integration for the
+remainder of the current timestep; this response has been superseded by
+*preshrink* for production use, since it was found to inject spurious
+kinetic energy when an atom's excursion invalidates its cached neighbor
+list before a genuine close encounter is resolved.
+
+----------
+
+.. versionadded:: TBD
+
+The *event_log* keyword writes a permanent, per-atom/per-event diagnostic
+log to the given filename, one line per curvature refresh, guard trip,
+demotion, or timestep preshrink. Each rank opens its own log file; when
+running on more than one MPI process, the rank number is appended to the
+filename so that each rank's local events land in a separate file. The
+log is flushed to disk after every line, so it survives up to the moment
+of a crash. Leaving *event_log* unset (the default) disables the log
+entirely, with no effect on this fix's behavior or performance.
+
+----------
+
 .. versionchanged:: TBD
 
 This fix detects the spectral gap and picks the timestep from the
@@ -311,4 +371,6 @@ defaults to 0.6. *solve_tol_rel* defaults to 0.005. *adapt* defaults to
 *no*. *c_acc* defaults to 0.25. *dt_min* defaults to 0.02 times the
 timestep in effect when this fix was defined. *dt_max* defaults to the
 timestep in effect when this fix was defined. *ke_rel* defaults to 12.0.
-*gamma_quench* defaults to 20.0.
+*gamma_quench* defaults to 20.0. *refresh_skin* defaults to 0.0.
+*drift_response* defaults to *retether*. *event_log* defaults to
+unset (disabled).

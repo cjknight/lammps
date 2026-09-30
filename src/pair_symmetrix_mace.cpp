@@ -39,9 +39,9 @@ PairSymmetrixMACE::PairSymmetrixMACE(LAMMPS *lmp)
   one_coeff = 1;
   manybody_flag = 1;
   no_virial_fdotr_compute = 1;
-  // WARNING: for mace, these variables are model-dependent, so i 
+  // WARNING: for mace, these variables are model-dependent, so i
   //          reset them after the model is loaded (in coeff).
-  //          however, i can't make them zero here, because that 
+  //          however, i can't make them zero here, because that
   //          confusingly yields seg faults with hybrid/overlay.
   //          so, i set them to a fairly big number here and hope.
   //          not a great solution.
@@ -668,6 +668,7 @@ void PairSymmetrixMACE::compute_no_mpi_message_passing(int eflag, int vflag)
     }
   }
 
+
   // ----- begin mace evaluation -----
 
   mace->node_energies.resize(num_local_nodes);
@@ -696,7 +697,7 @@ void PairSymmetrixMACE::compute_no_mpi_message_passing(int eflag, int vflag)
   mace->compute_H2(num_local_nodes, node_types);
 
   mace->compute_readouts(num_local_nodes, node_types);
-  
+
   mace->reverse_H2(num_local_nodes, node_types, false);
   mace->reverse_M1(num_local_nodes, node_types);
   mace->reverse_A1_scaled(num_local_nodes, node_types, num_neigh, neigh_types, xyz, r, false);
@@ -760,30 +761,55 @@ void PairSymmetrixMACE::compute_no_mpi_message_passing(int eflag, int vflag)
 
 // Local re-evaluation of the force on atom i if displaced to xtrial, holding
 // every other atom at its real position -- the many-body analog of single(),
-// used by e.g. fix baoab/tether's mollify-yes Newton solve. Builds the
-// minimal subgraph needed to get atom i's H2 (layer 2) exactly right: node 0
-// is i itself (at xtrial); the "ghost tier" is i's own r_cut neighbors (need
-// a correct H1 each, since node 0's H2 aggregates over them); one more hop
-// out contributes raw edge data only (so the ghost tier's own H1 comes out
-// right), with no node/H1 of its own. Mirrors
-// compute_no_mpi_message_passing()'s manual compute/reverse chain, sized
-// down to this subgraph, with fresh local vectors (not the class's own
-// scratch members) so this cannot alias a pair->compute() in flight.
+// used by e.g. fix baoab/tether's mollify-yes Newton solve.
+//
+// MACE is a 2-layer message-passing model, so atom i's force is
+// F_i = -sum_j dE_j/dx_i over every atom j whose OWN energy readout depends
+// on x_i -- every j within 2*r_cut of i, since j's H2 (layer 2) aggregates
+// its r_cut-neighbors' H1 (layer 1), and i can be a neighbor-of-a-neighbor
+// of j. An earlier version of this function built a minimal subgraph with a
+// readout for node 0 (i) only, which silently dropped every j != i
+// contribution and gave wrong forces whenever another atom's receptive
+// field reached back to i (confirmed by comparing against ground-truth
+// atom->f[i] on the H/Pd testbed). Rather than widen that subgraph (real
+// locality benefit only once r_cut << box size, not on today's testbeds;
+// see the design doc for the tiered-subgraph alternative kept on file for
+// when that changes), this function instead mirrors
+// compute_no_mpi_message_passing()'s own node/edge construction and full
+// compute/reverse chain verbatim -- readouts for every local atom, not just
+// i -- with every position read routed through pos() instead of raw
+// atom->x[], so the trial/clamp substitution below still applies. This
+// reproduces compute_no_mpi_message_passing()'s own result exactly when
+// clamp_groupbit == 0 and xtrial == atom->x[i], and costs about as much as
+// one pair->compute() pass per call -- accepted for correctness given
+// MACE's role here as an interim reference/teacher model, not a permanent
+// production force field.
+//
+// Fresh local vectors are used throughout (not the class's own scratch
+// members, which compute() owns), so this cannot alias a pair->compute()
+// in flight. It does not touch atom->f, eng_vdwl, or virial, but it does
+// overwrite mace's persistent internal scratch vectors (H1, A0, R0, ...),
+// which compute() also owns.
 //
 // Hard invariant: only safe to call between timesteps' pair->compute()
 // calls (fix_baoab_tether calls this from refresh_blocks()/solve_center(),
-// never interleaved with compute()) -- it does NOT touch atom->f, eng_vdwl,
-// or virial, but it does overwrite mace's persistent internal scratch
-// vectors (H1, A0, R0, ...), which compute() also owns.
+// never interleaved with compute()).
 //
-// Known limitation (documented, not fixed here): every subgraph atom uses
-// its real position unconditionally -- there is no access here to
-// fix_baoab_tether's per-atom clamped-center substitution for flagged
-// (rattler) neighbors. The fix guards against a flagged neighbor within
-// jlist itself; a flagged atom appearing only in the one-hop-further tier
-// is a residual, undetected gap.
+// Clamped-neighbor substitution: when clamp_groupbit != 0 and clamp_c !=
+// nullptr, any atom j (j != i) with atom->mask[j] & clamp_groupbit uses
+// clamp_c[j] instead of atom->x[j], matching the substitution the
+// single()-based fallback already applies per-pair in
+// FixBAOABTether::partial_force(). pos() is the single choke point for
+// every position read in this function, so the substitution applies
+// uniformly no matter how many hops separate the flagged atom from i --
+// including cases the pairwise single() path could never express in the
+// first place. atom->mask is valid for ghost indices (LAMMPS border comm
+// carries it for every atom style); clamp_c is expected to already be
+// forward-comm'd/PBC-shifted to match atom->x's image (see
+// FixBAOABTether::pack_forward_comm()).
 bool PairSymmetrixMACE::local_partial_force(int i, const double *xtrial, int jnum,
-                                             const int *jlist, double *fout, double *fneigh)
+                                             const int *jlist, double *fout, double *fneigh,
+                                             int clamp_groupbit, double *const *clamp_c)
 {
   fout[0] = fout[1] = fout[2] = 0.0;
   if (fneigh)
@@ -795,83 +821,92 @@ bool PairSymmetrixMACE::local_partial_force(int i, const double *xtrial, int jnu
 
   auto pos = [&](int idx, double *out) {
     if (idx == i) { out[0] = xtrial[0]; out[1] = xtrial[1]; out[2] = xtrial[2]; }
+    else if (clamp_groupbit && (atom->mask[idx] & clamp_groupbit)) {
+      out[0] = clamp_c[idx][0]; out[1] = clamp_c[idx][1]; out[2] = clamp_c[idx][2];
+    }
     else { out[0] = atom->x[idx][0]; out[1] = atom->x[idx][1]; out[2] = atom->x[idx][2]; }
   };
 
-  double xi_t[3];
-  pos(i, xi_t);
+  const int nall = atom->nlocal + atom->nghost;
 
-  // ghost tier: i's own neighbors within r_cut of the TRIAL position (same
-  // convention partial_force()'s pairwise path already uses: the cutoff
-  // test itself is evaluated against xtrial, so a neighbor can cross the
-  // boundary under the trial displacement).
-  std::vector<int> hop1;
-  {
-    int *jl = list->firstneigh[i];
-    int jn = list->numneigh[i];
-    hop1.reserve(jn);
+  // locate ghosts within r_cut of locals -- mirrors
+  // compute_no_mpi_message_passing()'s is_local/is_ghost discovery, with
+  // every position read going through pos().
+  std::vector<bool> l_is_local(nall, false);
+  for (int ii = 0; ii < list->inum; ++ii) l_is_local[list->ilist[ii]] = true;
+
+  std::vector<bool> l_is_ghost(nall, false);
+  for (int ii = 0; ii < list->inum; ++ii) {
+    const int li = list->ilist[ii];
+    double xli[3]; pos(li, xli);
+    int *jl = list->firstneigh[li];
+    const int jn = list->numneigh[li];
     for (int jj = 0; jj < jn; jj++) {
-      int j = jl[jj] & NEIGHMASK;
+      const int j = jl[jj] & NEIGHMASK;
       double xj[3]; pos(j, xj);
-      double dx = xj[0]-xi_t[0], dy = xj[1]-xi_t[1], dz = xj[2]-xi_t[2];
-      if (dx*dx+dy*dy+dz*dz < r_cut_squared) hop1.push_back(j);
+      const double dx = xj[0]-xli[0], dy = xj[1]-xli[1], dz = xj[2]-xli[2];
+      if ((dx*dx+dy*dy+dz*dz < r_cut_squared) && !l_is_local[j]) l_is_ghost[j] = true;
     }
   }
 
-  const int num_ghost_nodes = (int) hop1.size();
-  const int num_nodes = 1 + num_ghost_nodes;
+  const int num_local_nodes = list->inum;
+  int num_ghost_nodes = 0;
+  for (int ii = 0; ii < nall; ++ii)
+    if (l_is_ghost[ii]) num_ghost_nodes++;
 
+  std::vector<int> l_ghost_indices(num_ghost_nodes);
+  {
+    int k = 0;
+    for (int ii = 0; ii < nall; ++ii)
+      if (l_is_ghost[ii]) l_ghost_indices[k++] = ii;
+  }
+
+  const int num_nodes = num_local_nodes + num_ghost_nodes;
   std::vector<int> l_node_i(num_nodes), l_node_types(num_nodes), l_num_neigh(num_nodes, 0);
   std::unordered_map<int,int> l_ii_from_i;
-  l_node_i[0] = i;
-  l_ii_from_i[i] = 0;
-  l_node_types[0] = mace_types[atom->type[i]-1];
-  for (int g = 0; g < num_ghost_nodes; g++) {
-    l_node_i[1+g] = hop1[g];
-    l_ii_from_i[hop1[g]] = 1+g;
-    l_node_types[1+g] = mace_types[atom->type[hop1[g]]-1];
-  }
-  l_num_neigh[0] = num_ghost_nodes;
-  for (int g = 0; g < num_ghost_nodes; g++) {
-    int gi = hop1[g];
-    double xg[3]; pos(gi, xg);
-    int *jl = list->firstneigh[gi];
-    int jn = list->numneigh[gi];
+  l_ii_from_i.reserve(2*num_nodes);
+  for (int ii = 0; ii < num_nodes; ii++) {
+    const int ni = (ii < num_local_nodes) ? list->ilist[ii] : l_ghost_indices[ii-num_local_nodes];
+    l_node_i[ii] = ni;
+    l_ii_from_i[ni] = ii;
+    l_node_types[ii] = mace_types[atom->type[ni]-1];
+    double xn[3]; pos(ni, xn);
+    int *jl = list->firstneigh[ni];
+    const int jn = list->numneigh[ni];
     int cnt = 0;
-    for (int kk = 0; kk < jn; kk++) {
-      int k = jl[kk] & NEIGHMASK;
-      double xk[3]; pos(k, xk);
-      double dx = xk[0]-xg[0], dy = xk[1]-xg[1], dz = xk[2]-xg[2];
+    for (int jj = 0; jj < jn; jj++) {
+      const int j = jl[jj] & NEIGHMASK;
+      double xj[3]; pos(j, xj);
+      const double dx = xj[0]-xn[0], dy = xj[1]-xn[1], dz = xj[2]-xn[2];
       if (dx*dx+dy*dy+dz*dz < r_cut_squared) cnt++;
     }
-    l_num_neigh[1+g] = cnt;
+    l_num_neigh[ii] = cnt;
   }
 
-  int num_local_edges = l_num_neigh[0];
-  int num_edges = num_local_edges;
-  for (int g = 0; g < num_ghost_nodes; g++) num_edges += l_num_neigh[1+g];
+  int num_local_edges = 0;
+  for (int ii = 0; ii < num_local_nodes; ++ii) num_local_edges += l_num_neigh[ii];
+  int num_ghost_edges = 0;
+  for (int ii = num_local_nodes; ii < num_nodes; ++ii) num_ghost_edges += l_num_neigh[ii];
 
-  std::vector<int> l_neigh_j(num_edges), l_neigh_indices(num_edges, -1), l_neigh_types(num_edges);
+  const int num_edges = num_local_edges + num_ghost_edges;
+  std::vector<int> l_neigh_j(num_edges), l_neigh_indices(num_edges), l_neigh_types(num_edges);
   std::vector<double> l_xyz(3*num_edges), l_r(num_edges);
   {
     int ij = 0;
-    for (int ii = 0; ii < num_nodes; ii++) {
-      int ni = l_node_i[ii];
+    for (int ii = 0; ii < num_nodes; ++ii) {
+      const int ni = l_node_i[ii];
       double xn[3]; pos(ni, xn);
       int *jl = list->firstneigh[ni];
-      int jn = list->numneigh[ni];
-      for (int kk = 0; kk < jn; kk++) {
-        int k = jl[kk] & NEIGHMASK;
-        double xk[3]; pos(k, xk);
-        double dx = xk[0]-xn[0], dy = xk[1]-xn[1], dz = xk[2]-xn[2];
-        double rsq = dx*dx+dy*dy+dz*dz;
+      const int jn = list->numneigh[ni];
+      for (int jj = 0; jj < jn; jj++) {
+        const int j = jl[jj] & NEIGHMASK;
+        double xj[3]; pos(j, xj);
+        const double dx = xj[0]-xn[0], dy = xj[1]-xn[1], dz = xj[2]-xn[2];
+        const double rsq = dx*dx+dy*dy+dz*dz;
         if (rsq >= r_cut_squared) continue;
-        l_neigh_j[ij] = k;
-        l_neigh_types[ij] = mace_types[atom->type[k]-1];
-        if (ii == 0) {
-          auto it = l_ii_from_i.find(k);
-          l_neigh_indices[ij] = (it != l_ii_from_i.end()) ? it->second : -1;
-        }
+        l_neigh_j[ij] = j;
+        l_neigh_indices[ij] = l_ii_from_i[j];
+        l_neigh_types[ij] = mace_types[atom->type[j]-1];
         l_xyz[3*ij] = dx; l_xyz[3*ij+1] = dy; l_xyz[3*ij+2] = dz;
         l_r[ij] = std::sqrt(rsq);
         ij += 1;
@@ -879,11 +914,12 @@ bool PairSymmetrixMACE::local_partial_force(int i, const double *xtrial, int jnu
     }
   }
 
-  mace->node_energies.assign(1, 0.0);
+  mace->node_energies.assign(num_local_nodes, 0.0);
   mace->node_forces.assign(l_xyz.size(), 0.0);
   if (mace->has_zbl)
-    mace->zbl.compute_ZBL(1, l_node_types, l_num_neigh, l_neigh_types, mace->atomic_numbers, l_r,
-                           l_xyz, mace->node_energies, mace->node_forces);
+    mace->zbl.compute_ZBL(num_local_nodes, l_node_types, l_num_neigh, l_neigh_types,
+                           mace->atomic_numbers, l_r, l_xyz, mace->node_energies,
+                           mace->node_forces);
 
   mace->compute_Y(l_xyz);
   mace->compute_R0(num_nodes, l_node_types, l_num_neigh, l_neigh_types, l_r);
@@ -892,56 +928,81 @@ bool PairSymmetrixMACE::local_partial_force(int i, const double *xtrial, int jnu
   mace->compute_M0(num_nodes, l_node_types);
   mace->compute_H1(num_nodes);
 
-  mace->compute_R1(1, l_node_types, l_num_neigh, l_neigh_types, l_r);
-  mace->compute_Phi1(1, l_num_neigh, l_neigh_indices);
-  mace->compute_A1(1);
-  mace->compute_A1_scaled(1, l_node_types, l_num_neigh, l_neigh_types, l_r);
-  mace->compute_M1(1, l_node_types);
-  mace->compute_H2(1, l_node_types);
-  mace->compute_readouts(1, l_node_types);
+  mace->compute_R1(num_local_nodes, l_node_types, l_num_neigh, l_neigh_types, l_r);
+  mace->compute_Phi1(num_local_nodes, l_num_neigh, l_neigh_indices);
+  mace->compute_A1(num_local_nodes);
+  mace->compute_A1_scaled(num_local_nodes, l_node_types, l_num_neigh, l_neigh_types, l_r);
+  mace->compute_M1(num_local_nodes, l_node_types);
+  mace->compute_H2(num_local_nodes, l_node_types);
+  mace->compute_readouts(num_local_nodes, l_node_types);
 
-  mace->reverse_H2(1, l_node_types, false);
-  mace->reverse_M1(1, l_node_types);
-  mace->reverse_A1_scaled(1, l_node_types, l_num_neigh, l_neigh_types, l_xyz, l_r, false);
-  mace->reverse_A1(1);
-  mace->reverse_Phi1(1, l_num_neigh, l_neigh_indices, l_xyz, l_r, false, false);
+  mace->reverse_H2(num_local_nodes, l_node_types, false);
+  mace->reverse_M1(num_local_nodes, l_node_types);
+  mace->reverse_A1_scaled(num_local_nodes, l_node_types, l_num_neigh, l_neigh_types, l_xyz, l_r,
+                           false);
+  mace->reverse_A1(num_local_nodes);
+  mace->reverse_Phi1(num_local_nodes, l_num_neigh, l_neigh_indices, l_xyz, l_r, false, false);
 
   mace->reverse_H1(num_nodes);
   mace->reverse_M0(num_nodes, l_node_types);
   mace->reverse_A0_scaled(num_nodes, l_node_types, l_num_neigh, l_neigh_types, l_xyz, l_r);
   mace->reverse_A0(num_nodes, l_node_types, l_num_neigh, l_neigh_types, l_xyz, l_r);
 
-  std::vector<double> local_force(3*num_nodes, 0.0);
+  // Accumulate into a buffer indexed by RAW atom index (mirroring how
+  // compute_no_mpi_message_passing() accumulates into atom->f directly),
+  // not by node index: a ghost-tier node's own neighbor ("hop-3", raw edge
+  // data only) need not itself be a node, so mapping it back through
+  // l_ii_from_i would either need a defensive check on every edge or
+  // silently misattribute the reaction force via operator[]'s "insert a 0"
+  // behavior on a missing key. Sizing by nall and indexing directly with
+  // node_i[]/neigh_j[]'s raw indices sidesteps the issue entirely.
+  std::vector<double> local_force(3*nall, 0.0);
   {
     int ij = 0;
-    for (int ii = 0; ii < num_nodes; ii++) {
-      for (int jj = 0; jj < l_num_neigh[ii]; jj++) {
-        int j = l_neigh_j[ij];
-        local_force[3*ii]   -= mace->node_forces[3*ij];
-        local_force[3*ii+1] -= mace->node_forces[3*ij+1];
-        local_force[3*ii+2] -= mace->node_forces[3*ij+2];
-        auto it = l_ii_from_i.find(j);
-        if (it != l_ii_from_i.end()) {
-          local_force[3*it->second]   += mace->node_forces[3*ij];
-          local_force[3*it->second+1] += mace->node_forces[3*ij+1];
-          local_force[3*it->second+2] += mace->node_forces[3*ij+2];
-        }
+    for (int ii = 0; ii < num_nodes; ++ii) {
+      const int ni = l_node_i[ii];
+      for (int jj = 0; jj < l_num_neigh[ii]; ++jj) {
+        const int j = l_neigh_j[ij];
+        local_force[3*ni]   -= mace->node_forces[3*ij];
+        local_force[3*ni+1] -= mace->node_forces[3*ij+1];
+        local_force[3*ni+2] -= mace->node_forces[3*ij+2];
+        local_force[3*j]    += mace->node_forces[3*ij];
+        local_force[3*j+1]  += mace->node_forces[3*ij+1];
+        local_force[3*j+2]  += mace->node_forces[3*ij+2];
         ij += 1;
       }
     }
   }
 
-  fout[0] = local_force[0]; fout[1] = local_force[1]; fout[2] = local_force[2];
+  // compute_no_mpi_message_passing() accumulates the final force the same
+  // way (raw-index, including ghost-tier nodes' own edges), and relies on
+  // the outer Verlet loop's comm->reverse_comm() -- called after
+  // pair->compute() returns -- to fold each ghost atom's accumulated
+  // partial force back onto its true local owner. This function never
+  // goes through that path, so it must fold locally: with the periodic
+  // box smaller than 2*r_cut, an atom's own ghost image is routinely a
+  // separate node/edge-target in this graph and can carry a real share of
+  // that atom's total force.
+  for (int idx = atom->nlocal; idx < nall; ++idx) {
+    if (local_force[3*idx] == 0.0 && local_force[3*idx+1] == 0.0 && local_force[3*idx+2] == 0.0)
+      continue;
+    const int owner = atom->map(atom->tag[idx]);
+    if (owner < 0) continue;
+    local_force[3*owner]   += local_force[3*idx];
+    local_force[3*owner+1] += local_force[3*idx+1];
+    local_force[3*owner+2] += local_force[3*idx+2];
+  }
+
+  fout[0] = local_force[3*i]; fout[1] = local_force[3*i+1]; fout[2] = local_force[3*i+2];
 
   if (fneigh) {
     for (int jj = 0; jj < jnum; jj++) {
-      int j = jlist[jj] & NEIGHMASK;
-      auto it = l_ii_from_i.find(j);
-      if (it != l_ii_from_i.end() && it->second != 0) {
-        fneigh[3*jj]   = local_force[3*it->second];
-        fneigh[3*jj+1] = local_force[3*it->second+1];
-        fneigh[3*jj+2] = local_force[3*it->second+2];
-      }
+      const int j = jlist[jj] & NEIGHMASK;
+      const int j_owner = (j < atom->nlocal) ? j : atom->map(atom->tag[j]);
+      const int jr = (j_owner >= 0) ? j_owner : j;
+      fneigh[3*jj]   = local_force[3*jr];
+      fneigh[3*jj+1] = local_force[3*jr+1];
+      fneigh[3*jj+2] = local_force[3*jr+2];
     }
   }
 
