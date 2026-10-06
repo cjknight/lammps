@@ -45,6 +45,8 @@ class PairSymmetrixMACEKokkos : public Pair, public KokkosBase {
   void coeff(int, char **) override;
   double init_one(int, int) override;
   void init_style() override;
+  bool local_partial_force(int, const double *, int, const int *, double *, double *,
+                            int = 0, double *const * = nullptr) override;
   int pack_forward_comm(int, int *, double *, int, int *) override;
   int pack_forward_comm_kokkos(int, DAT::tdual_int_1d, DAT::tdual_double_1d&, int, int*) override;
   void unpack_forward_comm(int, int, double *) override;
@@ -73,6 +75,23 @@ class PairSymmetrixMACEKokkos : public Pair, public KokkosBase {
   Kokkos::View<int*> neigh_ii_indices;
   Kokkos::View<double*> xyz;
   Kokkos::View<double*> r;
+
+  // local_partial_force() scratch: flattened clamp_c/clamp_groupbit override
+  // (sized nlocal+nghost, rebuilt fresh each call) and the reduced per-atom
+  // force buffer local_partial_force() accumulates into instead of atom->f.
+  // LayoutRight (not the device-space default, LayoutLeft on GPU backends)
+  // is required here: these buffers only grow (never shrink) across calls,
+  // so a later call with a smaller nall takes a Kokkos::make_pair(0, nall)
+  // prefix subview of a larger backing allocation. With LayoutRight, atom
+  // index is the slow dimension, so that prefix is always a contiguous run
+  // of the flat buffer; with LayoutLeft it is not, which made
+  // create_mirror_view_and_copy() fail cross-space ("no common execution
+  // space ... must be contiguous and have the same layout") the first time
+  // nall decreased between calls on a real device backend. Host-backend
+  // builds never exposed this, since there src and dst are the same memory.
+  Kokkos::View<int*> d_clamp_active;
+  Kokkos::View<double*[3], Kokkos::LayoutRight> d_clamp_pos;
+  Kokkos::View<double*[3], Kokkos::LayoutRight> d_local_force;
 
   const std::array<std::string,118> periodic_table =
     { "H", "He",

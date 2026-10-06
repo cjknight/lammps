@@ -127,6 +127,7 @@ void PairSymmetrixMACEKokkos<DeviceType, Precision>::settings(int narg, char **a
     error->all(FLERR, "Cannot use no_domain_decomposition with multiple MPI processes");
 
   ghostneigh = (mode == "no_mpi_message_passing");
+  has_local_partial_force = (mode == "no_mpi_message_passing");
 }
 
 /* ----------------------------------------------------------------------
@@ -1192,6 +1193,401 @@ void PairSymmetrixMACEKokkos<DeviceType, Precision>::compute_no_mpi_message_pass
 
   if (vflag_atom)
     error->all(FLERR, "Atomic virials not yet supported by pair_style symmetrix/mace/kk.");
+}
+
+/* ---------------------------------------------------------------------- */
+
+namespace {
+// Trial-position/clamp override consulted by every position read in
+// local_partial_force()'s graph-construction and message-passing kernels
+// below, in place of a direct x(idx,c) read: atom i_trial reads back
+// xtrial; any other atom flagged in clamp_active reads back clamp_pos;
+// everyone else reads x() unchanged. Device-kernel form of the serial
+// PairSymmetrixMACE::local_partial_force()'s pos() lambda
+// (pair_symmetrix_mace.cpp).
+struct MaceTrialPosition {
+  int i_trial = -1;
+  double x0 = 0.0, x1 = 0.0, x2 = 0.0;
+  bool has_clamp = false;
+  Kokkos::View<int*> clamp_active;
+  // Must match d_clamp_pos's explicit LayoutRight (pair_symmetrix_mace_kokkos.h)
+  // -- a plain Kokkos::View<double*[3]> here takes the device space's default
+  // layout (LayoutLeft on GPU backends), and View assignment across mismatched
+  // multi-dim layouts doesn't compile, only compiling by accident on backends
+  // where the default happens to be LayoutRight (e.g. Host).
+  Kokkos::View<double*[3], Kokkos::LayoutRight> clamp_pos;
+
+  template<class XView>
+  KOKKOS_INLINE_FUNCTION
+  void get(int idx, const XView &x, double &px, double &py, double &pz) const
+  {
+    if (idx == i_trial) {
+      px = x0; py = x1; pz = x2;
+    } else if (has_clamp && clamp_active(idx)) {
+      px = clamp_pos(idx,0); py = clamp_pos(idx,1); pz = clamp_pos(idx,2);
+    } else {
+      px = x(idx,0); py = x(idx,1); pz = x(idx,2);
+    }
+  }
+};
+}    // namespace
+
+/* ----------------------------------------------------------------------
+   local re-evaluation of the force on atom i if displaced to xtrial (see
+   Pair::local_partial_force()'s doc comment, pair.h). Mirrors the serial
+   PairSymmetrixMACE::local_partial_force() (pair_symmetrix_mace.cpp)
+   exactly: same full node/edge graph construction and full forward/reverse
+   MACE chain as compute_no_mpi_message_passing() (every local atom gets a
+   readout, not just i -- MACE is a 2-layer message-passing model, so F_i
+   depends on every atom within 2*r_cut), with every position read routed
+   through a MaceTrialPosition override instead of a direct x(idx,c) read.
+   Reuses the same persistent `mace` scratch state compute() uses -- only
+   safe to call between ordinary pair->compute() calls, exactly the
+   serial reference's own documented invariant.
+
+   Only gated on (confirmed in settings()) mode == "no_mpi_message_passing",
+   matching the serial style's own scope.
+
+   This call arrives from fix_baoab_tether's initial_integrate()/
+   final_integrate(), which is NOT one of VerletKokkos's bracketed
+   per-style sync call sites (see src/KOKKOS/verlet_kokkos.cpp) -- so,
+   unlike the otherwise-identical-looking sync at the top of
+   compute_no_mpi_message_passing(), the entry sync below is load-bearing,
+   not redundant.
+------------------------------------------------------------------------- */
+
+template<class DeviceType, typename Precision>
+bool PairSymmetrixMACEKokkos<DeviceType, Precision>::local_partial_force(
+    int i, const double *xtrial, int jnum, const int *jlist, double *fout, double *fneigh,
+    int clamp_groupbit, double *const *clamp_c)
+{
+  fout[0] = fout[1] = fout[2] = 0.0;
+  if (fneigh)
+    for (int jj = 0; jj < jnum; jj++) fneigh[3*jj] = fneigh[3*jj+1] = fneigh[3*jj+2] = 0.0;
+
+  if (mode != "no_mpi_message_passing" || !list) return false;
+
+  atomKK->sync(execution_space, X_MASK|TYPE_MASK|MASK_MASK);
+
+  const int nall = atom->nlocal + atom->nghost;
+  const double r_cut_squared = mace->r_cut*mace->r_cut;
+
+  // Flatten the host-resident clamp_c/clamp_groupbit substitution (see
+  // pair.h's doc comment) into device views, rebuilt fresh each call -- same
+  // cost order as the host-side mask scan it replaces.
+  const bool has_clamp = (clamp_groupbit != 0 && clamp_c != nullptr);
+  if ((int) d_clamp_active.extent(0) < nall) {
+    Kokkos::realloc(d_clamp_active, nall);
+    Kokkos::realloc(d_clamp_pos, nall);
+  }
+  auto clamp_active = Kokkos::subview(d_clamp_active, Kokkos::make_pair(0, nall));
+  auto clamp_pos = Kokkos::subview(d_clamp_pos, Kokkos::make_pair(0, nall), Kokkos::ALL());
+  if (has_clamp) {
+    auto h_active = Kokkos::create_mirror_view(clamp_active);
+    auto h_pos = Kokkos::create_mirror_view(clamp_pos);
+    const int *amask = atom->mask;
+    for (int idx = 0; idx < nall; idx++) {
+      if (amask[idx] & clamp_groupbit) {
+        h_active(idx) = 1;
+        h_pos(idx,0) = clamp_c[idx][0];
+        h_pos(idx,1) = clamp_c[idx][1];
+        h_pos(idx,2) = clamp_c[idx][2];
+      } else {
+        h_active(idx) = 0;
+      }
+    }
+    Kokkos::deep_copy(clamp_active, h_active);
+    Kokkos::deep_copy(clamp_pos, h_pos);
+  } else {
+    Kokkos::deep_copy(clamp_active, 0);
+  }
+
+  MaceTrialPosition ov;
+  ov.i_trial = i;
+  ov.x0 = xtrial[0]; ov.x1 = xtrial[1]; ov.x2 = xtrial[2];
+  ov.has_clamp = has_clamp;
+  ov.clamp_active = clamp_active;
+  ov.clamp_pos = clamp_pos;
+
+  NeighListKokkos<DeviceType>* k_list = static_cast<NeighListKokkos<DeviceType>*>(list);
+  auto d_numneigh = k_list->d_numneigh;
+  auto d_neighbors = k_list->d_neighbors;
+  auto d_ilist = k_list->d_ilist;
+
+  auto x = atomKK->k_x.view<DeviceType>();
+  auto type = atomKK->k_type.view<DeviceType>();
+
+  // ----- graph construction: same structure as
+  // compute_no_mpi_message_passing(), every position read via ov.get(). -----
+
+  auto is_local = Kokkos::Bitset(nall);
+  Kokkos::parallel_for("local_partial_force: fill is_local",
+    list->inum,
+    KOKKOS_LAMBDA (const int ii) {
+      const int ni = d_ilist(ii);
+      is_local.set(ni);
+    });
+  Kokkos::fence();
+  auto is_ghost = Kokkos::Bitset(nall);
+  Kokkos::parallel_for("local_partial_force: fill is_ghost",
+    Kokkos::TeamPolicy<>(list->inum, Kokkos::AUTO),
+    KOKKOS_LAMBDA (Kokkos::TeamPolicy<>::member_type team_member) {
+      const int ii = team_member.league_rank();
+      const int ni = d_ilist(ii);
+      double xi, yi, zi;
+      ov.get(ni, x, xi, yi, zi);
+      Kokkos::parallel_for(
+        Kokkos::TeamThreadRange(team_member, d_numneigh(ni)),
+        [&] (const int jj) {
+          const int j = (d_neighbors(ni,jj) & NEIGHMASK);
+          double xj, yj, zj;
+          ov.get(j, x, xj, yj, zj);
+          const double dx = xj-xi, dy = yj-yi, dz = zj-zi;
+          const double r_squared = dx*dx + dy*dy + dz*dz;
+          if (r_squared<r_cut_squared and not is_local.test(j))
+            is_ghost.set(j);
+        });
+    });
+  Kokkos::fence();
+
+  const int num_local_nodes = list->inum;
+  const int num_ghost_nodes = is_ghost.count();
+
+  auto ghost_indices = Kokkos::View<int*>("local_partial_force: ghost_indices", num_ghost_nodes);
+  Kokkos::parallel_scan("local_partial_force: populate ghost_indices",
+    is_ghost.size(),
+    KOKKOS_LAMBDA(int idx, int& update, const bool final) {
+      if (final && is_ghost.test(idx)) ghost_indices(update) = idx;
+      update += is_ghost.test(idx);
+    });
+  Kokkos::fence();
+
+  if (node_indices.size() < num_local_nodes+num_ghost_nodes)
+    Kokkos::realloc(node_indices, num_local_nodes+num_ghost_nodes);
+  if (node_types.size() < num_local_nodes+num_ghost_nodes)
+    Kokkos::realloc(node_types, num_local_nodes+num_ghost_nodes);
+  if (num_neigh.size() < num_local_nodes+num_ghost_nodes)
+    Kokkos::realloc(num_neigh, num_local_nodes+num_ghost_nodes);
+  auto node_indices = Kokkos::subview(this->node_indices, Kokkos::make_pair(0,num_local_nodes+num_ghost_nodes));
+  auto node_types = Kokkos::subview(this->node_types, Kokkos::make_pair(0,num_local_nodes+num_ghost_nodes));
+  auto num_neigh = Kokkos::subview(this->num_neigh, Kokkos::make_pair(0,num_local_nodes+num_ghost_nodes));
+  Kokkos::deep_copy(num_neigh, 0);
+  auto mace_types = this->mace_types;
+  Kokkos::parallel_for("local_partial_force: populate node-based views",
+    Kokkos::TeamPolicy<>(num_local_nodes+num_ghost_nodes, Kokkos::AUTO),
+    KOKKOS_LAMBDA (Kokkos::TeamPolicy<>::member_type team_member) {
+      const int ii = team_member.league_rank();
+      const int ni = (ii<num_local_nodes) ? d_ilist(ii) : ghost_indices(ii-num_local_nodes);
+      node_indices(ii) = ni;
+      node_types(ii) = mace_types(type(ni)-1);
+      double xi, yi, zi;
+      ov.get(ni, x, xi, yi, zi);
+      Kokkos::parallel_reduce(
+        Kokkos::TeamThreadRange(team_member, d_numneigh(ni)),
+        [&] (const int jj, int& num_neigh_ii) {
+          const int j = (d_neighbors(ni,jj) & NEIGHMASK);
+          double xj, yj, zj;
+          ov.get(j, x, xj, yj, zj);
+          const double dx = xj-xi, dy = yj-yi, dz = zj-zi;
+          const double r_squared = dx*dx + dy*dy + dz*dz;
+          if (r_squared < r_cut_squared)
+            num_neigh_ii += 1;
+        }, num_neigh(ii));
+    });
+  Kokkos::fence();
+
+  int num_local_edges;
+  Kokkos::parallel_reduce("local_partial_force: count local edges",
+    num_local_nodes,
+    KOKKOS_LAMBDA (const int ii, int& acc) {
+      acc += num_neigh(ii);
+    }, num_local_edges);
+  int num_ghost_edges;
+  Kokkos::parallel_reduce("local_partial_force: count ghost edges",
+    Kokkos::RangePolicy<>(num_local_nodes, num_local_nodes+num_ghost_nodes),
+    KOKKOS_LAMBDA (const int ii, int& acc) {
+      acc += num_neigh(ii);
+    }, num_ghost_edges);
+  Kokkos::fence();
+
+  if (first_neigh.size() < num_local_nodes+num_ghost_nodes)
+    Kokkos::realloc(first_neigh, num_local_nodes+num_ghost_nodes);
+  auto first_neigh = Kokkos::subview(this->first_neigh, Kokkos::make_pair(0,num_local_nodes+num_ghost_nodes));
+  Kokkos::parallel_scan("local_partial_force: populate first neighbor",
+    num_local_nodes+num_ghost_nodes,
+    KOKKOS_LAMBDA (const int ii, int& acc, const bool final) {
+      if (final) first_neigh(ii) = acc;
+      acc += num_neigh(ii);
+    });
+  Kokkos::fence();
+
+  if (neigh_indices.size() < num_local_edges+num_ghost_edges)
+    Kokkos::realloc(neigh_indices, num_local_edges+num_ghost_edges);
+  if (neigh_types.size() < num_local_edges+num_ghost_edges)
+    Kokkos::realloc(neigh_types, num_local_edges+num_ghost_edges);
+  if (xyz.size() < 3*(num_local_edges+num_ghost_edges))
+    Kokkos::realloc(xyz, 3*(num_local_edges+num_ghost_edges));
+  if (r.size() < num_local_edges+num_ghost_edges)
+    Kokkos::realloc(r, num_local_edges+num_ghost_edges);
+  auto neigh_indices = Kokkos::subview(this->neigh_indices, Kokkos::make_pair(0,num_local_edges+num_ghost_edges));
+  auto neigh_types = Kokkos::subview(this->neigh_types, Kokkos::make_pair(0,num_local_edges+num_ghost_edges));
+  auto xyz = Kokkos::subview(this->xyz, Kokkos::make_pair(0,3*(num_local_edges+num_ghost_edges)));
+  auto r = Kokkos::subview(this->r, Kokkos::make_pair(0,num_local_edges+num_ghost_edges));
+  Kokkos::parallel_for("local_partial_force: populate edge-based views",
+    num_local_nodes+num_ghost_nodes,
+    KOKKOS_LAMBDA (const int ii) {
+      const int ni = node_indices(ii);
+      double xi, yi, zi;
+      ov.get(ni, x, xi, yi, zi);
+      int ij = first_neigh(ii);
+      for (int jj=0; jj<d_numneigh(ni); ++jj) {
+        const int j = (d_neighbors(ni,jj) & NEIGHMASK);
+        double xj, yj, zj;
+        ov.get(j, x, xj, yj, zj);
+        const double dx = xj-xi, dy = yj-yi, dz = zj-zi;
+        const double r_squared = dx*dx + dy*dy + dz*dz;
+        if (r_squared < r_cut_squared) {
+          neigh_indices(ij) = j;
+          neigh_types(ij) = mace_types(type(j)-1);
+          xyz(3*ij) = dx;
+          xyz(3*ij+1) = dy;
+          xyz(3*ij+2) = dz;
+          r(ij) = std::sqrt(r_squared);
+          ij += 1;
+        }
+      }
+  });
+  Kokkos::fence();
+
+  if (neigh_ii_indices.size() < num_local_edges)
+    Kokkos::realloc(neigh_ii_indices, num_local_edges);
+  auto neigh_ii_indices = Kokkos::subview(this->neigh_ii_indices, Kokkos::make_pair(0,num_local_edges));
+  Kokkos::parallel_for("local_partial_force: populate neigh_ii_indices",
+    num_local_edges,
+    KOKKOS_LAMBDA (const int ij) {
+      const int j = neigh_indices(ij);
+      for (int ii=0; ii<num_local_nodes+num_ghost_nodes; ++ii) {
+        if (node_indices(ii) == j) {
+          neigh_ii_indices(ij) = ii;
+          break;
+        }
+      }
+    });
+  Kokkos::fence();
+
+  // ----- begin mace evaluation: identical call sequence to
+  // compute_no_mpi_message_passing(), reusing the same persistent `mace`
+  // scratch state -- safe only between ordinary pair->compute() calls. -----
+
+  if (mace->node_energies.size() < num_local_nodes)
+    Kokkos::realloc(mace->node_energies, num_local_nodes);
+  Kokkos::deep_copy(mace->node_energies, 0.0);
+  if (mace->node_forces.size() < 3*(num_local_edges+num_ghost_edges))
+    Kokkos::realloc(mace->node_forces, 3*(num_local_edges+num_ghost_edges));
+  Kokkos::deep_copy(mace->node_forces, 0.0);
+
+  if (mace->has_zbl)
+    mace->zbl.compute_ZBL(
+      num_local_nodes, node_types, num_neigh, neigh_types,
+      mace->atomic_numbers, r, xyz, mace->node_energies, mace->node_forces);
+
+  mace->compute_Y(xyz);
+
+  mace->compute_R0(num_local_nodes+num_ghost_nodes, node_types, num_neigh, neigh_types, r);
+  mace->compute_A0(num_local_nodes+num_ghost_nodes, node_types, num_neigh, neigh_types);
+  mace->compute_A0_scaled(num_local_nodes+num_ghost_nodes, node_types, num_neigh, neigh_types, r);
+  mace->compute_M0(num_local_nodes+num_ghost_nodes, node_types);
+  mace->compute_H1(num_local_nodes+num_ghost_nodes);
+
+  mace->compute_R1(num_local_nodes, node_types, num_neigh, neigh_types, r);
+  mace->compute_Phi1(num_local_nodes, num_neigh, neigh_ii_indices);
+  mace->compute_A1(num_local_nodes);
+  mace->compute_A1_scaled(num_local_nodes, node_types, num_neigh, neigh_types, r);
+  mace->compute_M1(num_local_nodes, node_types);
+  mace->compute_H2(num_local_nodes, node_types);
+
+  mace->compute_readouts(num_local_nodes, node_types);
+
+  mace->reverse_H2(num_local_nodes, node_types, false);
+  mace->reverse_M1(num_local_nodes, node_types);
+  mace->reverse_A1_scaled(num_local_nodes, node_types, num_neigh, neigh_types, xyz, r);
+  mace->reverse_A1(num_local_nodes);
+  mace->reverse_Phi1(num_local_nodes, num_neigh, neigh_ii_indices, xyz, r, false, false);
+
+  mace->reverse_H1(num_local_nodes+num_ghost_nodes);
+  mace->reverse_M0(num_local_nodes+num_ghost_nodes, node_types);
+  mace->reverse_A0_scaled(num_local_nodes+num_ghost_nodes, node_types, num_neigh, neigh_types, xyz, r);
+  mace->reverse_A0(num_local_nodes+num_ghost_nodes, node_types, num_neigh, neigh_types, xyz, r);
+
+  // ----- end mace evaluation -----
+
+  // Accumulate into a private buffer -- never atom->f/eng_vdwl/virial --
+  // via the same per-edge +/- split compute_no_mpi_message_passing() uses
+  // for its own force-reduction kernel.
+  if ((int) d_local_force.extent(0) < nall)
+    Kokkos::realloc(d_local_force, nall);
+  auto d_local_force = Kokkos::subview(this->d_local_force, Kokkos::make_pair(0, nall), Kokkos::ALL());
+  Kokkos::deep_copy(d_local_force, 0.0);
+
+  auto mace_node_forces = mace->node_forces;
+  Kokkos::parallel_for("local_partial_force: force reduction",
+    Kokkos::TeamPolicy<>(num_local_nodes+num_ghost_nodes, Kokkos::AUTO),
+    KOKKOS_LAMBDA (Kokkos::TeamPolicy<>::member_type team_member) {
+      const int ii = team_member.league_rank();
+      const int ni = node_indices(ii);
+      double f_x, f_y, f_z;
+      Kokkos::parallel_reduce(
+        Kokkos::TeamThreadRange(team_member, num_neigh(ii)),
+        [&] (const int jj, double& fx_, double& fy_, double& fz_) {
+          const int ij = first_neigh(ii) + jj;
+          const int j = neigh_indices(ij);
+          fx_ += mace_node_forces(3*ij);
+          fy_ += mace_node_forces(3*ij+1);
+          fz_ += mace_node_forces(3*ij+2);
+          Kokkos::atomic_add(&d_local_force(j,0), mace_node_forces(3*ij));
+          Kokkos::atomic_add(&d_local_force(j,1), mace_node_forces(3*ij+1));
+          Kokkos::atomic_add(&d_local_force(j,2), mace_node_forces(3*ij+2));
+        }, f_x, f_y, f_z);
+      Kokkos::single(Kokkos::PerTeam(team_member), [&]() {
+        Kokkos::atomic_add(&d_local_force(ni,0), -f_x);
+        Kokkos::atomic_add(&d_local_force(ni,1), -f_y);
+        Kokkos::atomic_add(&d_local_force(ni,2), -f_z);
+      });
+    });
+  Kokkos::fence();
+
+  // Host handoff: one deep_copy of the already-O(N)-reduced buffer, then the
+  // same atom->map()-based ghost-to-owner fold the serial reference performs
+  // (this function never goes through comm->reverse_comm()). The expensive
+  // forward+reverse MACE chain above is fully device-resident; only this
+  // small, already-reduced bookkeeping step touches the host.
+  auto h_local_force = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), d_local_force);
+
+  for (int idx = atom->nlocal; idx < nall; ++idx) {
+    if (h_local_force(idx,0) == 0.0 && h_local_force(idx,1) == 0.0 && h_local_force(idx,2) == 0.0) continue;
+    const int owner = atom->map(atom->tag[idx]);
+    if (owner < 0) continue;
+    h_local_force(owner,0) += h_local_force(idx,0);
+    h_local_force(owner,1) += h_local_force(idx,1);
+    h_local_force(owner,2) += h_local_force(idx,2);
+  }
+
+  fout[0] = h_local_force(i,0);
+  fout[1] = h_local_force(i,1);
+  fout[2] = h_local_force(i,2);
+
+  if (fneigh) {
+    for (int jj = 0; jj < jnum; jj++) {
+      const int j = jlist[jj] & NEIGHMASK;
+      const int j_owner = (j < atom->nlocal) ? j : atom->map(atom->tag[j]);
+      const int jr = (j_owner >= 0) ? j_owner : j;
+      fneigh[3*jj] = h_local_force(jr,0);
+      fneigh[3*jj+1] = h_local_force(jr,1);
+      fneigh[3*jj+2] = h_local_force(jr,2);
+    }
+  }
+
+  return true;
 }
 
 /* ---------------------------------------------------------------------- */

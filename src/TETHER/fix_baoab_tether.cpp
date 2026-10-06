@@ -12,6 +12,7 @@
 
 #include "fix_baoab_tether.h"
 
+#include "accelerator_kokkos.h"
 #include "angle.h"
 #include "atom.h"
 #include "bond.h"
@@ -647,6 +648,14 @@ void FixBAOABTether::initial_integrate(int /*vflag*/)
     }
   }
 
+  // x[]/v[] above were written through atom->x/atom->v raw pointers, which
+  // VerletKokkos's initial_integrate() dispatch does not bracket with its
+  // own sync/modified (unlike its per-style pair/bond/... compute() calls,
+  // see src/KOKKOS/verlet_kokkos.cpp) -- so a subsequent Kokkos pair style's
+  // own bracketed sync could otherwise see a stale "device already current"
+  // flag. Same idiom as the SPECIAL_MASK hook in special.cpp.
+  if (lmp->kokkos) dynamic_cast<AtomKokkos *>(atom)->modified(Host, X_MASK | V_MASK);
+
   // sub_step_free_atom() may have set need_reneighbor (rank-local) if a
   // drift_hot atom's local excursion hit its safe-displacement cap this
   // step. Allreduce before acting -- same requirement as need_refresh
@@ -714,6 +723,8 @@ void FixBAOABTether::final_integrate()
     v[i][2] += dtfm * (f[i][2] + fcorr[2]);
   }
 
+  // see the matching comment in initial_integrate()
+  if (lmp->kokkos) dynamic_cast<AtomKokkos *>(atom)->modified(Host, V_MASK);
 }
 
 /* ----------------------------------------------------------------------
