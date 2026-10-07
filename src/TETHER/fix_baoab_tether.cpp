@@ -90,6 +90,9 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
 {
   theta = -1.0;
   refresh_every = -1;
+  promote_every = 0;
+  settle_confirm = 0;
+  settle_streak = 0;
   eps = 0.0;
   eps_was_set = 0;
   heff_samples = 0;
@@ -107,6 +110,7 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   ke_rel = 12.0;
   gamma_quench = 20.0;
   refresh_skin = 0.0;
+  refresh_skin_rel = 0.0;
   drift_response = 0;
   om_split = 0.0;
   om_split_set = 0;
@@ -121,6 +125,14 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
     } else if (strcmp(arg[iarg], "refresh") == 0) {
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether refresh", error);
       refresh_every = utils::inumeric(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "promote_every") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether promote_every", error);
+      promote_every = utils::inumeric(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "settle_confirm") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether settle_confirm", error);
+      settle_confirm = utils::inumeric(FLERR, arg[iarg + 1], false, lmp);
       iarg += 2;
     } else if (strcmp(arg[iarg], "eps") == 0) {
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether eps", error);
@@ -175,6 +187,10 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether refresh_skin", error);
       refresh_skin = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
       iarg += 2;
+    } else if (strcmp(arg[iarg], "refresh_skin_rel") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether refresh_skin_rel", error);
+      refresh_skin_rel = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 2;
     } else if (strcmp(arg[iarg], "drift_response") == 0) {
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether drift_response", error);
       if (strcmp(arg[iarg + 1], "retether") == 0)
@@ -195,6 +211,8 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
 
   if (theta <= 0.0) error->all(FLERR, "Fix baoab/tether theta must be > 0");
   if (refresh_every <= 0) error->all(FLERR, "Fix baoab/tether refresh must be > 0");
+  if (promote_every < 0) error->all(FLERR, "Fix baoab/tether promote_every must be >= 0");
+  if (settle_confirm < 0) error->all(FLERR, "Fix baoab/tether settle_confirm must be >= 0");
   if (eps_was_set && eps <= 0.0) error->all(FLERR, "Fix baoab/tether eps must be > 0");
   if (heff_samples < 0) error->all(FLERR, "Fix baoab/tether heff_samples must be >= 0");
   if (newton_iters < 1) error->all(FLERR, "Fix baoab/tether newton_iters must be >= 1");
@@ -202,6 +220,9 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
     error->all(FLERR, "Fix baoab/tether newton_damp must be in (0,1]");
   if (solve_tol_rel <= 0.0) error->all(FLERR, "Fix baoab/tether solve_tol_rel must be > 0");
   if (refresh_skin < 0.0) error->all(FLERR, "Fix baoab/tether refresh_skin must be >= 0");
+  if (refresh_skin_rel < 0.0) error->all(FLERR, "Fix baoab/tether refresh_skin_rel must be >= 0");
+  if (refresh_skin > 0.0 && refresh_skin_rel > 0.0)
+    error->all(FLERR, "Fix baoab/tether refresh_skin and refresh_skin_rel are mutually exclusive");
 
   // permanent per-atom/per-event diagnostic log (plan Sec 6.1): opened once
   // here, for the fix's whole lifetime, matching fix_print's single-fopen-
@@ -238,6 +259,7 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   }
 
   last_refresh_step = -1;
+  last_promote_check = -1;
   need_refresh = 1;
   need_reneighbor = 0;
   dt_floor_until = -1;
@@ -761,25 +783,48 @@ void FixBAOABTether::final_integrate()
 
 void FixBAOABTether::end_of_step()
 {
-  if (!adapt || refresh_skin <= 0.0 || drift_response != 1) return;
-
   bigint ntimestep = update->ntimestep;
+
+  // promote_every (default 0 = disabled): re-run update_dt() more often than
+  // refresh_blocks()'s refresh_every cadence, reusing the currently cached
+  // om[] -- no new curvature probing, no change to update_dt()'s own
+  // one-rung/1.25x-margin/dt_floor_until logic. Independent of, and placed
+  // before, the drift_response==preshrink early return below: this only
+  // closes the gap between a dt_floor_until lockout expiring and the next
+  // scheduled refresh, which otherwise caps post-trigger recovery at 1-2
+  // ladder rungs per cycle (see the plan file).
+  if (adapt && promote_every > 0 && dt_lvl > 0 &&
+      (ntimestep - last_promote_check) >= promote_every) {
+    update_dt(false);    // reuses cached om[] -- must never count toward settle_confirm
+    last_promote_check = ntimestep;
+  }
+
+  if (!adapt || (refresh_skin <= 0.0 && refresh_skin_rel <= 0.0) || drift_response != 1) return;
+
   if (ntimestep == last_refresh_step) return;    // x0[i] was just reset
 
   double **x = atom->x;
+  double *rmass = atom->rmass;
+  double *mass = atom->mass;
+  int *type = atom->type;
   int *mask = atom->mask;
   int nlocal = atom->nlocal;
   if (igroup == atom->firstgroup) nlocal = atom->nfirst;
+
+  double kT = force->boltz * t_target / force->mvv2e;
 
   double dt_local = dt_max;
   int i_trigger = -1;
   for (int i = 0; i < nlocal; i++) {
     if (!(mask[i] & groupbit)) continue;
 
+    double mi = rmass ? rmass[i] : mass[type[i]];
+    double skin_i = effective_skin(i, mi, kT);
+
     double dx0[3] = {x[i][0] - x0[i][0], x[i][1] - x0[i][1], x[i][2] - x0[i][2]};
     domain->minimum_image(FLERR, dx0);
     double drift2 = dx0[0] * dx0[0] + dx0[1] * dx0[1] + dx0[2] * dx0[2];
-    if (drift2 <= refresh_skin * refresh_skin) continue;
+    if (skin_i <= 0.0 || drift2 <= skin_i * skin_i) continue;
 
     refresh_one_atom(i, x[i], true);
 
@@ -795,6 +840,17 @@ void FixBAOABTether::end_of_step()
   if (comm->nprocs > 1) MPI_Allreduce(&dt_local, &dt_global, 1, MPI_DOUBLE, MPI_MIN, world);
 
   if (dt_global >= dt_max) return;    // no candidate on any rank this step
+
+  // settle_confirm (default 0 = disabled; see update_dt()): an out-of-
+  // cadence drift-skin re-probe reaching this point at all is itself fresh
+  // evidence this atom has not yet settled, whether or not dt_lvl actually
+  // changes below (e.g. already pinned at the dt_min rung from a prior
+  // trip) -- reset unconditionally, not only on an actual new shrink, so a
+  // still-unresolved atom's own repeated re-trips can never be missed by a
+  // scheduled update_dt() call that happens to land on a calm moment in
+  // between. dt_global is already identical on every rank (Allreduce MIN
+  // just above), so this reset is too.
+  if (settle_confirm > 0) settle_streak = 0;
 
   // same shrink-only hysteresis update_dt() uses for its own dt_lvl++
   // branch -- never relax up here; relaxation is update_dt()'s job alone,
@@ -957,9 +1013,12 @@ void FixBAOABTether::kinetic_guard_and_quench(int i, double mi, double kT, bool 
   bigint ntimestep = update->ntimestep;
   sub_stepped = false;
 
+  bool skin_enabled = (refresh_skin > 0.0 || refresh_skin_rel > 0.0);
+  double skin_i = skin_enabled ? effective_skin(i, mi, kT) : 0.0;
+
   double ke_max = 0.0;
   for (int m = 0; m < 3; m++) {
-    if (!msk[m] && refresh_skin <= 0.0) continue;
+    if (!msk[m] && !skin_enabled) continue;
     double ke = 0.5 * force->mvv2e * mi * p1[m] * p1[m];
     if (ke > ke_max) ke_max = ke;
   }
@@ -974,12 +1033,12 @@ void FixBAOABTether::kinetic_guard_and_quench(int i, double mi, double kT, bool 
 
   bool drift_hot = false;
   double drift_mag = -1.0;
-  if (!ke_hot && refresh_skin > 0.0) {
+  if (!ke_hot && skin_i > 0.0) {
     double **x = atom->x;
     double dx0[3] = {x[i][0] - x0[i][0], x[i][1] - x0[i][1], x[i][2] - x0[i][2]};
     domain->minimum_image(FLERR, dx0);
     double drift2 = dx0[0] * dx0[0] + dx0[1] * dx0[1] + dx0[2] * dx0[2];
-    if (drift2 > refresh_skin * refresh_skin) {
+    if (drift2 > skin_i * skin_i) {
       drift_hot = true;
       drift_mag = sqrt(drift2);
     }
@@ -1000,7 +1059,7 @@ void FixBAOABTether::kinetic_guard_and_quench(int i, double mi, double kT, bool 
     if (demote_cool[i] <= ntimestep) demote_atom(i, 3 * (bigint) refresh_every, "kinetic_guard");
     if (sudden) quench_exempt[i] = demote_cool[i];
   } else if (drift_hot) {
-    log_event("GUARD_DRIFT", atom->tag[i], -1.0, -1.0, drift_mag, refresh_skin, nullptr, -1.0,
+    log_event("GUARD_DRIFT", atom->tag[i], -1.0, -1.0, drift_mag, skin_i, nullptr, -1.0,
               drift_response == 0 ? "retether" : "preshrink");
     if (drift_response == 0) {
       // retether (default): Do NOT re-project v_mid into the new eigenbasis
@@ -1515,6 +1574,31 @@ void FixBAOABTether::refresh_one_atom(int i, const double *xi, bool instantaneou
 }
 
 /* ----------------------------------------------------------------------
+   Effective drift-guard skin for atom i: refresh_skin_rel > 0 scales to a
+   fixed multiple of this atom's OWN thermal ballistic step at dt_max,
+   sqrt(kT/m_i)*dt_max (RMS thermal speed times one full-size timestep),
+   so one setting works across species of very different mass instead of a
+   single absolute distance tuned for one species. Deliberately NOT a
+   harmonic-equipartition amplitude (sqrt(kT/m_i)/om): the atoms this guard
+   exists for are precisely the ones with persistently weak/soft curvature
+   in some or all modes (om -> 0 for an unconfined rattler), where a 1/om
+   amplitude diverges and silently disables the guard it is supposed to be
+   -- confirmed by direct test (H/Pd EAM: om~0.6 for every mode, any
+   om-based skin > ~20x refresh_skin's original 0.1 A, drift guard never
+   trips, run diverges within 14 steps). The ballistic form has no such
+   singularity and uses dt_max (not the current ladder rung) so the skin
+   stays a fixed length regardless of dt_lvl, matching refresh_skin's own
+   fixed-distance convention. Falls back to the plain refresh_skin (0.0 if
+   also unset) when refresh_skin_rel is disabled.
+------------------------------------------------------------------------- */
+
+double FixBAOABTether::effective_skin(int i, double mi, double kT) const
+{
+  if (refresh_skin_rel <= 0.0) return refresh_skin;
+  return refresh_skin_rel * sqrt(kT / mi) * dt_max;
+}
+
+/* ----------------------------------------------------------------------
    one-shot spectral-gap detection (D.11.1, adapt=yes only): collect every
    flagged atom's 3 eigenfrequencies on this rank, sort them, and split the
    stiff/soft population at the largest multiplicative gap in the upper
@@ -1605,7 +1689,7 @@ void FixBAOABTether::compute_om_split()
    single shared update->dt scalar.
 ------------------------------------------------------------------------- */
 
-void FixBAOABTether::update_dt()
+void FixBAOABTether::update_dt(bool fresh_sample)
 {
   int *mask = atom->mask;
   int nlocal = atom->nlocal;
@@ -1644,16 +1728,58 @@ void FixBAOABTether::update_dt()
     dt_lvl = MAX(0, (int) lround(log(dt_max / dt_c) / log(2.0)));
   } else {
     double rung_dt = dt_max / pow(2.0, dt_lvl);
+    // dt_floor_until (Attempt 7 Part B, preshrink only): captured once at
+    // entry, deliberately NOT re-read after settle_confirm below might
+    // release it early this same call -- an early release found this call
+    // only takes effect starting the NEXT call, exactly mirroring how a
+    // lockout that runs its full natural duration already only unblocks
+    // relax-up on the next call that happens to see ntimestep >=
+    // dt_floor_until.
+    bool locked = (update->ntimestep < dt_floor_until);
+
     if (dt_c < 0.85 * rung_dt) {
       dt_lvl = MAX(dt_lvl + 1, (int) ceil(log(dt_max / dt_c) / log(2.0)));
-    } else if (dt_c > 1.25 * rung_dt && dt_lvl > 0 && update->ntimestep >= dt_floor_until) {
+      if (fresh_sample) settle_streak = 0;
+    } else {
+      bool margin_ok = (dt_c > 1.25 * rung_dt);
+
+      // settle_confirm (default 0 = disabled, exactly today's fixed-
+      // duration lockout): while a dt_floor_until lockout from
+      // end_of_step()'s preshrink response is active, count CONSECUTIVE
+      // fresh (never promote_every's stale-cache reuse -- fresh_sample is
+      // false there) refresh_every-cadence calls that independently find
+      // the same 1.25x margin already required for ordinary relax-up.
+      // Only once settle_confirm of these agree in a row -- each one a
+      // genuine new global reduction over every flagged atom's
+      // just-reprobed curvature, never a single sample reused or taken
+      // mid-encounter -- release the lockout early so the unchanged
+      // one-rung climb below can resume on its own NEXT call. Any margin
+      // miss, or no active lockout at all, resets the streak; a fresh
+      // end_of_step() preshrink re-trigger resets it too (see there), so a
+      // still-active encounter can never rack up a streak between its own
+      // out-of-cadence re-trips.
+      if (fresh_sample && settle_confirm > 0 && locked) {
+        if (margin_ok) {
+          if (++settle_streak >= settle_confirm) {
+            log_event("SETTLE_RELEASE", -1, -1.0, -1.0, -1.0, -1.0, nullptr, dt_c,
+                      fmt::format("streak={} old_floor={}", settle_streak, dt_floor_until));
+            dt_floor_until = update->ntimestep;
+            settle_streak = 0;
+          }
+        } else {
+          settle_streak = 0;
+        }
+      } else if (fresh_sample) {
+        settle_streak = 0;
+      }
+
       // dt_floor_until (Attempt 7 Part B, preshrink only): skip relax-up
       // while an end_of_step() emergency shrink's short backoff is still
       // active -- om_unres above is blind to which atom justified that
       // shrink, so without this guard a scheduled refresh right after it
       // could raise dt_lvl back down before the atom has actually cleared
       // the encounter.
-      dt_lvl--;
+      if (margin_ok && dt_lvl > 0 && !locked) dt_lvl--;
     }
   }
 

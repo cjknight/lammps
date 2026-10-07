@@ -62,6 +62,33 @@ class FixBAOABTether : public FixBAOAB {
  private:
   double theta;          // dimensionless omega*dt stiff/soft threshold
   int refresh_every;     // steps between curvature-block refresh
+
+  // decouples how often the one-rung dt-ladder promotion hysteresis in
+  // update_dt() gets re-checked from refresh_every: 0 (default) = disabled,
+  // promotion is only re-evaluated when refresh_blocks() runs, exactly as
+  // before. >0 = also re-run update_dt() from end_of_step() (already called
+  // every step) every promote_every steps, reusing the currently cached
+  // om[] -- no new curvature probing, no change to update_dt()'s own
+  // one-rung/1.25x-margin/dt_floor_until logic. This exists because
+  // dt_floor_until's lockout (drift_response preshrink only) otherwise eats
+  // most of the time between triggers, leaving only 1-2 refresh_every-paced
+  // opportunities per cycle to climb back toward dt_max.
+  int promote_every;
+
+  // confirmation threshold for EARLY release of an active dt_floor_until
+  // lockout (drift_response preshrink only): 0 (default) = disabled,
+  // exactly reproduces today's fixed-duration-only floor with no behavior
+  // change. >0 = once this many CONSECUTIVE *fresh, scheduled*
+  // refresh_blocks()->update_dt() calls (never promote_every's stale-om[]
+  // recheck -- see update_dt()'s fresh_sample parameter) in a row each
+  // independently find the same 1.25x relax-up margin update_dt() already
+  // requires for its own one-rung climb, the lockout is released early
+  // (dt_floor_until set to the current ntimestep) so that climb can resume
+  // starting next call, instead of unconditionally waiting out the fixed
+  // 3*refresh_every duration. Requires settle_confirm INDEPENDENT global
+  // reductions over every flagged atom's just-reprobed curvature to agree
+  // -- never a single stale or single freshly-probed sample.
+  int settle_confirm;
   double eps;            // finite-difference probe displacement
   int eps_was_set;       // 1 if user gave "eps", else default from skin
 
@@ -98,6 +125,15 @@ class FixBAOABTether : public FixBAOAB {
   // guard; see kinetic_guard_and_quench() and sub_step_free_atom().
   double refresh_skin;
 
+  // dimensionless alternative to refresh_skin (mutually exclusive, default
+  // 0.0 = disabled): multiplies each atom's OWN thermal ballistic step at
+  // dt_max, sqrt(kT/m_i)*dt_max, instead of using one absolute distance for
+  // every species/mass. Deliberately NOT curvature(om)-based: this guard's
+  // own job is to catch atoms with persistently weak/soft curvature, where
+  // an om-based amplitude diverges and disables the guard it should be
+  // (confirmed by direct test). See effective_skin().
+  double refresh_skin_rel;
+
   // how a drift_hot trip (refresh_skin > 0 only) is handled:
   // 0 (retether, default) = legacy Attempt 3-5 behavior, unchanged --
   // re-tether in place and locally sub-step this atom's remaining dtby2
@@ -116,7 +152,7 @@ class FixBAOABTether : public FixBAOAB {
   // MPI rank opens its OWN file (comm->me-suffixed when nprocs > 1, so
   // this stays correct/halo-local under future domain decomposition with
   // no gather/collective) and logs REFRESH/GUARD_KE/GUARD_DRIFT/DEMOTE/
-  // PRESHRINK events as they occur; see log_event().
+  // PRESHRINK/SETTLE_RELEASE events as they occur; see log_event().
   std::string event_log_filename;
   SafeFilePtr event_log_fp;
 
@@ -130,6 +166,7 @@ class FixBAOABTether : public FixBAOAB {
   static constexpr int JMAX = 256;    // per-atom response-block neighbor cap
 
   bigint last_refresh_step;
+  bigint last_promote_check;   // ntimestep of the last promote_every recheck, -1 = none yet
   int need_refresh;
 
   // set by end_of_step()'s emergency dt-shrink (drift_response == preshrink
@@ -139,6 +176,15 @@ class FixBAOABTether : public FixBAOAB {
   // update_dt()'s om_unres is blind to which atom that was. -1 = no active
   // floor (default; never blocks relax-up).
   bigint dt_floor_until;
+
+  // running count of consecutive qualifying update_dt() calls toward
+  // settle_confirm (see above). Reset to 0 by end_of_step()'s drift-skin
+  // loop finding ANY candidate atom this step (even when dt_lvl does not
+  // end up changing, e.g. already pinned at the dt_min rung) and by
+  // update_dt() itself whenever a scheduled call's margin check fails or
+  // no lockout is currently active. Meaningless/inert when
+  // settle_confirm == 0.
+  int settle_streak;
 
   // rank-local trigger, set by sub_step_free_atom() when a drift_hot atom's
   // local excursion would exceed the neighbor list's trust radius (see
@@ -214,6 +260,7 @@ class FixBAOABTether : public FixBAOAB {
 
   void refresh_blocks();
   void refresh_one_atom(int i, const double *xi, bool instantaneous);
+  double effective_skin(int i, double mi, double kT) const;
   void force_clear_local();
   void recompute_forces_local();
   void modal_force_correction(int i, double mi, double *fcorr) const;
@@ -236,7 +283,13 @@ class FixBAOABTether : public FixBAOAB {
     return om[i][m] > om_split;
   }
   void compute_om_split();
-  void update_dt();
+
+  // fresh_sample: true (default) from refresh_blocks()'s own scheduled
+  // cadence (every flagged atom's om[]/evecs[] just freshly reprobed
+  // before this call); false only from end_of_step()'s promote_every
+  // recheck, which reuses stale cached om[] -- settle_confirm's streak
+  // only ever advances on the former.
+  void update_dt(bool fresh_sample = true);
   void apply_new_dt(double dt_new);
   void demote_atom(int i, bigint backoff_steps, const char *source);
   void kinetic_guard_and_quench(int i, double mi, double kT, bool *msk, double *q1, double *p1,

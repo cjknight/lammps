@@ -16,12 +16,22 @@ Syntax
 * damp = damping parameter (time units)
 * seed = random number seed (positive integer)
 * two or more keyword/value pairs must be appended
-* keyword = *theta* or *refresh* or *eps* or *mollify* or *newton_iters* or *newton_damp* or *solve_tol_rel* or *adapt* or *c_acc* or *dt_min* or *dt_max* or *ke_rel* or *gamma_quench* or *refresh_skin* or *drift_response* or *event_log*
+* keyword = *theta* or *refresh* or *promote_every* or *settle_confirm* or *eps* or *mollify* or *newton_iters* or *newton_damp* or *solve_tol_rel* or *adapt* or *c_acc* or *dt_min* or *dt_max* or *ke_rel* or *gamma_quench* or *refresh_skin* or *refresh_skin_rel* or *drift_response* or *event_log*
 
   .. parsed-literal::
 
        *theta* value = dimensionless stiffness threshold, must be > 0
        *refresh* value = steps between curvature-block refresh, must be > 0
+       *promote_every* value = steps between extra dt-ladder promotion
+         rechecks, must be >= 0 (optional; default 0, which disables this
+         check and reproduces the behavior of promotion being re-evaluated
+         only every *refresh* steps; only used if *adapt* is *yes*)
+       *settle_confirm* value = number of consecutive fresh curvature
+         refreshes that must agree the timestep may rise before an active
+         *preshrink* floor (see *drift_response*) is released early, must
+         be >= 0 (optional; default 0, which disables early release and
+         always waits out the floor's full duration; only used if
+         *adapt* is *yes*)
        *eps* value = finite-difference probe displacement (distance units),
          must be > 0 (optional; default is a small fraction of the
          neighbor skin)
@@ -50,7 +60,15 @@ Syntax
          *adapt* is *yes*)
        *ke_rel* value = kinetic-energy over-excitation threshold for the
          event guard, in multiples of :math:`k_B T`, must be > 0
-         (optional; default 12.0; only used if *adapt* is *yes*)
+         (optional; default 12.0; only used if *adapt* is *yes*). In
+         testing on an H-in-Pd EAM system, every kinetic-energy guard trip
+         at the default of 12.0 fell within a narrow 1.0-1.8x margin above
+         the threshold, the signature of ordinary thermal fluctuations
+         rather than a genuine over-excitation event; raising this value
+         toward 25.0, by analogy to the fixed guard already used for
+         over-excited harmonic energy (see the Description below), removed
+         most of these spurious trips with no observed downside, and is a
+         reasonable starting point to check for new production runs.
        *gamma_quench* value = friction coefficient applied to an atom
          while it is cooling down after a demotion event (time units,
          inverse), must be > 0 (optional; default 20.0; only used if
@@ -59,9 +77,15 @@ Syntax
          drift away from its last curvature refresh triggers an early
          response (distance units), must be >= 0 (optional; default 0.0,
          which disables this check entirely; only used if *adapt* is
-         *yes*)
+         *yes*; mutually exclusive with *refresh_skin_rel*)
+       *refresh_skin_rel* value = dimensionless multiplier of each atom's
+         own thermal ballistic displacement at *dt_max*, used in place of
+         a single absolute excursion distance, must be >= 0 (optional;
+         default 0.0, which disables this check entirely; only used if
+         *adapt* is *yes*; mutually exclusive with *refresh_skin*)
        *drift_response* value = *retether* or *preshrink* (optional;
-         default *retether*; only used if *refresh_skin* is > 0)
+         default *retether*; only used if *refresh_skin* or
+         *refresh_skin_rel* is > 0)
        *event_log* value = filename for a per-atom/per-event diagnostic
          log (optional; default none, which disables this log entirely)
 
@@ -217,6 +241,17 @@ the last curvature refresh is compared against *refresh_skin*; exceeding
 it triggers the response selected by *drift_response* before the kinetic
 energy checks above run.
 
+*refresh_skin_rel* is a dimensionless alternative to *refresh_skin*,
+useful when the group spans species of very different mass: instead of
+one fixed distance for every atom, each atom's own excursion threshold is
+*refresh_skin_rel* times its own thermal ballistic displacement at
+*dt_max*, :math:`\sqrt{k_B T / m_i}\ \mathrm{dt\_max}`. This threshold is
+deliberately not based on the atom's own curvature: an atom with weak or
+vanishing curvature in every mode (an unconfined rattler, exactly the
+case this guard exists to catch) would otherwise produce an excursion
+threshold that grows without bound and never trips. *refresh_skin* and
+*refresh_skin_rel* are mutually exclusive.
+
 With *drift_response* set to *preshrink* (the response validated for
 production use), no per-atom action is taken immediately. Instead, at the
 end of the timestep, this fix independently re-checks every candidate
@@ -235,6 +270,85 @@ remainder of the current timestep; this response has been superseded by
 *preshrink* for production use, since it was found to inject spurious
 kinetic energy when an atom's excursion invalidates its cached neighbor
 list before a genuine close encounter is resolved.
+
+----------
+
+.. versionadded:: TBD
+
+With *drift_response preshrink*, the short-lived floor described above
+also blocks the ordinary, refresh-cadence timestep promotion described
+under *adapt* from running until it expires, and that promotion only ever
+raises the timestep one rung of the ladder at a time. When this floor
+recurs much more often than the handful of refreshes needed to climb back
+from the smallest rung to the largest, the timestep can become stuck near
+*dt_min* indefinitely even once the encounter that triggered the floor has
+long since cleared. The *promote_every* keyword addresses this without
+changing the promotion decision itself: while greater than zero, this fix
+re-evaluates the same one-rung-at-a-time promotion check every
+*promote_every* steps (reusing the curvature estimate already cached from
+the last refresh, so no extra curvature probing is done) instead of only
+when a refresh is scheduled. Leaving it at its default of 0 reproduces the
+original behavior exactly.
+
+In testing on an H-in-Pd EAM system, this keyword did **not** meaningfully
+raise the fraction of steps spent at *dt_max* at any setting tried (2, 5,
+10, or 20): the timestep ceiling in that system was set by genuinely
+volatile, near-continuously elevated curvature, not by the promotion
+cadence, so closing the cadence gap had no effect on the outcome it was
+meant to fix. A recheck interval of 1 (every step) additionally caused a
+real stability regression in that same test -- guard-triggered kinetic
+energy rescales rose by roughly 26x over the unmodified baseline, with a
+correspondingly higher peak temperature in the light subsystem -- because
+reusing one curvature snapshot to justify climbing multiple ladder rungs
+across consecutive steps, with no fresh probe confirming each rung is
+still safe for the atom's evolving post-encounter state, is not equivalent
+to the implicit re-validation that a real refresh provides. A recheck
+interval of 1 is therefore **not** recommended. If this keyword is used at
+all, prefer a larger interval (5 or more) and verify against the standard
+diagnostic suite (heavy-subsystem temperature trace, guard/demotion event
+counts, dt-occupancy histogram) that it has not introduced new heating for
+the system at hand; do not assume it will improve cruise fraction without
+checking. When running on more than one MPI process this also adds one
+small collective communication call per recheck.
+
+----------
+
+.. versionadded:: TBD
+
+The *preshrink* floor described above always waits out a fixed duration
+before allowing the ordinary one-rung-at-a-time promotion to resume, even
+if the encounter that triggered it clears well before the floor expires.
+The *settle_confirm* keyword lets that floor end early, without changing
+the promotion decision itself or how the floor is triggered: while the
+floor is active, this fix keeps counting how many consecutive, regularly
+scheduled curvature refreshes in a row independently find that the
+timestep is already eligible for ordinary promotion. Once that count
+reaches *settle_confirm*, the floor is lifted immediately, and the
+existing one-rung climb resumes starting with the refresh after next.
+Every one of these checks uses a freshly recomputed curvature estimate,
+never a cached or reused one from a *promote_every* recheck, and any
+refresh that fails the check, or any fresh retrigger of the floor itself,
+resets the count to zero. Leaving this keyword at its default of 0
+disables early release entirely and reproduces the original fixed-duration
+behavior exactly.
+
+In testing on the same H-in-Pd EAM system used above, *settle_confirm 2*
+gave a real, measurable benefit with no added instability: time spent at
+the smallest timestep rung fell from 81% to 74% of the run, time spent at
+the next rung up more than tripled, guard-triggered kinetic energy
+rescales fell (by about 46%) rather than rose, and the heavy-subsystem
+temperature trace stayed within its established stable range. This did
+**not** increase the fraction of steps spent at the largest timestep,
+*dt_max*, which stayed unchanged -- consistent with the finding under
+*promote_every* above that this system's timestep ceiling is set by
+genuinely volatile curvature rather than by how quickly the floor is
+released. Settings of 5 or more showed no measurable effect at all on this
+system: its curvature apparently never holds still for that many
+consecutive refreshes in a row, which is itself informative about how
+volatile this particular system is, not a flaw in the mechanism. As with
+*promote_every*, verify against the standard diagnostic suite before
+relying on any particular setting for a new system, and do not assume a
+given value will help without checking.
 
 ----------
 
@@ -372,5 +486,6 @@ defaults to 0.6. *solve_tol_rel* defaults to 0.005. *adapt* defaults to
 timestep in effect when this fix was defined. *dt_max* defaults to the
 timestep in effect when this fix was defined. *ke_rel* defaults to 12.0.
 *gamma_quench* defaults to 20.0. *refresh_skin* defaults to 0.0.
-*drift_response* defaults to *retether*. *event_log* defaults to
-unset (disabled).
+*refresh_skin_rel* defaults to 0.0. *promote_every* defaults to 0.
+*settle_confirm* defaults to 0. *drift_response* defaults to *retether*.
+*event_log* defaults to unset (disabled).
