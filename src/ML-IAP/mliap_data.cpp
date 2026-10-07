@@ -274,7 +274,7 @@ void MLIAPData::grow_neigharrays()
   if (nneigh_max < nneigh) {
     memory->grow(pair_i, nneigh, "MLIAPData:pair_i");
     memory->grow(jatoms, nneigh, "MLIAPData:jatoms");
-    memory->grow(lmp_firstneigh, natomneigh, nneigh, "MLIAPData:lmp_firstneigh");
+    memory->grow(lmp_firstneigh, natomneigh_max, nneigh, "MLIAPData:lmp_firstneigh");
     memory->grow(jelems, nneigh, "MLIAPData:jelems");
     memory->grow(rij, nneigh, 3, "MLIAPData:rij");
     if (gradgradflag == 0) memory->grow(graddesc, nneigh, ndescriptors, 3, "MLIAPData:graddesc");

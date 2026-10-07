@@ -412,7 +412,20 @@ void MLIAPDescriptorMTP::read_paramfile(char *fname)
 
 /* ---------------------------------------------------------------------- */
 
-MLIAPDescriptorMTP::~MLIAPDescriptorMTP() {}
+MLIAPDescriptorMTP::~MLIAPDescriptorMTP() {
+  for (int i = 0; i < nelements; i++) {
+    delete [] cutsq[i];
+  }
+
+  delete [] cutsq;
+  cutsq = nullptr;
+
+  delete [] radelem;
+  radelem = nullptr;
+
+  delete [] wjelem;
+  wjelem = nullptr;
+}
 
 
 void MLIAPDescriptorMTP::build_basis_index()

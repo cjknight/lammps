@@ -190,7 +190,7 @@ void Force::init()
       auto *p_cutoff = (double *) pair->extract("cut_coul", itmp);
       if (p_cutoff != nullptr) kspace->g_ewald = 0.7071067811865475;//*p_cutoff;
       kspace->set_gewaldflag();
-      printf("Setting kspace g_ewald = %g\n", kspace->g_ewald);
+      //printf("Setting kspace g_ewald = %g\n", kspace->g_ewald);
     }
     kspace->init();
   }    // kspace must come before pair

@@ -701,8 +701,10 @@ void PPPM::compute(int eflag, int vflag)
 
   if (atom->nmax > nmax) {
     memory->destroy(part2grid);
+    memory->destroy(phi);
     nmax = atom->nmax;
     memory->create(part2grid,nmax,3,"pppm:part2grid");
+    memory->create(phi, nmax, "pppm:phi");
   }
 
   // find grid points for all my particles

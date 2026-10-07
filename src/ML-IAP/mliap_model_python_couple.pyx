@@ -69,11 +69,19 @@ cdef public int MLIAPPY_load_model(MLIAPModelPython * c_model, char* fname) with
     else:
         if str_fname.endswith(".pt") or str_fname.endswith('.pth'):
             import torch
-            device = torch.device("xpu")
+            device = torch.device("cpu")
+            if torch.cuda.is_available():
+                device = torch.device("cuda")
+            elif torch.xpu.is_available():
+                device = torch.device("xpu")
+            elif torch.mps.is_available():
+                device = torch.device("mps")
+            #print("USING DEVICE: ", device.type, flush=True)
+
             model = torch.load(str_fname, map_location=device, weights_only=False)
-            model.model.to(device)
-            model.model.eval()
-            print("model device:", next(model.model.parameters()).device)
+
+            model.device = device
+            model.model = model.model.to(device)
         else:
             with open(str_fname,'rb') as pfile:
                 model = pickle.load(pfile)
