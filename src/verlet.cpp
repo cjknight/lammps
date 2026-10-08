@@ -350,6 +350,7 @@ void Verlet::run(int n)
 
     if (pair_mliap && pppm) {
       pair_mliap->compute_charge_response_forces(pppm->phi);
+      timer->stamp(Timer::PAIR);
     }
 
     if (n_pre_reverse) {
