@@ -145,6 +145,22 @@ class FixBAOABTether : public FixBAOAB {
   // the NEXT step instead if the drift is still there once the step ends.
   int drift_response;
 
+  // 0 (default) = legacy behavior, fully unchanged: an exiled atom
+  // (demote_cool[i] > ntimestep) takes the ordinary shared per-mode drift
+  // at the shared GLOBAL update->dt, and its cached curvature still feeds
+  // update_dt()'s om_unres vote and the PRESHRINK drift-skin trigger --
+  // meaning one chronically volatile atom can hold the WHOLE system's dt
+  // down even though it has already been relegated to the soft integrator.
+  // 1 = while exiled, route the atom through sub_step_free_atom()'s
+  // already-safe, Allreduce-free, locally resonance-bounded
+  // (dt_sub = MIN(dt_min, 2.2/om_max_new)) sub-stepping for the FULL step
+  // instead (see initial_integrate()/final_integrate()), and exclude it
+  // from both the om_unres vote and the PRESHRINK trigger while exiled --
+  // it no longer needs, and should not be allowed to shrink, the shared
+  // dt. Does not change when/how long exile itself triggers or decays
+  // (demote_cool/demote_count/backoff/forgiveness untouched).
+  int exile_substep;
+
   // permanent per-atom/per-event diagnostic log (plan Sec 6.1's required
   // per-step/per-event log): empty (default) = disabled, zero overhead --
   // every log_event() call site is gated on a plain "if (event_log_fp)"

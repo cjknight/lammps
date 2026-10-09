@@ -16,7 +16,7 @@ Syntax
 * damp = damping parameter (time units)
 * seed = random number seed (positive integer)
 * two or more keyword/value pairs must be appended
-* keyword = *theta* or *refresh* or *promote_every* or *settle_confirm* or *eps* or *mollify* or *newton_iters* or *newton_damp* or *solve_tol_rel* or *adapt* or *c_acc* or *dt_min* or *dt_max* or *ke_rel* or *gamma_quench* or *refresh_skin* or *refresh_skin_rel* or *drift_response* or *event_log*
+* keyword = *theta* or *refresh* or *promote_every* or *settle_confirm* or *eps* or *mollify* or *newton_iters* or *newton_damp* or *solve_tol_rel* or *adapt* or *c_acc* or *dt_min* or *dt_max* or *ke_rel* or *gamma_quench* or *refresh_skin* or *refresh_skin_rel* or *drift_response* or *exile_substep* or *event_log*
 
   .. parsed-literal::
 
@@ -86,6 +86,8 @@ Syntax
        *drift_response* value = *retether* or *preshrink* (optional;
          default *retether*; only used if *refresh_skin* or
          *refresh_skin_rel* is > 0)
+       *exile_substep* value = *yes* or *no* (optional; default *no*;
+         only used if *adapt* is *yes*)
        *event_log* value = filename for a per-atom/per-event diagnostic
          log (optional; default none, which disables this log entirely)
 
@@ -354,6 +356,56 @@ given value will help without checking.
 
 .. versionadded:: TBD
 
+An atom that keeps re-triggering demotion is placed in a temporary
+"exile": for a cooldown window after each such event, every one of its
+local modes is treated as non-stiff regardless of what the cached
+curvature says (see the *ke_rel* and *drift_response* discussion above).
+Without *exile_substep*, an exiled atom still takes the ordinary shared
+drift at this fix's single, global timestep, and its cached curvature is
+still folded into the vote that sets that global timestep and into the
+*preshrink* trigger described above -- so one atom already flagged as
+chronically unstable, and already relegated to the weakest integration
+path this fix offers, can keep the timestep small for every *other* atom
+in the group as well, which runs against the purpose of giving a
+troublesome atom its own separate treatment in the first place. With
+*exile_substep yes*, an exiled atom instead integrates for the entire
+exile window using the same local, sub-stepped, resonance-bounded
+Cartesian integration this fix already uses for one step at a time during
+certain guard responses, sized from the atom's own cached curvature and
+independent of the shared timestep, and it is excluded from both the
+global timestep vote and the *preshrink* trigger for as long as the exile
+lasts. This does not change when exile starts, how long it lasts, or how
+its cooldown decays -- only what the atom does while exiled, and whether
+it is counted. Leaving this keyword at its default of *no* reproduces the
+original behavior exactly.
+
+In testing on the same H-in-Pd EAM system used above, *exile_substep yes*
+left the system safe -- the heavy-subsystem temperature trace and total
+energy stayed within their established stable ranges, with no sign of the
+accumulating drift that would result from double-counting an exiled
+atom's closing half-kick -- and produced a real, if modest, redistribution
+of the dt-occupancy histogram toward higher rungs (time spent at the
+second-smallest rung roughly quadrupled, and a small amount of time
+reached a rung that was never populated at all without this keyword).
+It did **not** raise the fraction of steps spent at *dt_max*, which was
+already close to zero and stayed there, and the running count of demotion
+events rose several-fold rather than fell. That rise is consistent with
+what this keyword is meant to do, not a regression: once an already-exiled
+atom's curvature can no longer hold the shared timestep down, that
+timestep is freer to rise for the rest of the group, which in turn exposes
+genuine resonance limits in other atoms that the previously depressed
+timestep had been masking. As with *promote_every* and *settle_confirm*
+above, this keyword does not by itself solve the cruise-fraction ceiling
+this system has shown under every tuning tried so far; verify against the
+standard diagnostic suite (heavy-subsystem temperature trace, guard/
+demotion event counts, dt-occupancy histogram, and energy drift over a
+single long exile episode specifically) before relying on it for a new
+system.
+
+----------
+
+.. versionadded:: TBD
+
 The *event_log* keyword writes a permanent, per-atom/per-event diagnostic
 log to the given filename, one line per curvature refresh, guard trip,
 demotion, or timestep preshrink. Each rank opens its own log file; when
@@ -488,4 +540,4 @@ timestep in effect when this fix was defined. *ke_rel* defaults to 12.0.
 *gamma_quench* defaults to 20.0. *refresh_skin* defaults to 0.0.
 *refresh_skin_rel* defaults to 0.0. *promote_every* defaults to 0.
 *settle_confirm* defaults to 0. *drift_response* defaults to *retether*.
-*event_log* defaults to unset (disabled).
+*exile_substep* defaults to *no*. *event_log* defaults to unset (disabled).

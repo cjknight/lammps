@@ -112,6 +112,7 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   refresh_skin = 0.0;
   refresh_skin_rel = 0.0;
   drift_response = 0;
+  exile_substep = 0;
   om_split = 0.0;
   om_split_set = 0;
   dt_lvl = -1;
@@ -200,6 +201,10 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
       else
         error->all(FLERR, iarg + 1, "Fix baoab/tether drift_response must be retether or preshrink");
       iarg += 2;
+    } else if (strcmp(arg[iarg], "exile_substep") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether exile_substep", error);
+      exile_substep = utils::logical(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 2;
     } else if (strcmp(arg[iarg], "event_log") == 0) {
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether event_log", error);
       event_log_filename = arg[iarg + 1];
@@ -223,6 +228,8 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   if (refresh_skin_rel < 0.0) error->all(FLERR, "Fix baoab/tether refresh_skin_rel must be >= 0");
   if (refresh_skin > 0.0 && refresh_skin_rel > 0.0)
     error->all(FLERR, "Fix baoab/tether refresh_skin and refresh_skin_rel are mutually exclusive");
+  if (exile_substep && !adapt)
+    error->all(FLERR, "Fix baoab/tether exile_substep requires adapt yes");
 
   // permanent per-atom/per-event diagnostic log (plan Sec 6.1): opened once
   // here, for the fix's whole lifetime, matching fix_print's single-fopen-
@@ -511,6 +518,24 @@ void FixBAOABTether::initial_integrate(int /*vflag*/)
     double mi = rmass ? rmass[i] : mass[type[i]];
     double invmass = 1.0 / mi;
 
+    // exile_substep (adapt=yes only): while this atom is Verlet-exiled
+    // (demote_cool[i] > ntimestep), skip the shared B-A-O-A pipeline below
+    // entirely and instead integrate it for the WHOLE step via
+    // sub_step_free_atom()'s already-safe, Allreduce-free, locally
+    // resonance-bounded local sub-stepping -- same mechanism
+    // kinetic_guard_and_quench() already uses for the remaining dtby2 of a
+    // just-triggered step (see "sub_stepped" below), just spanning this
+    // atom's full existing exile window instead of one rescue step. Mirrors
+    // that call site's own early "continue" pattern. final_integrate() and
+    // update_dt()'s om_unres loop / the PRESHRINK drift-skin loop carry the
+    // matching exclusion -- see there.
+    if (exile_substep && demote_cool[i] > update->ntimestep) {
+      double x_mid[3] = {x[i][0], x[i][1], x[i][2]};
+      double v_mid[3] = {v[i][0], v[i][1], v[i][2]};
+      sub_step_free_atom(i, mi, x_mid, v_mid, update->dt, kT);
+      continue;
+    }
+
     // ---- B: half kick. mollify=no: masked modes get the harmonic-
     // restoring component of the raw force cancelled first (see
     // modal_force_correction()) so only the anharmonic residual is kicked
@@ -735,6 +760,16 @@ void FixBAOABTether::final_integrate()
   for (int i = 0; i < nlocal; i++) {
     if (!(mask[i] & groupbit)) continue;
 
+    // exile_substep: this atom's initial_integrate() already took the
+    // sub_step_free_atom() branch above and folded its own terminal local
+    // half-kick (from a local partial_force() evaluation) into v[i] -- a
+    // second closing kick here from the freshly-computed GLOBAL force would
+    // double-apply it every step of the exile window (not just once, unlike
+    // today's one-step kinetic-guard usage). demote_cool[i] is unchanged
+    // since initial_integrate() ran this same step, so re-testing it here
+    // is safe and needs no new per-atom flag.
+    if (exile_substep && demote_cool[i] > update->ntimestep) continue;
+
     double mi = rmass ? rmass[i] : mass[type[i]];
     double dtfm = dtf / mi;
 
@@ -817,6 +852,10 @@ void FixBAOABTether::end_of_step()
   int i_trigger = -1;
   for (int i = 0; i < nlocal; i++) {
     if (!(mask[i] & groupbit)) continue;
+    // exile_substep: already safely self-integrating at its own locally
+    // resonance-bounded dt_sub (see initial_integrate()) -- it should not
+    // also be allowed to float-trigger a global PRESHRINK shrink.
+    if (exile_substep && demote_cool[i] > ntimestep) continue;
 
     double mi = rmass ? rmass[i] : mass[type[i]];
     double skin_i = effective_skin(i, mi, kT);
@@ -1698,6 +1737,13 @@ void FixBAOABTether::update_dt(bool fresh_sample)
   double om_analytic_max = 0.0;
   for (int i = 0; i < nlocal; i++) {
     if (!(mask[i] & groupbit)) continue;
+    // exile_substep: this atom is already safely self-integrating via
+    // sub_step_free_atom()'s own locally resonance-bounded dt_sub,
+    // decoupled from the shared update->dt -- its (possibly large,
+    // rattling) curvature must not be allowed to veto the dt this fix picks
+    // for every OTHER atom, which is exactly the coupling this keyword
+    // exists to remove. See initial_integrate()/final_integrate().
+    if (exile_substep && demote_cool[i] > update->ntimestep) continue;
     for (int m = 0; m < 3; m++) {
       if (mode_is_stiff(i, m))
         om_analytic_max = MAX(om_analytic_max, om[i][m]);
