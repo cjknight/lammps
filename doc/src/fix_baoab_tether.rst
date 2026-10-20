@@ -16,12 +16,16 @@ Syntax
 * damp = damping parameter (time units)
 * seed = random number seed (positive integer)
 * two or more keyword/value pairs must be appended
-* keyword = *theta* or *refresh* or *promote_every* or *settle_confirm* or *eps* or *mollify* or *newton_iters* or *newton_damp* or *solve_tol_rel* or *adapt* or *c_acc* or *dt_min* or *dt_max* or *ke_rel* or *gamma_quench* or *refresh_skin* or *refresh_skin_rel* or *drift_response* or *exile_substep* or *event_log*
+* keyword = *theta* or *refresh* or *heff_samples* or *promote_every* or *settle_confirm* or *eps* or *mollify* or *newton_iters* or *newton_damp* or *solve_tol_rel* or *force_eval* or *adapt* or *c_acc* or *dt_min* or *dt_max* or *ke_rel* or *ke_rel_refresh* or *ke_rel_margin_blocks* or *gamma_quench* or *gamma_quench_calib_gain* or *gamma_quench_calib_max_step* or *gamma_quench_calib_confirm* or *gamma_quench_calib_deadband* or *gamma_quench_calib_ceiling* or *gamma_quench_calib_refresh* or *refresh_skin* or *refresh_skin_rel* or *drift_response* or *exile_substep* or *preshrink_exile* or *event_log*
 
   .. parsed-literal::
 
        *theta* value = dimensionless stiffness threshold, must be > 0
        *refresh* value = steps between curvature-block refresh, must be > 0
+       *heff_samples* value = number of consecutive scheduled curvature
+         refreshes to average into one effective block, must be >= 0
+         (optional; default 0, which keeps every refresh an independent,
+         un-averaged instantaneous estimate)
        *promote_every* value = steps between extra dt-ladder promotion
          rechecks, must be >= 0 (optional; default 0, which disables this
          check and reproduces the behavior of promotion being re-evaluated
@@ -46,6 +50,10 @@ Syntax
          the thermal vibrational amplitude of an atom's stiffest mode,
          must be > 0 (optional; default 0.005; only used if *mollify*
          is *yes*)
+       *force_eval* value = *local* or *full* (optional; default *local*;
+         only used if *mollify* is *yes*; *full* additionally requires a
+         single MPI process). Not currently recommended for production
+         use; see the Description below.
        *adapt* value = *yes* or *no* (optional; default *no*)
        *c_acc* value = target accuracy for the fastest mode this fix is
          not treating analytically, dimensionless, must be > 0
@@ -59,20 +67,54 @@ Syntax
          timestep in effect when this fix was defined; only used if
          *adapt* is *yes*)
        *ke_rel* value = kinetic-energy over-excitation threshold for the
-         event guard, in multiples of :math:`k_B T`, must be > 0
-         (optional; default 12.0; only used if *adapt* is *yes*). In
-         testing on an H-in-Pd EAM system, every kinetic-energy guard trip
-         at the default of 12.0 fell within a narrow 1.0-1.8x margin above
-         the threshold, the signature of ordinary thermal fluctuations
-         rather than a genuine over-excitation event; raising this value
-         toward 25.0, by analogy to the fixed guard already used for
-         over-excited harmonic energy (see the Description below), removed
-         most of these spurious trips with no observed downside, and is a
-         reasonable starting point to check for new production runs.
+         event guard, in multiples of :math:`k_B T`, must be > 0, or
+         *warmup* followed by a step count (optional; default 12.0; only
+         used if *adapt* is *yes*; *warmup* additionally requires *adapt
+         yes*). In testing on an H-in-Pd EAM system, every kinetic-energy
+         guard trip at the default of 12.0 fell within a narrow 1.0-1.8x
+         margin above the threshold, the signature of ordinary thermal
+         fluctuations rather than a genuine over-excitation event; raising
+         this value toward 25.0, by analogy to the fixed guard already used
+         for over-excited harmonic energy (see the Description below),
+         removed most of these spurious trips with no observed downside,
+         and is a reasonable starting point to check for new production
+         runs. See the Description below for what *warmup* does.
+       *ke_rel_refresh* value = *freeze* or *refine* (optional; default
+         *freeze*; only used if *ke_rel warmup* is given)
+       *ke_rel_margin_blocks* value = target rarity, as 1-in-this-many,
+         for the extrapolated *ke_rel* threshold, must be >= 1 (optional;
+         default 1000; only used if *ke_rel warmup* is given)
        *gamma_quench* value = friction coefficient applied to an atom
          while it is cooling down after a demotion event (time units,
-         inverse), must be > 0 (optional; default 20.0; only used if
-         *adapt* is *yes*)
+         inverse), must be > 0, or the literal word *auto*, optionally
+         followed by *calib* and two step counts (optional; default 20.0;
+         only used if *adapt* is *yes*; *auto* additionally requires
+         *adapt yes*; *calib* additionally requires *gamma_quench auto*).
+         See the Description below for what *auto* and *auto calib* do.
+       *gamma_quench_calib_gain* value = exponent applied to the measured
+         temperature ratio when committing a calibration update, must be
+         > 0 (optional; default 0.5; only used if *gamma_quench auto
+         calib* is given)
+       *gamma_quench_calib_max_step* value = largest multiplicative change
+         to *gamma_quench* allowed in a single calibration update, must be
+         > 1.0 (optional; default 2.0; only used if *gamma_quench auto
+         calib* is given)
+       *gamma_quench_calib_confirm* value = number of consecutive
+         measurement windows that must agree on the same direction before
+         a calibration update commits, must be >= 1 (optional; default 3;
+         only used if *gamma_quench auto calib* is given)
+       *gamma_quench_calib_deadband* values = lo hi, the range of measured
+         temperature ratio treated as "close enough" (no calibration
+         evidence), lo must be in (0,1) and hi must be > 1.0 (optional;
+         default 0.8 1.25; only used if *gamma_quench auto calib* is
+         given)
+       *gamma_quench_calib_ceiling* value = absolute upper bound the
+         calibration loop may raise *gamma_quench* to, must be > 0
+         (optional; default 10000.0; only used if *gamma_quench auto
+         calib* is given)
+       *gamma_quench_calib_refresh* value = *freeze* or *refine*
+         (optional; default *refine*; only used if *gamma_quench auto
+         calib* is given)
        *refresh_skin* value = excursion distance, beyond which an atom's
          drift away from its last curvature refresh triggers an early
          response (distance units), must be >= 0 (optional; default 0.0,
@@ -88,6 +130,10 @@ Syntax
          *refresh_skin_rel* is > 0)
        *exile_substep* value = *yes* or *no* (optional; default *no*;
          only used if *adapt* is *yes*)
+       *preshrink_exile* value = *yes* or *no* (optional; default *no*;
+         requires *exile_substep yes*; only used if *drift_response* is
+         *preshrink*). Not currently recommended for production use; see
+         the Description below.
        *event_log* value = filename for a per-atom/per-event diagnostic
          log (optional; default none, which disables this log entirely)
 
@@ -107,6 +153,18 @@ Examples
          mollify yes adapt yes c_acc 0.25 dt_min 0.0002 dt_max 0.01 &
          ke_rel 12.0 gamma_quench 20.0 refresh_skin 0.1 &
          drift_response preshrink
+   fix 1 stiff baoab/tether 300.0 300.0 100.0 12345 theta 1.8 refresh 20 &
+         mollify yes adapt yes c_acc 0.25 dt_min 0.0002 dt_max 0.01 &
+         ke_rel 25.0 gamma_quench auto refresh_skin 0.1 &
+         drift_response preshrink
+   fix 1 stiff baoab/tether 300.0 300.0 100.0 12345 theta 1.8 refresh 20 &
+         mollify yes adapt yes c_acc 0.25 dt_min 0.0002 dt_max 0.01 &
+         ke_rel warmup 2000 ke_rel_refresh refine gamma_quench auto &
+         refresh_skin 0.1 drift_response preshrink
+   fix 1 stiff baoab/tether 20.0 20.0 100.0 12345 theta 1.8 refresh 20 &
+         mollify yes adapt yes c_acc 0.25 dt_min 0.0002 dt_max 0.01 &
+         ke_rel 25.0 gamma_quench auto calib 2000 2000 &
+         refresh_skin 0.1 drift_response preshrink event_log tether.log
 
 .. versionadded:: TBD
 
@@ -153,6 +211,82 @@ timestep, are identical for every atom regardless of group membership.
 
 .. versionadded:: TBD
 
+A single refresh's finite-difference curvature probe is an instantaneous
+snapshot: for an atom whose local environment wobbles anharmonically
+(light interstitial species caged by much heavier neighbors are the
+typical case), consecutive refreshes can each diagonalize to a
+meaningfully different estimate even though the atom's true, thermally
+averaged local curvature is comparatively stable. Letting the working
+estimate thrash with every refresh risks a stiff mode spuriously
+reclassified as soft (or the reverse) between refreshes, purely from
+probe noise rather than any real change in the atom's environment. The
+*heff_samples* keyword addresses this by averaging the raw (symmetrized,
+pre-diagonalization) curvature matrix over *heff_samples* consecutive
+scheduled refreshes before using it: the matrix, not the diagonalized
+frequencies, is accumulated, since averaging frequencies and eigenvectors
+taken from different local eigenbases across an anharmonically wobbling
+environment is not a meaningful operation, while averaging the underlying
+matrix is (the same self-consistent-harmonic-approximation reasoning
+behind thermally sampling an effective force constant). The working
+estimate that actually governs stiff/soft classification is only
+re-diagonalized at the first sample of each window (an ordinary
+instantaneous estimate, exactly as every refresh was before this keyword
+existed) and once more when the window closes to the full *heff_samples*-
+sample average, which then stays frozen until the next window is armed;
+samples in between accumulate silently without changing the working
+estimate. This keeps the atom's stiff/soft classification and tethered
+center stable for the whole averaging window instead of following every
+intermediate noisy sample.
+
+An emergency re-tether (triggered by *drift_response preshrink* or by the
+kinetic-energy/drift excursion guards described below) always probes and
+uses a fresh instantaneous estimate immediately, regardless of
+*heff_samples*, since it needs the atom's current local curvature right
+now rather than a stale mid-window average. When *heff_samples* is
+greater than 0, that same emergency probe also arms a brand-new averaging
+window, seeded with its own raw matrix as the window's first sample,
+rather than leaving the working estimate permanently pinned on that one
+instantaneous sample with no further averaging ever applied to it.
+Leaving *heff_samples* at its default of 0 reproduces the original
+behavior exactly: every refresh, scheduled or emergency, is an
+independent, un-averaged instantaneous estimate.
+
+This keyword is a direct port of a thermally-averaged effective curvature
+technique already validated in this project's reference Python
+implementation of this integration method, where it was essential for
+stability on anharmonic rattler systems. Its C++ port, including the
+re-arming behavior above, has not shown a measurable benefit in LAMMPS
+testing on an H-in-Pd EAM system under the same *drift_response preshrink*
+configuration documented elsewhere on this page: dt-occupancy, heavy-
+subsystem temperature range, and guard/demotion event counts were
+statistically indistinguishable from the *heff_samples* default of 0.
+
+More importantly, short averaging windows were observed to be actively
+unsafe on that same system: *heff_samples* values of 3 and 6 both caused
+the run to lose atoms and abort (at steps 240 and 500 respectively) under
+a configuration that runs stably at the default of 0 and that also runs
+stably at *heff_samples* 12. This is consistent with the re-arming
+behavior changing, not merely delaying, the exact sequence of curvature
+estimates fed to an already-resonance-sensitive integrator on a chaotic
+trajectory -- a difference anywhere early in the run propagates into a
+different trajectory for the remainder of it, rather than being confined
+to the moment the averaging window actually governs a decision. The
+*heff_samples* 12 case surviving is consistent with a window long enough
+that, on this system, it is essentially always re-armed by the next
+emergency re-tether before it can close into a potentially stale
+intermediate average. Treat short *heff_samples* windows (small relative
+to how often emergency re-tethers recur for the atoms being tracked) as
+an empirically identified risk, not just an unproven feature, on systems
+using *drift_response preshrink*: verify against the standard diagnostic
+suite (heavy-subsystem temperature trace, guard/demotion event counts,
+dt-occupancy histogram, and simply whether the run completes) for any new
+system or window size before relying on a particular *heff_samples*
+setting.
+
+----------
+
+.. versionadded:: TBD
+
 The *mollify* keyword selects the Newton mollifier. When set to *yes*,
 the harmonic center for each stiff mode is not held fixed at the last
 refresh position but is instead re-solved every timestep as that atom's
@@ -180,6 +314,25 @@ in the solved center, and over-excited harmonic energy); they are always
 available as output quantities (see below) for monitoring, but are only
 acted on -- demoting the atom back to unmollified integration -- when
 *adapt* is *yes*.
+
+.. versionadded:: TBD
+
+The *force_eval* keyword selects how the Newton solve above evaluates a
+trial force. The default, *local*, is the behavior described above: a
+local, no-communication force evaluation over the atom's existing
+neighbor list. Setting this to *full* instead recomputes the force on
+the trial atom from a genuine whole-system force evaluation (every pair,
+bond, angle, dihedral, improper, and k-space contribution the simulation
+has defined, not only the pairwise terms this fix's local evaluation
+covers), for every Newton iteration. This is a correctness-validation
+mode, not a production option: its cost scales with the total number of
+atoms in the simulation rather than with one atom's neighbor count, and
+it is restricted to a single MPI process (an error is raised at fix
+creation if *force_eval full* is requested with more than one process).
+It is intended for checking, on a small or serial system, how much of an
+observed discrepancy between the local evaluation and an exact reference
+comes from the local evaluation's neighbor-shell truncation, not for
+everyday runs.
 
 ----------
 
@@ -229,6 +382,135 @@ looks like a genuine physical event rather than a numerical artifact is
 also given a brief, strong-friction thermostat kick (*gamma_quench*)
 while it cools down, so that legitimate kinetic energy does not linger in
 its now-unconstrained modes.
+
+----------
+
+.. versionadded:: TBD
+
+With *gamma_quench* set to *auto*, this fix determines the quench
+friction coefficient itself instead of using a fixed literal value, and
+keeps updating it for the entire run as the system evolves -- this is not
+a one-time warm-up calibration. Every curvature refresh, *gamma_quench* is
+set to the same global stiffest-mode frequency (the largest currently
+stiff-classified eigenfrequency across every atom in the group) that
+already governs the adaptive timestep itself, a critically-damped ansatz
+tying the cooldown friction rate to whatever the system's own measured
+dynamics currently justify rather than a hand-picked constant. The value
+is free to rise or fall later in the run if the system's stiffest mode
+changes (heating, a different atom becoming dominant, and so on). Because
+this derivation is purely a function of each atom's own mass-normalized
+curvature, it requires no pair-style- or species-specific tuning. When
+*event_log* is also set, each time the derived value changes by more than
+20% from the last value written, a *GAMMA_AUTO* entry records the new
+value and the triggering frequency.
+
+----------
+
+.. versionadded:: TBD
+
+Plain *auto* ties the quench friction to the stiffest mode's own
+oscillation frequency, which is a critically-damped ansatz for that
+*mode*, not a calibration against how hot the masked (stiff) subsystem
+actually runs relative to its target temperature; in practice *auto* alone
+can under-damp the masked subsystem by two to three orders of magnitude.
+Appending *calib* followed by two step counts, *warmup* and *period*,
+turns on a closed-loop controller that estimates the needed correction
+from the run itself rather than from a hand-picked multiplier: for the
+first *warmup* steps, *gamma_quench* follows plain *auto* exactly, while
+this fix also accumulates, every timestep, the kinetic energy of every
+masked mode on every group atom (excluding any step where the kinetic
+guard above just fired, since that energy is being actively removed, not
+representative of steady-state behavior). Every *period* steps after
+*warmup* has elapsed, these accumulated sums are converted into an
+effective temperature of the masked subsystem via equipartition and
+compared, as a ratio, against the fix's own target temperature. A ratio
+of 1.0 means the current *gamma_quench* is already correct; this is true
+regardless of what that target temperature is or what system is being
+simulated, which is what allows the same controller and the same default
+settings to calibrate correctly across different temperatures and
+different systems without being told in advance what value to converge
+to.
+
+Because any single measurement window can be dominated by ordinary
+chaotic-trajectory noise rather than a genuine mismatch, a change is only
+committed once *gamma_quench_calib_confirm* consecutive windows agree on
+the same direction (too hot or too cold, outside the
+*gamma_quench_calib_deadband* range); a window matching neither direction,
+or disagreeing with the streak so far, resets the count. Once confirmed,
+*gamma_quench* is multiplied by the measured ratio raised to
+*gamma_quench_calib_gain* and clamped to at most
+*gamma_quench_calib_max_step* in either direction, then clamped again to
+lie between the plain *auto* value (a permanent floor -- *gamma_quench* is
+never allowed to damp more weakly than critical damping for the current
+stiffest mode) and *gamma_quench_calib_ceiling* (a generous safety rail,
+not a target value). *gamma_quench_calib_gain*,
+*gamma_quench_calib_max_step*, *gamma_quench_calib_confirm*, and
+*gamma_quench_calib_deadband* govern only how cautiously this loop reacts
+to its own measurement noise; none of them encode what the correct
+damping value is for any particular system. With *gamma_quench_calib_refresh
+refine* (the default), this process continues for the entire run, so the
+calibration can continue tracking a system whose character changes over
+time; with *freeze*, calibration stops updating after its first committed
+change, similar in spirit to *ke_rel_refresh freeze*. When *event_log* is
+set, each committed update is recorded as a *GAMMA_CALIB* entry with the
+new value, the measured ratio and temperature, and the confirming streak.
+
+*warmup* and *period* have no default: the right window lengths depend on
+how many atoms are being tracked and how quickly the system's behavior can
+change, and a hidden default here would simply reintroduce the kind of
+unexamined constant this mechanism exists to avoid. Note that the number
+of confirming windows needed to close a large initial mismatch can be
+substantial -- each committed step is bounded by *gamma_quench_calib_max_step*
+and each commit requires its own fresh *gamma_quench_calib_confirm*-window
+streak -- so *period* should be chosen short enough, relative to the total
+run length, for the controller to actually reach its target value within
+the run being calibrated.
+
+----------
+
+.. versionadded:: TBD
+
+Unlike *gamma_quench*, *ke_rel* is a rare-event guard threshold rather than
+an ordinary dynamical property, and cannot be safely read off typical
+thermal fluctuations: a guard threshold calibrated purely from an
+ordinary-dynamics sample of "how hot does this atom normally get" will
+always undershoot what the guard actually needs to tolerate, because that
+sample essentially never contains the rare near-collision tail events a
+guard exists to distinguish from. Setting *ke_rel* to *warmup* followed by
+a step count instead fits the EXPONENTIAL DECAY RATE of that tail (a
+Peaks-Over-Threshold fit with shape fixed at 0, matching the
+:math:`\mathrm{Exponential}(\mathrm{mean}=0.5\,k_B T)` distribution a
+single resolved harmonic mode's kinetic energy follows under
+equipartition) and extrapolates it analytically to a target rarity,
+rather than reading off whatever percentile of the warm-up sample happened
+to be observed.
+
+For the first *warmup* steps, this fix bins every group atom's
+over-excitation ratio (the same quantity compared against *ke_rel* itself)
+into a histogram and, once the window closes, fixes a threshold *u* at
+its empirical 90th-percentile bin. From that point on, every sample
+exceeding *u* updates two running totals: how many samples have exceeded
+it, and by how much on average. These two numbers give a closed-form fit
+for the tail's decay rate, which is then extrapolated to the ratio
+expected to be exceeded only about once every *ke_rel_margin_blocks*
+repetitions of the data collected so far (default 1000, matching the
+roughly 1-in-1000 rarity target of the 99.9th-percentile approach this
+replaces). The guard keeps using whatever *ke_rel* value was in effect
+(hand-set or the 12.0 default) throughout this entire process, so the
+over-excitation guard is never disabled or weakened while statistics are
+being collected, and the fitted result is never allowed to end up below
+that starting value.
+
+*ke_rel_refresh* selects what happens once a fit is available, since the
+right choice depends on the system: with *freeze* (the default), the fit
+computed when *warmup* steps have elapsed is applied once and *ke_rel* is
+then held fixed for the remainder of the run, with no further sampling
+overhead. With *refine*, the running totals behind the tail fit are never
+reset and continue accumulating for the rest of the run; every subsequent
+curvature refresh re-derives the threshold from the now-larger sample and
+raises *ke_rel* if the new fit exceeds the current value (never lowers
+it). When *event_log* is also set, each such update is recorded as a
+*KE_REL_CAL* entry with the new value and the fitted decay rate.
 
 ----------
 
@@ -406,6 +688,50 @@ system.
 
 .. versionadded:: TBD
 
+With *drift_response preshrink*, any single atom whose drift crosses its
+own local threshold shrinks this fix's shared, global timestep for every
+atom and locks it there for a cooldown window, even though the rest of
+the group may have nothing wrong with it. *preshrink_exile* changes what
+happens when that trigger fires: instead of shrinking the shared
+timestep, the triggering atom alone is placed into the same exile
+treatment described above for *exile_substep* (same fixed cooldown
+duration as the kinetic-energy guard uses), leaving the shared timestep
+free to serve the rest of the group. Requires *exile_substep yes*, since
+it reuses that keyword's exile machinery rather than introducing a
+second one; setting *preshrink_exile yes* without it is an error.
+Leaving this keyword at its default of *no* reproduces the original
+*preshrink* behavior exactly.
+
+.. warning::
+
+   *preshrink_exile* is **not currently recommended for production use**.
+   In testing on the same H-in-Pd EAM system used above, it reproduced a
+   known failure mode this fix's *preshrink* response was specifically
+   designed to avoid: an earlier, same-step local-rescue response to this
+   same drift trigger (now the *retether* setting of *drift_response*)
+   was found during this fix's development to fire on nearly every step
+   from ordinary thermal jitter, with each rescue's own approximation
+   error compounding into the very close encounter it was meant to
+   prevent. *preshrink_exile* routes the same predictive, pre-encounter
+   drift trigger into a different mechanism -- a sustained exile window,
+   already validated for the kinetic-energy guard's *reactive*,
+   post-encounter trigger -- but an exiled atom receives no thermostat
+   coupling while it integrates on its own, and the drift trigger fires
+   before the close encounter it is warning about has resolved. The
+   result was the same failure signature by a different route: within
+   about 120 steps the heavy-subsystem temperature reached in excess of
+   170,000 K and the run aborted on lost atoms, with *preshrink_exile*
+   triggering roughly twenty times more often over that short span than
+   the ordinary *preshrink* global-shrink response triggers across an
+   entire stable 10000-step run of the same system. *exile_substep*
+   itself is unaffected by this finding and remains safe on its own; the
+   problem is specific to feeding it this particular, predictive trigger
+   with no damping applied during the exile window.
+
+----------
+
+.. versionadded:: TBD
+
 The *event_log* keyword writes a permanent, per-atom/per-event diagnostic
 log to the given filename, one line per curvature refresh, guard trip,
 demotion, or timestep preshrink. Each rank opens its own log file; when
@@ -531,13 +857,23 @@ Related commands
 Default
 """""""
 
-*eps* defaults to :math:`10^{-4}` times the neighbor skin distance.
-*mollify* defaults to *no*. *newton_iters* defaults to 8. *newton_damp*
+*heff_samples* defaults to 0 (every refresh is an instantaneous,
+un-averaged estimate). *eps* defaults to :math:`10^{-4}` times the
+neighbor skin distance. *mollify* defaults to *no*. *newton_iters* defaults to 8. *newton_damp*
 defaults to 0.6. *solve_tol_rel* defaults to 0.005. *adapt* defaults to
 *no*. *c_acc* defaults to 0.25. *dt_min* defaults to 0.02 times the
 timestep in effect when this fix was defined. *dt_max* defaults to the
-timestep in effect when this fix was defined. *ke_rel* defaults to 12.0.
-*gamma_quench* defaults to 20.0. *refresh_skin* defaults to 0.0.
+timestep in effect when this fix was defined. *ke_rel* defaults to 12.0,
+with *warmup* disabled. *ke_rel_refresh* defaults to *freeze*.
+*ke_rel_margin_blocks* defaults to 1000.
+*gamma_quench* defaults to 20.0, with *auto calib* disabled.
+*gamma_quench_calib_gain* defaults to 0.5. *gamma_quench_calib_max_step*
+defaults to 2.0. *gamma_quench_calib_confirm* defaults to 3.
+*gamma_quench_calib_deadband* defaults to 0.8 1.25.
+*gamma_quench_calib_ceiling* defaults to 10000.0.
+*gamma_quench_calib_refresh* defaults to *refine*.
+*refresh_skin* defaults to 0.0.
 *refresh_skin_rel* defaults to 0.0. *promote_every* defaults to 0.
 *settle_confirm* defaults to 0. *drift_response* defaults to *retether*.
-*exile_substep* defaults to *no*. *event_log* defaults to unset (disabled).
+*exile_substep* defaults to *no*. *preshrink_exile* defaults to *no*.
+*event_log* defaults to unset (disabled).

@@ -40,6 +40,7 @@ PairEAM::PairEAM(LAMMPS *lmp) : Pair(lmp), type2rhor(nullptr), type2z2r(nullptr)
   restartinfo = 0;
   manybody_flag = 1;
   atomic_energy_enable = 1;
+  has_local_partial_force = 1;
   embedstep = -1;
   he_flag = 0;
   fileformat = FUNCFL;
@@ -1593,6 +1594,140 @@ double PairEAM::single(int i, int j, int itype, int jtype,
   fforce = -psip*recip;
 
   return phi;
+}
+
+/* ----------------------------------------------------------------------
+   local re-evaluation of the force on atom i if displaced to xtrial, self-
+   consistently updating the embedding-derivative response of i and each
+   direct neighbor j in jlist -- unlike single(), which reuses fp[i]/fp[j]
+   from the last full compute() as frozen constants.
+   rho_i_trial is an exact resum of i's own density at xtrial (i is the only
+   atom that moved, and density is a sum of pairwise terms). rho_j_trial is
+   an exact delta correction of the cached rho[j]: remove i's contribution
+   at its real position, add i's contribution at xtrial, holding j (and
+   everyone else) fixed at whatever position this call's clamp convention
+   assigns it -- the same xj is used for both the removed and added terms,
+   so the delta is exact regardless of that choice. Neighbors beyond jlist
+   (e.g. j's own other neighbors) are not updated -- same first-neighbor-
+   shell scope as the Jtag/Jblk back-reaction this feeds.
+------------------------------------------------------------------------- */
+
+bool PairEAM::local_partial_force(int i, const double *xtrial, int jnum, const int *jlist,
+                                   double *fout, double *fneigh, int clamp_groupbit,
+                                   double *const *clamp_c)
+{
+  fout[0] = fout[1] = fout[2] = 0.0;
+  if (fneigh)
+    for (int jj = 0; jj < jnum; jj++) fneigh[3*jj] = fneigh[3*jj+1] = fneigh[3*jj+2] = 0.0;
+
+  if (!numforce) error->all(FLERR,"EAM embedding data required for this calculation is missing");
+
+  double **x = atom->x;
+  int *type = atom->type;
+  int *mask = atom->mask;
+  int itype = type[i];
+
+  int m;
+  double p,r,rsq;
+  double *coeff;
+
+  // pass 1: rho_i_trial, exact resum of i's density at the trial position
+
+  double rho_i_trial = 0.0;
+  for (int jj = 0; jj < jnum; jj++) {
+    int j = jlist[jj] & NEIGHMASK;
+    int jtype = type[j];
+    const double *xj = (clamp_groupbit && (mask[j] & clamp_groupbit)) ? clamp_c[j] : x[j];
+
+    double delx = xtrial[0]-xj[0], dely = xtrial[1]-xj[1], delz = xtrial[2]-xj[2];
+    rsq = delx*delx + dely*dely + delz*delz;
+    if (rsq >= cutforcesq) continue;
+
+    r = sqrt(rsq);
+    p = r*rdr + 1.0;
+    m = static_cast<int>(p);
+    m = MIN(m,nr-1);
+    p -= m;
+    p = MIN(p,1.0);
+    coeff = rhor_spline[type2rhor[jtype][itype]][m];
+    rho_i_trial += ((coeff[3]*p + coeff[4])*p + coeff[5])*p + coeff[6];
+  }
+
+  double fp_i_trial;
+  embedding_index(rho_i_trial,m,p);
+  coeff = frho_spline[type2frho[itype]][m];
+  fp_i_trial = (coeff[0]*p + coeff[1])*p + coeff[2];
+
+  // pass 2: per-neighbor force using fp_i_trial and a self-consistently
+  // delta-corrected fp_j_trial for each direct neighbor
+
+  for (int jj = 0; jj < jnum; jj++) {
+    int j = jlist[jj] & NEIGHMASK;
+    int jtype = type[j];
+    const double *xj = (clamp_groupbit && (mask[j] & clamp_groupbit)) ? clamp_c[j] : x[j];
+
+    double delx = xtrial[0]-xj[0], dely = xtrial[1]-xj[1], delz = xtrial[2]-xj[2];
+    rsq = delx*delx + dely*dely + delz*delz;
+    if (rsq >= cutforcesq) {
+      if (fneigh) fneigh[3*jj] = fneigh[3*jj+1] = fneigh[3*jj+2] = 0.0;
+      continue;
+    }
+
+    r = sqrt(rsq);
+    p = r*rdr + 1.0;
+    m = static_cast<int>(p);
+    m = MIN(m,nr-1);
+    p -= m;
+    p = MIN(p,1.0);
+
+    coeff = rhor_spline[type2rhor[itype][jtype]][m];
+    double rhoip = (coeff[0]*p + coeff[1])*p + coeff[2];
+    double rho_ij_new = ((coeff[3]*p + coeff[4])*p + coeff[5])*p + coeff[6];
+
+    coeff = rhor_spline[type2rhor[jtype][itype]][m];
+    double rhojp = (coeff[0]*p + coeff[1])*p + coeff[2];
+
+    coeff = z2r_spline[type2z2r[itype][jtype]][m];
+    double z2p = (coeff[0]*p + coeff[1])*p + coeff[2];
+    double z2 = ((coeff[3]*p + coeff[4])*p + coeff[5])*p + coeff[6];
+
+    double rho_j_trial = rho[j];
+    double delx0 = x[i][0]-xj[0], dely0 = x[i][1]-xj[1], delz0 = x[i][2]-xj[2];
+    double rsq0 = delx0*delx0 + dely0*dely0 + delz0*delz0;
+    if (rsq0 < cutforcesq) {
+      double r0 = sqrt(rsq0);
+      double p0 = r0*rdr + 1.0;
+      int m0 = static_cast<int>(p0);
+      m0 = MIN(m0,nr-1);
+      p0 -= m0;
+      p0 = MIN(p0,1.0);
+      double *coeff0 = rhor_spline[type2rhor[itype][jtype]][m0];
+      rho_j_trial -= ((coeff0[3]*p0 + coeff0[4])*p0 + coeff0[5])*p0 + coeff0[6];
+    }
+    rho_j_trial += rho_ij_new;
+
+    int mj; double pj;
+    embedding_index(rho_j_trial,mj,pj);
+    double *coeffj = frho_spline[type2frho[jtype]][mj];
+    double fp_j_trial = (coeffj[0]*pj + coeffj[1])*pj + coeffj[2];
+
+    double recip = 1.0/r;
+    double phi = z2*recip;
+    double phip = z2p*recip - phi*recip;
+    double psip = fp_i_trial*rhojp + fp_j_trial*rhoip + phip;
+    double fpair = -scale[itype][jtype]*psip*recip;
+
+    fout[0] += delx*fpair;
+    fout[1] += dely*fpair;
+    fout[2] += delz*fpair;
+    if (fneigh) {
+      fneigh[3*jj+0] = -delx*fpair;
+      fneigh[3*jj+1] = -dely*fpair;
+      fneigh[3*jj+2] = -delz*fpair;
+    }
+  }
+
+  return true;
 }
 
 /* ---------------------------------------------------------------------- */

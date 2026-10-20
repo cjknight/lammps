@@ -102,6 +102,7 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   newton_damp = 0.6;
   solve_tol_rel = 0.005;
   use_local_partial_force = 0;
+  force_eval_full = 0;
 
   adapt = 0;
   c_acc = 0.25;
@@ -109,10 +110,38 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   dt_max = -1.0;    // sentinel: default the fix-creation-time dt, resolved below
   ke_rel = 12.0;
   gamma_quench = 20.0;
+  gamma_quench_auto = 0;
+  gamma_quench_last_logged = -1.0;
+  gamma_quench_calib = 0;
+  gamma_quench_calib_warmup = 0;
+  gamma_quench_calib_period = 0;
+  gamma_quench_calib_gain = 0.5;
+  gamma_quench_calib_max_step = 2.0;
+  gamma_quench_calib_confirm = 3;
+  gamma_quench_calib_deadband_lo = 0.8;
+  gamma_quench_calib_deadband_hi = 1.25;
+  gamma_quench_calib_ceiling = 1.0e4;
+  gamma_quench_calib_refine = 1;
+  gamma_quench_calib_sum_ke = 0.0;
+  gamma_quench_calib_sum_dof = 0.0;
+  gamma_quench_calib_direction = 0;
+  gamma_quench_calib_streak = 0;
+  gamma_quench_calib_committed = 0;
+  last_gamma_calib_check = -1;
+  ke_rel_warmup_steps = 0;
+  ke_rel_refine = 0;
+  ke_rel_margin_blocks = 1000;
+  for (int i = 0; i < KE_REL_NBINS; i++) ke_rel_hist[i] = 0.0;
+  ke_rel_u = -1.0;
+  ke_rel_count_u = 0.0;
+  ke_rel_sum_exceed = 0.0;
+  ke_rel_n_total = 0.0;
+  ke_rel_last_logged = -1.0;
   refresh_skin = 0.0;
   refresh_skin_rel = 0.0;
   drift_response = 0;
   exile_substep = 0;
+  preshrink_exile = 0;
   om_split = 0.0;
   om_split_set = 0;
   dt_lvl = -1;
@@ -178,11 +207,75 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
       iarg += 2;
     } else if (strcmp(arg[iarg], "ke_rel") == 0) {
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether ke_rel", error);
-      ke_rel = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
+      if (strcmp(arg[iarg + 1], "warmup") == 0) {
+        if (iarg + 3 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether ke_rel warmup", error);
+        ke_rel_warmup_steps = utils::inumeric(FLERR, arg[iarg + 2], false, lmp);
+        iarg += 3;
+      } else {
+        ke_rel = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
+        ke_rel_warmup_steps = 0;
+        iarg += 2;
+      }
+    } else if (strcmp(arg[iarg], "ke_rel_refresh") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether ke_rel_refresh", error);
+      if (strcmp(arg[iarg + 1], "freeze") == 0)
+        ke_rel_refine = 0;
+      else if (strcmp(arg[iarg + 1], "refine") == 0)
+        ke_rel_refine = 1;
+      else
+        error->all(FLERR, iarg + 1, "Fix baoab/tether ke_rel_refresh must be freeze or refine");
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "ke_rel_margin_blocks") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether ke_rel_margin_blocks", error);
+      ke_rel_margin_blocks = utils::inumeric(FLERR, arg[iarg + 1], false, lmp);
       iarg += 2;
     } else if (strcmp(arg[iarg], "gamma_quench") == 0) {
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether gamma_quench", error);
-      gamma_quench = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
+      if (strcmp(arg[iarg + 1], "auto") == 0) {
+        gamma_quench_auto = 1;
+        iarg += 2;
+        if (iarg < narg && strcmp(arg[iarg], "calib") == 0) {
+          if (iarg + 3 > narg)
+            utils::missing_cmd_args(FLERR, "fix baoab/tether gamma_quench auto calib", error);
+          gamma_quench_calib = 1;
+          gamma_quench_calib_warmup = utils::inumeric(FLERR, arg[iarg + 1], false, lmp);
+          gamma_quench_calib_period = utils::inumeric(FLERR, arg[iarg + 2], false, lmp);
+          iarg += 3;
+        }
+      } else {
+        gamma_quench = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
+        gamma_quench_auto = 0;
+        iarg += 2;
+      }
+    } else if (strcmp(arg[iarg], "gamma_quench_calib_gain") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether gamma_quench_calib_gain", error);
+      gamma_quench_calib_gain = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "gamma_quench_calib_max_step") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether gamma_quench_calib_max_step", error);
+      gamma_quench_calib_max_step = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "gamma_quench_calib_confirm") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether gamma_quench_calib_confirm", error);
+      gamma_quench_calib_confirm = utils::inumeric(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "gamma_quench_calib_deadband") == 0) {
+      if (iarg + 3 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether gamma_quench_calib_deadband", error);
+      gamma_quench_calib_deadband_lo = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
+      gamma_quench_calib_deadband_hi = utils::numeric(FLERR, arg[iarg + 2], false, lmp);
+      iarg += 3;
+    } else if (strcmp(arg[iarg], "gamma_quench_calib_ceiling") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether gamma_quench_calib_ceiling", error);
+      gamma_quench_calib_ceiling = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "gamma_quench_calib_refresh") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether gamma_quench_calib_refresh", error);
+      if (strcmp(arg[iarg + 1], "freeze") == 0)
+        gamma_quench_calib_refine = 0;
+      else if (strcmp(arg[iarg + 1], "refine") == 0)
+        gamma_quench_calib_refine = 1;
+      else
+        error->all(FLERR, iarg + 1, "Fix baoab/tether gamma_quench_calib_refresh must be freeze or refine");
       iarg += 2;
     } else if (strcmp(arg[iarg], "refresh_skin") == 0) {
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether refresh_skin", error);
@@ -204,6 +297,19 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
     } else if (strcmp(arg[iarg], "exile_substep") == 0) {
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether exile_substep", error);
       exile_substep = utils::logical(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "preshrink_exile") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether preshrink_exile", error);
+      preshrink_exile = utils::logical(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "force_eval") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether force_eval", error);
+      if (strcmp(arg[iarg + 1], "local") == 0)
+        force_eval_full = 0;
+      else if (strcmp(arg[iarg + 1], "full") == 0)
+        force_eval_full = 1;
+      else
+        error->all(FLERR, iarg + 1, "Fix baoab/tether force_eval must be local or full");
       iarg += 2;
     } else if (strcmp(arg[iarg], "event_log") == 0) {
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether event_log", error);
@@ -230,6 +336,35 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
     error->all(FLERR, "Fix baoab/tether refresh_skin and refresh_skin_rel are mutually exclusive");
   if (exile_substep && !adapt)
     error->all(FLERR, "Fix baoab/tether exile_substep requires adapt yes");
+  if (preshrink_exile && !exile_substep)
+    error->all(FLERR, "Fix baoab/tether preshrink_exile requires exile_substep yes");
+  if (gamma_quench_auto && !adapt)
+    error->all(FLERR, "Fix baoab/tether gamma_quench auto requires adapt yes");
+  if (gamma_quench_calib && !gamma_quench_auto)
+    error->all(FLERR, "Fix baoab/tether gamma_quench auto calib requires gamma_quench auto");
+  if (gamma_quench_calib_warmup < 0)
+    error->all(FLERR, "Fix baoab/tether gamma_quench auto calib warmup steps must be >= 0");
+  if (gamma_quench_calib && gamma_quench_calib_period <= 0)
+    error->all(FLERR, "Fix baoab/tether gamma_quench auto calib period must be > 0");
+  if (gamma_quench_calib_max_step <= 1.0)
+    error->all(FLERR, "Fix baoab/tether gamma_quench_calib_max_step must be > 1.0");
+  if (gamma_quench_calib_confirm < 1)
+    error->all(FLERR, "Fix baoab/tether gamma_quench_calib_confirm must be >= 1");
+  if (gamma_quench_calib_deadband_lo <= 0.0 || gamma_quench_calib_deadband_lo >= 1.0)
+    error->all(FLERR, "Fix baoab/tether gamma_quench_calib_deadband lo must be in (0,1)");
+  if (gamma_quench_calib_deadband_hi <= 1.0)
+    error->all(FLERR, "Fix baoab/tether gamma_quench_calib_deadband hi must be > 1.0");
+  if (gamma_quench_calib_ceiling <= 0.0)
+    error->all(FLERR, "Fix baoab/tether gamma_quench_calib_ceiling must be > 0");
+  if (ke_rel_warmup_steps < 0)
+    error->all(FLERR, "Fix baoab/tether ke_rel warmup steps must be >= 0");
+  if (ke_rel_warmup_steps > 0 && !adapt)
+    error->all(FLERR, "Fix baoab/tether ke_rel warmup requires adapt yes");
+  if (ke_rel_margin_blocks < 1)
+    error->all(FLERR, "Fix baoab/tether ke_rel_margin_blocks must be >= 1");
+  if (force_eval_full && comm->nprocs > 1)
+    error->all(FLERR, "Fix baoab/tether force_eval full is a single-process validation mode "
+                       "and cannot run under MPI domain decomposition");
 
   // permanent per-atom/per-event diagnostic log (plan Sec 6.1): opened once
   // here, for the fix's whole lifetime, matching fix_print's single-fopen-
@@ -267,6 +402,7 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
 
   last_refresh_step = -1;
   last_promote_check = -1;
+  last_gamma_calib_check = gamma_quench_calib_warmup;
   need_refresh = 1;
   need_reneighbor = 0;
   dt_floor_until = -1;
@@ -274,6 +410,7 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   n_demoted = n_kinetic_guard = 0;
   n_partial_force_calls = n_recompute_calls = 0;
   n_ghost_miss = 0;
+  n_mask_agree = n_mask_stale_soft = n_mask_stale_tight = 0;
 
   // request-a-real-reneighbor plumbing (Fix base class members): see
   // need_reneighbor's doc comment in the header. next_reneighbor starts at
@@ -313,9 +450,11 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   // from the kinetic over-excitation guard (subset of [5]); [7] stage-4
   // ghost-miss count (stored sparse-block neighbor drifted outside the
   // ghost cutoff before its back-reaction was applied, contribution
-  // dropped -- see n_ghost_miss in the header).
+  // dropped -- see n_ghost_miss in the header); [8..10] stage-20 read-only
+  // diagnostic (cached-vs-fresh mode-eligibility disagreement) -- see
+  // n_mask_agree/n_mask_stale_soft/n_mask_stale_tight in the header.
   vector_flag = 1;
-  size_vector = 8;
+  size_vector = 11;
   extvector = 0;
 
   // per-atom persistent state (curvature-block eigenvectors/frequencies,
@@ -553,6 +692,12 @@ void FixBAOABTether::initial_integrate(int /*vflag*/)
     bool msk[3];
     for (int m = 0; m < 3; m++) msk[m] = mode_is_stiff(i, m);
 
+    // stage-20 read-only diagnostic (long-run light-subsystem heating
+    // investigation): measure how often this cached mask disagrees with a
+    // fresh re-probe, BEFORE kinetic_guard_and_quench() below can mutate
+    // msk[] in place. No effect on dynamics -- see diag_check_staleness().
+    if (mollify) diag_check_staleness(i, mi, msk);
+
     // project displacement-from-center and velocity into the frozen
     // eigenbasis; unmasked modes carry this round-trip through free
     // flight, so it is a no-op for them up to floating-point roundoff.
@@ -574,7 +719,11 @@ void FixBAOABTether::initial_integrate(int /*vflag*/)
     double q1[3], p1[3];
     for (int m = 0; m < 3; m++) {
       if (msk[m]) {
-        double w = om[i][m];
+        // om[i][m] is in natural tau^-1 units (see mode_is_stiff()'s doc
+        // comment in the header); dtby2 is real LAMMPS ps. Convert w before
+        // this literal analytic harmonic rotation, or the oscillator phase
+        // advances ~98x too slowly every step.
+        double w = om[i][m] * sqrt(force->ftm2v);
         double cs = cos(w * dtby2), sn = sin(w * dtby2);
         q1[m] = cs * q0[m] + (sn / w) * p0[m];
         p1[m] = -w * sn * q0[m] + cs * p0[m];
@@ -642,7 +791,8 @@ void FixBAOABTether::initial_integrate(int /*vflag*/)
     double q3[3], p3[3];
     for (int m = 0; m < 3; m++) {
       if (msk[m]) {
-        double w = om[i][m];
+        // same natural-tau -> real-ps conversion as the first-half drift above.
+        double w = om[i][m] * sqrt(force->ftm2v);
         double cs = cos(w * dtby2), sn = sin(w * dtby2);
         q3[m] = cs * q1[m] + (sn / w) * p2[m];
         p3[m] = -w * sn * q1[m] + cs * p2[m];
@@ -867,7 +1017,24 @@ void FixBAOABTether::end_of_step()
 
     refresh_one_atom(i, x[i], true);
 
-    double om_max_new = MAX(om[i][0], MAX(om[i][1], om[i][2]));
+    // preshrink_exile (requires exile_substep yes): this atom's own drift
+    // just tripped the skin threshold -- instead of letting it pull the
+    // shared GLOBAL dt down for every other atom, demote it on the spot
+    // (same flat 3*refresh_every backoff the kinetic (ke_hot) guard uses)
+    // so the NEXT step's initial_integrate() routes it through
+    // sub_step_free_atom()'s already-safe, Allreduce-free local sub-
+    // stepping instead, and this step's dt_local/dt_global vote never
+    // sees it. demote_atom() logs its own DEMOTE event (source=preshrink,
+    // distinct from source=kinetic_guard) -- no separate PRESHRINK log
+    // line for an atom handled this way.
+    if (preshrink_exile) {
+      demote_atom(i, 3 * (bigint) refresh_every, "preshrink");
+      continue;
+    }
+
+    // om[] is in natural tau^-1 units, not real ps^-1 -- convert before using it
+    // to size a real dt (see mode_is_stiff()'s doc comment in the header).
+    double om_max_new = MAX(om[i][0], MAX(om[i][1], om[i][2])) * sqrt(force->ftm2v);
     double dt_target = (om_max_new > 0.0) ? MIN(dt_min, 2.2 / om_max_new) : dt_min;
     if (dt_target < dt_local) {
       dt_local = dt_target;
@@ -1070,6 +1237,45 @@ void FixBAOABTether::kinetic_guard_and_quench(int i, double mi, double kT, bool 
   double ke_cap = ke_rel * kT * force->mvv2e;
   bool ke_hot = ke_max > ke_cap;
 
+  // gamma_quench auto calib: rolling equipartition-temperature measurement
+  // of the masked subsystem. Reuses the same per-mode ke term the ke_max
+  // loop above just computed, but sums over EVERY masked mode-instance
+  // (not just the max), and excludes ke_hot steps -- an outlier being
+  // pulled out of the dynamics by the guard above, not representative
+  // steady-state behavior. See update_dt()'s GAMMA_CALIB block for how
+  // this rolling sum becomes a temperature and feeds the control law.
+  if (gamma_quench_calib && !ke_hot) {
+    for (int m = 0; m < 3; m++) {
+      if (!msk[m]) continue;
+      gamma_quench_calib_sum_ke += 0.5 * force->mvv2e * mi * p1[m] * p1[m];
+      gamma_quench_calib_sum_dof += 1.0;
+    }
+  }
+
+  // ke_rel warm-up calibration (Phase A histogram / Phase B exceedance
+  // accumulation): reuses ke_max exactly as computed above -- the same
+  // quantity ke_hot just compared against ke_cap -- so the fitted
+  // threshold describes precisely the guard this fix enforces, not a
+  // separate offline proxy. Phase A (ntimestep <= ke_rel_warmup_steps)
+  // bins r = ke_max/kT into a fixed histogram; Phase B (once update_dt()
+  // has closed Phase A and set ke_rel_u >= 0) accumulates the running
+  // exceedance-over-threshold scalars the exponential-tail fit needs. See
+  // update_dt() for the fit itself and the freeze/refine policies.
+  if (ke_rel_warmup_steps > 0) {
+    double r = ke_max / (kT * force->mvv2e);
+    if (ntimestep <= ke_rel_warmup_steps) {
+      int bin = (int) (r / KE_REL_HIST_MAX * KE_REL_NBINS);
+      bin = MAX(0, MIN(KE_REL_NBINS - 1, bin));
+      ke_rel_hist[bin] += 1.0;
+    } else if (ke_rel_u >= 0.0) {
+      ke_rel_n_total += 1.0;
+      if (r > ke_rel_u) {
+        ke_rel_count_u += 1.0;
+        ke_rel_sum_exceed += (r - ke_rel_u);
+      }
+    }
+  }
+
   bool drift_hot = false;
   double drift_mag = -1.0;
   if (!ke_hot && skin_i > 0.0) {
@@ -1230,7 +1436,9 @@ void FixBAOABTether::kinetic_guard_and_quench(int i, double mi, double kT, bool 
 void FixBAOABTether::sub_step_free_atom(int i, double mi, const double *x_mid,
                                          const double *v_mid, double remaining_dt, double kT)
 {
-  double om_max_new = MAX(om[i][0], MAX(om[i][1], om[i][2]));
+  // om[] is in natural tau^-1 units, not real ps^-1 -- convert before using it
+  // to size a real dt (see mode_is_stiff()'s doc comment in the header).
+  double om_max_new = MAX(om[i][0], MAX(om[i][1], om[i][2])) * sqrt(force->ftm2v);
   double dt_sub = (om_max_new > 0.0) ? MIN(dt_min, 2.2 / om_max_new) : dt_min;
   int n_sub = MAX(1, (int) ceil(remaining_dt / dt_sub));
   dt_sub = remaining_dt / n_sub;
@@ -1511,29 +1719,28 @@ void FixBAOABTether::refresh_one_atom(int i, const double *xi, bool instantaneou
 
   // thermally-averaged effective curvature (CLAUDE.md convention #3):
   // heff_samples==0 keeps the legacy instantaneous-every-refresh write
-  // below unchanged. heff_samples>0 accumulates the raw matrix every
-  // refresh cycle (direct port of set_effective_light_blocks(), which
-  // freezes the raw Hessian block, not the diagonalized frequencies --
-  // averaging the matrix is the SCHA-consistent operation across
-  // snapshots with different local eigenbases from anharmonic wobble),
-  // but only RE-DIAGONALIZES the working om[i]/evecs[i] -- the values
-  // mode_is_stiff() actually masks against -- at the FIRST sample (an
-  // ordinary instantaneous estimate, exactly like refresh #1 always was)
-  // and once more when the window closes (the full N-sample average,
-  // frozen forever after). Samples in between accumulate silently
-  // without ever touching om[i]/evecs[i]. This keeps the atom
-  // masked/tethered continuously through the whole window using a STABLE
-  // working estimate (no per-refresh thrash -> no coherent unmask flip),
-  // rather than running genuinely free dynamics on a stiff anharmonic
-  // mode at the production timestep, which is unconditionally unstable
-  // (confirmed empirically: forcing full-unmask during accumulation blew
-  // up worse, by step 4, than the original per-refresh-thrash bug this
-  // mechanism exists to fix). An instantaneous=true emergency re-tether
-  // always takes this same first branch, bypassing the averaging window
-  // entirely -- it needs the current local curvature right now, not a
-  // stale mid-window estimate -- without ever touching Hacc/
-  // n_hess_samples (that scheduled bookkeeping is left exactly as the next
-  // ordinary refresh_blocks() call would find it).
+  // below unchanged. heff_samples>0 maintains a continuously-updating
+  // exponential moving average (EMA) of the raw Hessian, re-diagonalizing
+  // the working om[i]/evecs[i] -- the values mode_is_stiff() actually masks
+  // against -- at EVERY scheduled sample, for as long as the run continues.
+  // heff_samples is interpreted as the EMA time constant: alpha = 1/N gives
+  // the same steady-state noise suppression as an N-sample box average,
+  // with a half-life of ln(2)*N refresh cycles instead of a hard N-cycle
+  // cutoff. This replaces an earlier sum-then-freeze-forever scheme (average
+  // once when an N-sample window closed, then never touch om[i]/evecs[i]
+  // again) that measurably made cached-mask staleness worse, not better
+  // (see [[heff_samples_increases_mode_staleness]]) -- a wider, one-shot
+  // freeze window is not the same thing as a live average, and does not
+  // track a genuinely anharmonic rattler's slowly-evolving local well the
+  // way a continuously-updated EMA does. An instantaneous=true emergency
+  // re-tether always takes the first branch below, bypassing the EMA
+  // entirely -- it needs the current local curvature right now, not the
+  // smoothed estimate. When heff_samples>0 it also RE-ARMS the EMA by
+  // seeding Hacc[i] with this same probe's Hs and setting
+  // n_hess_samples[i]=1, i.e. treating the emergency sample as a fresh
+  // starting point (same idiom as the om_split bootstrap pass above: reuse
+  // the instantaneous probe rather than discard it) rather than blending it
+  // into whatever average had accumulated before the guard tripped.
   if (instantaneous || heff_samples == 0) {
     double eval[3], evec[3][3];
     MathEigen::jacobi3(Hs, eval, evec);
@@ -1541,30 +1748,38 @@ void FixBAOABTether::refresh_one_atom(int i, const double *xi, bool instantaneou
       om[i][m] = sqrt(MAX(eval[m], 0.0));
       for (int a = 0; a < 3; a++) evecs[i][3 * m + a] = evec[a][m];
     }
-  } else if (n_hess_samples[i] < heff_samples) {
-    bool first_sample = (n_hess_samples[i] == 0);
-    for (int a = 0; a < 3; a++)
-      for (int b = 0; b < 3; b++) Hacc[i][3 * a + b] += Hs[a][b];
-    n_hess_samples[i]++;
-    bool window_closed = (n_hess_samples[i] == heff_samples);
-
-    if (first_sample || window_closed) {
-      double Havg[3][3];
+    if (instantaneous && heff_samples > 0) {
       for (int a = 0; a < 3; a++)
-        for (int b = 0; b < 3; b++) Havg[a][b] = Hacc[i][3 * a + b] / n_hess_samples[i];
-
-      double eval[3], evec[3][3];
-      MathEigen::jacobi3(Havg, eval, evec);
-      for (int m = 0; m < 3; m++) {
-        om[i][m] = sqrt(MAX(eval[m], 0.0));
-        for (int a = 0; a < 3; a++) evecs[i][3 * m + a] = evec[a][m];
-      }
+        for (int b = 0; b < 3; b++) Hacc[i][3 * a + b] = Hs[a][b];
+      n_hess_samples[i] = 1;
     }
-    // else: mid-window sample (2..N-1) -- accumulate only, om[i]/
-    // evecs[i] (and hence the mask decision) untouched.
+  } else {
+    bool first_sample = (n_hess_samples[i] == 0);
+    if (first_sample) {
+      for (int a = 0; a < 3; a++)
+        for (int b = 0; b < 3; b++) Hacc[i][3 * a + b] = Hs[a][b];
+    } else {
+      double alpha = 1.0 / heff_samples;
+      for (int a = 0; a < 3; a++)
+        for (int b = 0; b < 3; b++)
+          Hacc[i][3 * a + b] = (1.0 - alpha) * Hacc[i][3 * a + b] + alpha * Hs[a][b];
+    }
+    // saturating counter: no longer gates anything, kept only so
+    // first_sample above and any future diagnostic can tell "never
+    // sampled" (0) from "running" (>0) without a separate flag.
+    if (n_hess_samples[i] < heff_samples) n_hess_samples[i]++;
+
+    double Havg[3][3];
+    for (int a = 0; a < 3; a++)
+      for (int b = 0; b < 3; b++) Havg[a][b] = Hacc[i][3 * a + b];
+
+    double eval[3], evec[3][3];
+    MathEigen::jacobi3(Havg, eval, evec);
+    for (int m = 0; m < 3; m++) {
+      om[i][m] = sqrt(MAX(eval[m], 0.0));
+      for (int a = 0; a < 3; a++) evecs[i][3 * m + a] = evec[a][m];
+    }
   }
-  // else: already frozen (n_hess_samples[i] == heff_samples) -- om[i]/
-  // evecs[i] keep their frozen values, no further write.
 
   log_event("REFRESH", atom->tag[i], -1.0, -1.0, -1.0, -1.0, om[i], -1.0,
             instantaneous ? "forced" : "scheduled");
@@ -1610,6 +1825,88 @@ void FixBAOABTether::refresh_one_atom(int i, const double *xi, bool instantaneou
     nk++;
   }
   nJ[i] = nk;
+}
+
+/* ----------------------------------------------------------------------
+   Stage-20 read-only diagnostic (long-run light-subsystem heating
+   investigation): re-probes atom i's curvature at its CURRENT position
+   (same FD-Hessian + jacobi3 math as refresh_one_atom(), minus the
+   neighbor response-block bookkeeping, which this diagnostic does not
+   need) and re-applies mode_is_stiff()'s eligibility logic against the
+   fresh estimate, using the SAME frozen om_split threshold -- never
+   recomputed here. Writes nothing to om[]/evecs[]/c[]/x0[]/Jtag/Jblk/
+   Hacc/n_hess_samples -- purely additive, no effect on dynamics.
+
+   Comparison is by COUNT of masked modes per atom (0..3), not per mode
+   index: H-in-Pd's three curvature modes are nearly degenerate (see
+   effective_skin()'s doc comment, om~0.6 for every mode), so two
+   independent diagonalizations of nearly-equal eigenvalues can permute
+   which physical mode lands in jacobi3's slot 0/1/2 even when nothing
+   has gone stale -- an index-wise comparison was tried first and showed
+   ~100% spurious "disagreement" from this basis-labeling artifact alone,
+   with no sensitivity to actual staleness. The masked-mode COUNT is
+   permutation-invariant and reflects the only thing that actually
+   matters for mollify's tethering decision: how many of this atom's
+   modes get the analytic/quench treatment vs. free flight.
+------------------------------------------------------------------------- */
+
+void FixBAOABTether::diag_check_staleness(int i, double mi, const bool *msk_cached)
+{
+  double xi[3] = {atom->x[i][0], atom->x[i][1], atom->x[i][2]};
+  double H[3][3];
+
+  for (int b = 0; b < 3; b++) {
+    double fplus[3], fminus[3];
+    double xt[3] = {xi[0], xi[1], xi[2]};
+
+    xt[b] = xi[b] + eps;
+    partial_force(i, xt, fplus, nullptr, true);
+
+    xt[b] = xi[b] - eps;
+    partial_force(i, xt, fminus, nullptr, true);
+
+    for (int a = 0; a < 3; a++) H[a][b] = -(fplus[a] - fminus[a]) / (2.0 * eps);
+  }
+
+  double Hs[3][3];
+  for (int a = 0; a < 3; a++)
+    for (int b = 0; b < 3; b++) Hs[a][b] = 0.5 * (H[a][b] + H[b][a]) / mi;
+
+  double eval[3], evec[3][3];
+  MathEigen::jacobi3(Hs, eval, evec);
+  double om_fresh[3];
+  for (int m = 0; m < 3; m++) om_fresh[m] = sqrt(MAX(eval[m], 0.0));
+
+  // mode_is_stiff()'s eligibility test, evaluated against om_fresh instead
+  // of the cached om[i] -- deliberately duplicated rather than refactored
+  // out of mode_is_stiff(), so this diagnostic stays trivially removable.
+  bool msk_fresh[3];
+  if (!adapt) {
+    // same natural-tau -> real-ps conversion as mode_is_stiff() -- see its
+    // doc comment in fix_baoab_tether.h.
+    double om2real = sqrt(force->ftm2v);
+    for (int m = 0; m < 3; m++) msk_fresh[m] = (om_fresh[m] * om2real * update->dt) > theta;
+  } else if (demote_cool[i] > update->ntimestep) {
+    for (int m = 0; m < 3; m++) msk_fresh[m] = false;
+  } else {
+    double om_max = MAX(om_fresh[0], MAX(om_fresh[1], om_fresh[2]));
+    double om_min = MIN(om_fresh[0], MIN(om_fresh[1], om_fresh[2]));
+    bool eligible = (om_max > om_split) && (om_min > 0.6 * om_split);
+    for (int m = 0; m < 3; m++) msk_fresh[m] = eligible && (om_fresh[m] > om_split);
+  }
+
+  int n_cached_masked = 0, n_fresh_masked = 0;
+  for (int m = 0; m < 3; m++) {
+    if (msk_cached[m]) n_cached_masked++;
+    if (msk_fresh[m]) n_fresh_masked++;
+  }
+  if (n_cached_masked == n_fresh_masked) {
+    n_mask_agree++;
+  } else if (n_fresh_masked > n_cached_masked) {
+    n_mask_stale_soft++;
+  } else {
+    n_mask_stale_tight++;
+  }
 }
 
 /* ----------------------------------------------------------------------
@@ -1684,8 +1981,12 @@ void FixBAOABTether::compute_om_split()
   // degenerate group (too few modes for a gap to mean anything) -- fall
   // back to the fixed theta/dt threshold so mode_is_stiff() still behaves
   // sanely instead of comparing every frequency against om_split == 0.
+  // theta/update->dt is a real ps^-1 quantity; om_split is compared directly
+  // against om[]/om_fresh elsewhere, which are natural tau^-1 units (see
+  // mode_is_stiff()'s doc comment) -- divide by sqrt(force->ftm2v) to land
+  // om_split in that same natural-unit scale.
   if (freqs.size() < 2) {
-    om_split = theta / update->dt;
+    om_split = (theta / update->dt) / sqrt(force->ftm2v);
     om_split_set = 1;
     return;
   }
@@ -1704,7 +2005,11 @@ void FixBAOABTether::compute_om_split()
     }
   }
 
-  om_split = (best_gap > 0.0) ? sqrt(freqs[best_k] * freqs[best_k + 1]) : (theta / update->dt);
+  // best_gap branch: geometric mean of two already-natural-unit frequencies,
+  // self-consistent as-is. Fallback branch: same real-ps -> natural-unit
+  // conversion as the degenerate-group fallback above.
+  om_split = (best_gap > 0.0) ? sqrt(freqs[best_k] * freqs[best_k + 1])
+                               : (theta / update->dt) / sqrt(force->ftm2v);
   om_split_set = 1;
 }
 
@@ -1744,11 +2049,18 @@ void FixBAOABTether::update_dt(bool fresh_sample)
     // for every OTHER atom, which is exactly the coupling this keyword
     // exists to remove. See initial_integrate()/final_integrate().
     if (exile_substep && demote_cool[i] > update->ntimestep) continue;
+    // Convert here, at the natural-tau -> real-ps boundary (see
+    // mode_is_stiff()'s doc comment): om_analytic_max/om_unres must be real
+    // ps^-1 throughout the rest of this function (they feed gamma_quench and
+    // dt_c directly), including composing correctly with om_unres's already-
+    // real-unit zero-fallback (c_acc/dt_max) below -- converting again at any
+    // later point of use would double-convert that fallback.
+    double om2real = sqrt(force->ftm2v);
     for (int m = 0; m < 3; m++) {
       if (mode_is_stiff(i, m))
-        om_analytic_max = MAX(om_analytic_max, om[i][m]);
+        om_analytic_max = MAX(om_analytic_max, om[i][m] * om2real);
       else
-        om_unres = MAX(om_unres, om[i][m]);
+        om_unres = MAX(om_unres, om[i][m] * om2real);
     }
   }
 
@@ -1758,6 +2070,183 @@ void FixBAOABTether::update_dt(bool fresh_sample)
     MPI_Allreduce(local, global, 2, MPI_DOUBLE, MPI_MAX, world);
     om_unres = global[0];
     om_analytic_max = global[1];
+  }
+
+  // gamma_quench auto (continuous, not a one-time warm-up calibration):
+  // re-derive gamma_quench from the SAME already-collective, already-
+  // mode_is_stiff()/exile_substep-filtered global curvature signal that
+  // governs dt itself, every time this function runs -- i.e. every refresh
+  // cycle for the life of the run, not just once. Critically-damped
+  // ansatz, margin 1.0: friction on the order of the stiffest mode it is
+  // meant to damp. om_analytic_max <= 0.0 (no stiff atom classified yet)
+  // holds the previous value rather than collapsing gamma_quench to a
+  // no-damping cq1 = exp(0) = 1 coefficient, mirroring the om_unres
+  // fallback immediately below. The relative-change log gate only bounds
+  // event_log volume -- it does not throttle how often the value itself
+  // updates.
+  // gamma_quench_calib (see below) takes over entirely once its own
+  // warm-up window has elapsed -- until then, this plain "auto" heuristic
+  // IS the warm-up estimate ("estimate from an initial portion of the
+  // simulation"), unchanged from today's behavior. Once warm-up ends this
+  // clause never fires again for the rest of the run, regardless of
+  // gamma_quench_calib_refresh freeze/refine, so a frozen calibrated value
+  // can never be silently overwritten back down to om_analytic_max by this
+  // block.
+  if (gamma_quench_auto && om_analytic_max > 0.0 &&
+      (!gamma_quench_calib || update->ntimestep < gamma_quench_calib_warmup)) {
+    gamma_quench = om_analytic_max;
+    if (gamma_quench_last_logged < 0.0 ||
+        fabs(gamma_quench - gamma_quench_last_logged) > 0.2 * gamma_quench_last_logged) {
+      log_event("GAMMA_AUTO", -1, -1.0, -1.0, -1.0, -1.0, nullptr, gamma_quench,
+                fmt::format("om_analytic_max={}", om_analytic_max));
+      gamma_quench_last_logged = gamma_quench;
+    }
+  }
+
+  // gamma_quench auto calib: closed-loop controller layered on top of plain
+  // "auto" (stage-23/24 finding: a flat hardcoded multiplier on
+  // om_analytic_max does not generalize across target temperatures or
+  // systems -- see fix_baoab_tether.rst and gamma_quench_undercalibrated).
+  // After warm-up, every gamma_quench_calib_period steps, Allreduce-close
+  // the rolling window kinetic_guard_and_quench() has been filling, turn it
+  // into an equipartition temperature of the MASKED subsystem, compare
+  // against t_target (self-scaling: rho=1.0 at correct damping regardless
+  // of what the target temperature or system actually is), and -- only
+  // once gamma_quench_calib_confirm consecutive windows agree on the same
+  // direction, the same single-window chaotic-trajectory-noise mitigation
+  // settle_confirm already uses elsewhere in this fix -- commit a clamped,
+  // log-space multiplicative nudge. gain/max_step/confirm/deadband/ceiling
+  // are control-loop stability knobs (how cautiously the loop reacts to its
+  // own measurement noise), never a claim about what the correct damping
+  // value is -- that is the entire point of this mechanism over a flat C.
+  if (gamma_quench_calib && update->ntimestep >= gamma_quench_calib_warmup &&
+      !(gamma_quench_calib_committed && !gamma_quench_calib_refine)) {
+    if (last_gamma_calib_check < 0) last_gamma_calib_check = gamma_quench_calib_warmup;
+    if (update->ntimestep - last_gamma_calib_check >= gamma_quench_calib_period) {
+      double sum_ke_g = gamma_quench_calib_sum_ke, sum_dof_g = gamma_quench_calib_sum_dof;
+      if (comm->nprocs > 1) {
+        double local[2] = {gamma_quench_calib_sum_ke, gamma_quench_calib_sum_dof};
+        double global[2];
+        MPI_Allreduce(local, global, 2, MPI_DOUBLE, MPI_SUM, world);
+        sum_ke_g = global[0];
+        sum_dof_g = global[1];
+      }
+      // genuine rolling window, not cumulative-forever like ke_rel's Phase
+      // B -- reset every close so the controller can track a non-stationary
+      // run instead of averaging over its entire history.
+      gamma_quench_calib_sum_ke = 0.0;
+      gamma_quench_calib_sum_dof = 0.0;
+      last_gamma_calib_check = update->ntimestep;
+
+      if (sum_dof_g > 0.0 && t_target > 0.0) {
+        double T_masked = 2.0 * sum_ke_g / (force->boltz * sum_dof_g);
+        double rho = T_masked / t_target;
+
+        int direction = 0;
+        if (rho > gamma_quench_calib_deadband_hi) direction = 1;
+        else if (rho < gamma_quench_calib_deadband_lo) direction = -1;
+
+        if (direction == 0 || direction != gamma_quench_calib_direction) {
+          gamma_quench_calib_direction = direction;
+          gamma_quench_calib_streak = (direction != 0) ? 1 : 0;
+        } else {
+          gamma_quench_calib_streak++;
+        }
+
+        if (direction != 0 && gamma_quench_calib_streak >= gamma_quench_calib_confirm) {
+          double step = pow(rho, gamma_quench_calib_gain);
+          step = MAX(1.0 / gamma_quench_calib_max_step, MIN(gamma_quench_calib_max_step, step));
+          gamma_quench *= step;
+          gamma_quench = MAX(om_analytic_max, MIN(gamma_quench_calib_ceiling, gamma_quench));
+          log_event("GAMMA_CALIB", -1, -1.0, -1.0, -1.0, -1.0, nullptr, gamma_quench,
+                    fmt::format("rho={} T_masked={} streak={} dir={}", rho, T_masked,
+                                gamma_quench_calib_streak, direction));
+          gamma_quench_last_logged = gamma_quench;
+          gamma_quench_calib_committed = 1;
+          gamma_quench_calib_streak = 0;
+        }
+      }
+    }
+  }
+
+  // ke_rel warm-up calibration (Phase A close + freeze/refine fit):
+  // unlike gamma_quench_auto's continuous re-derivation, ke_rel is a
+  // rare-event guard threshold, not an ordinary dynamical property, so it
+  // cannot be safely read off ordinary-dynamics statistics the way
+  // gamma_quench is -- see the header's doc comment and
+  // workloads/phase2_stage14_calibrated_params/README.md. Instead: fit an
+  // exponential tail (Peaks-Over-Threshold, shape fixed at 0) beyond a
+  // fixed Phase A threshold u, and extrapolate to a target rarity
+  // (1-in-ke_rel_margin_blocks) rather than reading an empirical
+  // percentile, which structurally caps out at whatever was observed.
+  // This function is the existing collective, refresh-cadence hook
+  // (same one gamma_quench_auto uses) so Phase A closes the first time
+  // this runs at or after ke_rel_warmup_steps, and refine mode re-fits
+  // here every subsequent refresh cycle.
+  if (ke_rel_warmup_steps > 0 && update->ntimestep >= ke_rel_warmup_steps) {
+    if (ke_rel_u < 0.0) {
+      double hist_global[KE_REL_NBINS];
+      if (comm->nprocs > 1)
+        MPI_Allreduce(ke_rel_hist, hist_global, KE_REL_NBINS, MPI_DOUBLE, MPI_SUM, world);
+      else
+        for (int b = 0; b < KE_REL_NBINS; b++) hist_global[b] = ke_rel_hist[b];
+
+      double total = 0.0;
+      for (int b = 0; b < KE_REL_NBINS; b++) total += hist_global[b];
+      if (total > 0.0) {
+        double target = 0.9 * total;
+        double cum = 0.0;
+        int ubin = KE_REL_NBINS - 1;
+        for (int b = 0; b < KE_REL_NBINS; b++) {
+          cum += hist_global[b];
+          if (cum >= target) {
+            ubin = b;
+            break;
+          }
+        }
+        ke_rel_u = (ubin + 1) * (KE_REL_HIST_MAX / KE_REL_NBINS);
+      }
+      // total == 0.0 (no masked/skin-tracked atoms sampled any ke_max
+      // during Phase A): leave ke_rel_u at -1.0 and retry at the next
+      // refresh cycle rather than fitting a threshold from zero data.
+    }
+
+    if (ke_rel_u >= 0.0) {
+      double count_u_g = ke_rel_count_u, sum_exceed_g = ke_rel_sum_exceed;
+      if (comm->nprocs > 1) {
+        double local[2] = {ke_rel_count_u, ke_rel_sum_exceed};
+        double global[2];
+        MPI_Allreduce(local, global, 2, MPI_DOUBLE, MPI_SUM, world);
+        count_u_g = global[0];
+        sum_exceed_g = global[1];
+      }
+
+      if (count_u_g > 0.0 && sum_exceed_g > 0.0) {
+        double lambda = count_u_g / sum_exceed_g;
+        double x_star = ke_rel_u + (1.0 / lambda) * log((double) ke_rel_margin_blocks * count_u_g);
+        x_star = MAX(ke_rel, MIN(100.0, x_star));
+        bool first_fit = (ke_rel_last_logged < 0.0);
+
+        if (ke_rel_refine) {
+          if (x_star > ke_rel) {
+            ke_rel = x_star;
+            if (first_fit || fabs(ke_rel - ke_rel_last_logged) > 0.2 * ke_rel_last_logged) {
+              log_event("KE_REL_CAL", -1, -1.0, -1.0, -1.0, -1.0, nullptr, ke_rel,
+                        fmt::format("refine lambda={} u={}", lambda, ke_rel_u));
+              ke_rel_last_logged = ke_rel;
+            }
+          }
+        } else if (first_fit) {
+          // freeze (default): one-time fit, then disable all further
+          // Phase A/B sampling and re-fitting for the rest of the run.
+          ke_rel = x_star;
+          log_event("KE_REL_CAL", -1, -1.0, -1.0, -1.0, -1.0, nullptr, ke_rel,
+                    fmt::format("freeze lambda={} u={}", lambda, ke_rel_u));
+          ke_rel_last_logged = ke_rel;
+          ke_rel_warmup_steps = 0;
+        }
+      }
+    }
   }
 
   // no unresolved mode on ANY rank at all (every flagged mode is either
@@ -1903,45 +2392,100 @@ void FixBAOABTether::solve_center(int i, double mi, double kT, double *cnew)
   double a_th = (om_top > 0.0) ? sqrt(kT) / om_top : 0.0;
   double tol = solve_tol_rel * a_th;
   double damp = newton_damp;
-  double prev_res = -1.0;
   double res = 0.0;
+  bool newton_diverged = false;
 
   if (any_masked) {
-    for (int iter = 0; iter < newton_iters; iter++) {
-      double trial[3];
-      for (int k = 0; k < 3; k++) {
-        trial[k] = x0_eff[k];
-        for (int m = 0; m < 3; m++) trial[k] += evecs[i][3 * m + k] * q[m];
-      }
+    const int max_backtrack = 6;
 
-      double fout[3];
+    double trial[3];
+    for (int k = 0; k < 3; k++) {
+      trial[k] = x0_eff[k];
+      for (int m = 0; m < 3; m++) trial[k] += evecs[i][3 * m + k] * q[m];
+    }
+    double fout[3];
+    if (force_eval_full)
+      full_system_force(i, trial, fout);
+    else
       partial_force(i, trial, fout);
-      n_partial_force_calls++;
+    n_partial_force_calls++;
+    double r[3] = {0, 0, 0};
+    for (int m = 0; m < 3; m++)
+      if (msk[m])
+        for (int k = 0; k < 3; k++) r[m] += evecs[i][3 * m + k] * fout[k];
+    res = 0.0;
+    for (int m = 0; m < 3; m++)
+      if (msk[m]) res += r[m] * r[m];
+    res = sqrt(res);
 
-      double r[3] = {0, 0, 0};
+    // Every candidate step below is accepted only if it both lowers the
+    // residual AND lands within cutoff of a real neighbor (trial_in_range).
+    // Without the range check, a step that overshoots past the last real
+    // neighbor reports a trivial fout=0/res=0 "success" -- the false-
+    // convergence failure mode that let a divergent solve escape the box
+    // entirely on a real H/Pd EAM run (see the solve_center() backtracking
+    // plan). Backtracking (shrinking scale) replaces the old scheme's
+    // reactive, after-the-fact damp halving, which could still commit an
+    // overshooting step before noticing it made things worse.
+    for (int iter = 0; iter < newton_iters; iter++) {
+      if (trial_in_range(i, trial) && res < tol) break;
+
+      double raw[3] = {0, 0, 0};
       for (int m = 0; m < 3; m++)
-        if (msk[m])
-          for (int k = 0; k < 3; k++) r[m] += evecs[i][3 * m + k] * fout[k];
+        if (msk[m]) raw[m] = r[m] / (mi * MAX(om[i][m], 1.0e-8) * MAX(om[i][m], 1.0e-8));
 
-      res = 0.0;
-      for (int m = 0; m < 3; m++)
-        if (msk[m]) res += r[m] * r[m];
-      res = sqrt(res);
+      double scale = damp;
+      bool accepted = false;
+      double q_try[3] = {q[0], q[1], q[2]};
+      double trial_try[3], fout_try[3], r_try[3], res_try = 0.0;
+      for (int bt = 0; bt < max_backtrack; bt++) {
+        for (int m = 0; m < 3; m++) q_try[m] = q[m];
+        for (int m = 0; m < 3; m++) {
+          if (!msk[m]) continue;
+          double om_safe = MAX(om[i][m], 1.0e-8);
+          double cap = 8.0 * sqrt(kT) / om_safe;
+          double d = scale * raw[m];
+          if (d > cap) d = cap;
+          if (d < -cap) d = -cap;
+          q_try[m] = q[m] + d;
+        }
 
-      if (prev_res >= 0.0 && res > prev_res) damp = MAX(0.05, damp * 0.5);
-      prev_res = res;
+        for (int k = 0; k < 3; k++) {
+          trial_try[k] = x0_eff[k];
+          for (int m = 0; m < 3; m++) trial_try[k] += evecs[i][3 * m + k] * q_try[m];
+        }
+        if (force_eval_full)
+          full_system_force(i, trial_try, fout_try);
+        else
+          partial_force(i, trial_try, fout_try);
+        n_partial_force_calls++;
+        r_try[0] = r_try[1] = r_try[2] = 0.0;
+        for (int m = 0; m < 3; m++)
+          if (msk[m])
+            for (int k = 0; k < 3; k++) r_try[m] += evecs[i][3 * m + k] * fout_try[k];
+        res_try = 0.0;
+        for (int m = 0; m < 3; m++)
+          if (msk[m]) res_try += r_try[m] * r_try[m];
+        res_try = sqrt(res_try);
 
-      for (int m = 0; m < 3; m++) {
-        if (!msk[m]) continue;
-        double om_safe = MAX(om[i][m], 1.0e-8);
-        double delta = damp * r[m] / (mi * om_safe * om_safe);
-        double cap = 8.0 * sqrt(kT) / om_safe;
-        if (delta > cap) delta = cap;
-        if (delta < -cap) delta = -cap;
-        q[m] += delta;
+        if (trial_in_range(i, trial_try) && res_try <= res) {
+          accepted = true;
+          break;
+        }
+        scale *= 0.5;
       }
 
-      if (res < tol && iter >= 7) break;
+      if (!accepted) {
+        newton_diverged = true;
+        break;
+      }
+
+      for (int m = 0; m < 3; m++)
+        if (msk[m]) q[m] = q_try[m];
+      damp = scale;
+      for (int k = 0; k < 3; k++) trial[k] = trial_try[k];
+      for (int m = 0; m < 3; m++) r[m] = r_try[m];
+      res = res_try;
     }
   }
 
@@ -1966,7 +2510,7 @@ void FixBAOABTether::solve_center(int i, double mi, double kT, double *cnew)
   if (any_masked) {
     const double newton_tol_rel = 0.25;
     const double flip_rel = 14.0;
-    bool g_n = res > 20.0 * newton_tol_rel * a_th;
+    bool g_n = newton_diverged || (res > 20.0 * newton_tol_rel * a_th);
     if (g_n) n_guard_newton++;
 
     double flip = 0.0;
@@ -2048,6 +2592,43 @@ void FixBAOABTether::solve_center(int i, double mi, double kT, double *cnew)
    corrupting the one-shot om_split spectral-gap split for the whole run.
 ------------------------------------------------------------------------- */
 
+/* ----------------------------------------------------------------------
+   true if xtrial is within cutoff of at least one of atom i's real
+   neighbors (same clamped-center substitution and neighbor list as
+   partial_force()'s fallback loop below). Used by solve_center()'s
+   backtracking line search to reject a candidate step that overshoots
+   past every neighbor into empty space -- such a step would otherwise
+   report a trivial fout=0/res=0 "converged" from partial_force(), which
+   is a false convergence, not a real equilibrium.
+------------------------------------------------------------------------- */
+
+bool FixBAOABTether::trial_in_range(int i, const double *xtrial) const
+{
+  if (!list) return false;
+
+  double **x = atom->x;
+  int *type = atom->type;
+  int *mask = atom->mask;
+  int itype = type[i];
+  double **cutsq = force->pair->cutsq;
+
+  int *jlist = list->firstneigh[i];
+  int jnum = list->numneigh[i];
+
+  for (int jj = 0; jj < jnum; jj++) {
+    int j = jlist[jj] & NEIGHMASK;
+    int jtype = type[j];
+    const double *xj = (mask[j] & groupbit) ? c[j] : x[j];
+
+    double delx = xtrial[0] - xj[0];
+    double dely = xtrial[1] - xj[1];
+    double delz = xtrial[2] - xj[2];
+    double rsq = delx * delx + dely * dely + delz * delz;
+    if (rsq < cutsq[itype][jtype]) return true;
+  }
+  return false;
+}
+
 bool FixBAOABTether::partial_force(int i, const double *xtrial, double *fout, double *fneigh,
                                     bool live_neighbor_positions) const
 {
@@ -2114,6 +2695,64 @@ bool FixBAOABTether::partial_force(int i, const double *xtrial, double *fout, do
       fneigh[3 * jj + 2] = -delz * fpair;
     }
   }
+  return true;
+}
+
+/* ----------------------------------------------------------------------
+   force_eval full validation mode: an exact whole-system force on atom i
+   if it were placed at xtrial, for solve_center()'s Newton residual only
+   (see the force_eval keyword and solve_center()'s two call sites). Unlike
+   partial_force(), this does NOT substitute a flagged neighbor's clamped
+   center c[j] for its real position -- every other atom (rattler or not)
+   is evaluated at its actual current x[j]. That is a deliberate, known
+   scope limitation, not an oversight: it reintroduces the resonant
+   rattler-rattler coupling partial_force()'s c[j] substitution exists to
+   suppress (see that comment above), so this mode is only a clean
+   validation of the embedding-truncation hypothesis for configurations
+   with at most one flagged atom in range of any other (e.g. the dilute
+   single-H-interstitial H/Pd runs it was built to test) -- not a general
+   substitute for the local kernel.
+
+   Single-process only (guarded in the constructor): moving xtrial into
+   atom->x[i] and recomputing requires atom i's own ghost images to be
+   refreshed via comm->forward_comm() for correctness under periodic
+   boundaries, but no cross-rank communication of the trial position
+   itself is attempted here. Reuses recompute_forces_local() (the same
+   whole-system pair/bond/.../kspace recompute force_moll() already uses
+   for its own clamped-configuration force field) rather than calling
+   force->pair->compute() directly, so every force contribution (not just
+   the pair style) is included. O(N) per call -- expected and acceptable
+   for a validation mode, not something to wire into a hot path.
+------------------------------------------------------------------------- */
+
+bool FixBAOABTether::full_system_force(int i, const double *xtrial, double *fout)
+{
+  double **x = atom->x;
+  double **f = atom->f;
+  int ntotal = atom->nlocal + atom->nghost;
+
+  std::vector<double> fsave(3 * ntotal);
+  if (ntotal) memcpy(fsave.data(), &f[0][0], 3 * ntotal * sizeof(double));
+
+  double xreal[3] = {x[i][0], x[i][1], x[i][2]};
+  x[i][0] = xtrial[0];
+  x[i][1] = xtrial[1];
+  x[i][2] = xtrial[2];
+
+  comm->forward_comm();
+  recompute_forces_local();
+
+  fout[0] = f[i][0];
+  fout[1] = f[i][1];
+  fout[2] = f[i][2];
+
+  x[i][0] = xreal[0];
+  x[i][1] = xreal[1];
+  x[i][2] = xreal[2];
+  comm->forward_comm();
+
+  if (ntotal) memcpy(&f[0][0], fsave.data(), 3 * ntotal * sizeof(double));
+
   return true;
 }
 
@@ -2269,7 +2908,10 @@ double FixBAOABTether::memory_usage()
    guard specifically (subset of [5]), [7] stage-4 ghost-miss count (a
    stored sparse-block neighbor could not be resolved via atom->map(),
    see n_ghost_miss in the header -- always 0 on a single rank with a
-   generous cutoff/skin).
+   generous cutoff/skin). [8..10] stage-20 read-only diagnostic: cached-vs-
+   fresh mode-eligibility agreement/disagreement counts from
+   diag_check_staleness() -- see n_mask_agree/n_mask_stale_soft/
+   n_mask_stale_tight in the header.
 ------------------------------------------------------------------------- */
 
 double FixBAOABTether::compute_vector(int n)
@@ -2283,6 +2925,9 @@ double FixBAOABTether::compute_vector(int n)
     case 5: return (double) n_demoted;
     case 6: return (double) n_kinetic_guard;
     case 7: return (double) n_ghost_miss;
+    case 8: return (double) n_mask_agree;
+    case 9: return (double) n_mask_stale_soft;
+    case 10: return (double) n_mask_stale_tight;
     default: return 0.0;
   }
 }

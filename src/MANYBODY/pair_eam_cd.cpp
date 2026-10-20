@@ -38,6 +38,7 @@ PairEAMCD::PairEAMCD(LAMMPS *lmp, int _cdeamVersion)
   : PairEAMAlloy(lmp), cdeamVersion(_cdeamVersion)
 {
   single_enable = 0;
+  has_local_partial_force = 0;
   restartinfo = 0;
   unit_convert_flag = utils::get_supported_conversions(utils::ENERGY);
 

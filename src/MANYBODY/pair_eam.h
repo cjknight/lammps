@@ -53,6 +53,8 @@ class PairEAM : public Pair {
   void init_style() override;
   double init_one(int, int) override;
   double single(int, int, int, int, double, double, double, double &) override;
+  bool local_partial_force(int, const double *, int, const int *, double *, double *,
+                            int = 0, double *const * = nullptr) override;
   void *extract(const char *, int &) override;
   void *extract_peratom(const char *, int &) override;
 

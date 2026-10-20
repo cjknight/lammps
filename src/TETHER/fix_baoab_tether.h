@@ -20,9 +20,11 @@ FixStyle(baoab/tether,FixBAOABTether);
 #define LMP_FIX_BAOAB_TETHER_H
 
 #include "fix_baoab.h"
+#include "force.h"
 #include "safe_pointers.h"
 #include "update.h"
 
+#include <cmath>
 #include <string>
 
 namespace LAMMPS_NS {
@@ -107,12 +109,96 @@ class FixBAOABTether : public FixBAOAB {
   double solve_tol_rel;  // Newton convergence tol, relative to thermal amplitude
   int use_local_partial_force;   // 0 = pair->single() loop, 1 = pair->local_partial_force()
 
+  // force_eval full (default off, byte-identical when unused): validation-
+  // only mode that bypasses partial_force()'s local kernel entirely for
+  // solve_center()'s Newton residual, substituting a genuine whole-system
+  // force->pair->compute() per trial evaluation instead (see
+  // full_system_force()). O(N) per Newton iteration and single-process
+  // only -- not a production option, see fix_baoab_tether.rst.
+  int force_eval_full;
+
   // stage-3 adaptive-dt + event machinery (all inert when adapt == 0)
   int adapt;              // 0 = stage-1/2 fixed dt, 1 = adaptive dt + demote/quench/forgive
   double c_acc;           // target Verlet accuracy for the unresolved band
   double dt_min, dt_max;  // quantized-ladder floor/ceiling (ladder: dt_max/2^dt_lvl)
   double ke_rel;          // kinetic over-excitation threshold, multiples of kT
   double gamma_quench;    // strong-friction OU coefficient during cooldown
+
+  // gamma_quench auto (continuous, not a warm-up calibration): when set,
+  // gamma_quench is overwritten every update_dt() call from the system's
+  // CURRENT global stiffest-mode frequency instead of holding the literal
+  // keyword value -- see update_dt()'s doc comment. gamma_quench itself
+  // keeps its ordinary default (20.0) as the bootstrap value in effect
+  // before the first refresh with a nonzero om_analytic_max.
+  int gamma_quench_auto;
+  double gamma_quench_last_logged;  // last value written to event_log; -1.0 = never logged yet
+
+  // gamma_quench auto calib <warmup_steps> <period_steps> (requires
+  // gamma_quench_auto): a closed-loop controller layered ON TOP of plain
+  // "auto" rather than replacing it -- see fix_baoab_tether.rst for the full
+  // rationale (this exists specifically because a flat hardcoded multiplier
+  // on om_analytic_max does not generalize across target temperatures or
+  // systems). For the first gamma_quench_calib_warmup steps, behaves exactly
+  // like plain "auto" while the first measurement window fills. After
+  // warm-up, every gamma_quench_calib_period steps, compares the masked
+  // subsystem's own measured equipartition temperature against t_target and
+  // nudges gamma_quench by a clamped, confirmed, log-space step -- see
+  // update_dt(). om_analytic_max remains a permanent floor (never damp
+  // weaker than critical damping for the current stiffest classified mode).
+  // 0 (default) = disabled, gamma_quench_auto's existing behavior is
+  // completely unchanged.
+  int gamma_quench_calib;
+  int gamma_quench_calib_warmup;   // steps before the controller starts acting (no default, required)
+  int gamma_quench_calib_period;   // steps per measurement window (no default, required)
+
+  // control-loop stability knobs (NOT physics constants -- see the design
+  // doc comment on update_dt()'s GAMMA_CALIB block): govern how cautiously
+  // the loop reacts to its own measurement noise, independent of what the
+  // "correct" gamma_quench actually is for this run.
+  double gamma_quench_calib_gain;        // exponent applied to rho=T_masked/t_target per commit; default 0.5
+  double gamma_quench_calib_max_step;    // multiplicative clamp per commit; default 2.0
+  int gamma_quench_calib_confirm;        // consecutive agreeing windows required before committing; default 3
+  double gamma_quench_calib_deadband_lo; // rho below this counts as "too cold" evidence; default 0.8
+  double gamma_quench_calib_deadband_hi; // rho above this counts as "too hot" evidence; default 1.25
+  double gamma_quench_calib_ceiling;     // absolute safety rail, not a target value; default 1e4
+  int gamma_quench_calib_refine;         // 1 (default) = refine forever, 0 = freeze after first commit
+
+  // rolling-window accumulators (reset to zero at every window close --
+  // deliberately NOT cumulative-forever like ke_rel's Phase B, so the
+  // controller tracks a non-stationary run instead of averaging over its
+  // entire history) and streak state for the confirm-before-commit gate.
+  double gamma_quench_calib_sum_ke;   // sum of masked-mode-instance KE (eV) this window, ke_hot steps excluded
+  double gamma_quench_calib_sum_dof;  // count of masked-mode-instance samples this window
+  int gamma_quench_calib_direction;   // -1/0/+1 = last window's evidence direction; 0 = inside deadband
+  int gamma_quench_calib_streak;      // consecutive windows agreeing with gamma_quench_calib_direction
+  bigint last_gamma_calib_check;      // ntimestep of the last window close, for warm-up gating
+
+  // set permanently true the first time the control law commits an update
+  // (never cleared): with gamma_quench_calib_refine == 0 (freeze), this is
+  // what actually stops further window evaluation after that first commit
+  // -- gamma_quench_calib itself stays 1 forever so the warm-up guard on
+  // the plain "auto" block in update_dt() never re-opens and overwrites the
+  // frozen value.
+  int gamma_quench_calib_committed;
+
+  // ke_rel warm-up calibration (rare-event guard threshold, NOT an ordinary
+  // dynamical property like gamma_quench -- see fix_baoab_tether.rst for why
+  // these use different calibration strategies). 0 (default) = disabled,
+  // ke_rel keeps its literal/default value for the whole run, unchanged.
+  // >0 = number of steps in Phase A (threshold-finding); Phase B (exceedance
+  // accumulation) starts when Phase A closes and runs for the rest of the
+  // run in both policies. See kinetic_guard_and_quench() and update_dt().
+  int ke_rel_warmup_steps;
+  int ke_rel_refine;           // 0 = freeze after warm-up (default), 1 = keep ratcheting up
+  int ke_rel_margin_blocks;    // K in the exponential-tail extrapolation formula, default 1000
+  static constexpr int KE_REL_NBINS = 256;
+  double ke_rel_hist[KE_REL_NBINS];  // Phase A histogram of r = ke_max/kT, range [0, ke_rel_hist_max]
+  static constexpr double KE_REL_HIST_MAX = 60.0;
+  double ke_rel_u;             // Phase A threshold (empirical 90th-pct bin); -1.0 = not yet set
+  double ke_rel_count_u;       // Phase B: running count of samples with r > ke_rel_u
+  double ke_rel_sum_exceed;    // Phase B: running sum of (r - ke_rel_u) over those samples
+  double ke_rel_n_total;       // Phase B: running count of all samples since Phase A closed
+  double ke_rel_last_logged;   // last ke_rel value written to event_log; -1.0 = never logged yet
 
   // excursion guard for unmasked/soft modes (Stage 5, adapt == 1 only):
   // 0 (default) = legacy behavior, kinetic_guard_and_quench() only watches
@@ -160,6 +246,21 @@ class FixBAOABTether : public FixBAOAB {
   // dt. Does not change when/how long exile itself triggers or decays
   // (demote_cool/demote_count/backoff/forgiveness untouched).
   int exile_substep;
+
+  // 0 (default) = end_of_step()'s PRESHRINK drift-skin trigger shrinks the
+  // shared GLOBAL update->dt (and locks it via dt_floor_until) exactly as
+  // before, regardless of exile_substep.
+  // 1 = requires exile_substep yes (checked at init()). Each atom whose
+  // drift trips PRESHRINK's threshold is instead demote_atom()'d on the
+  // spot (same flat 3*refresh_every backoff the kinetic (ke_hot) guard
+  // uses, source="preshrink") and excluded from that step's global-shrink
+  // vote entirely, so it decouples into exile_substep's already-validated
+  // sub_step_free_atom() treatment instead of forcing every other atom in
+  // the system down to this one atom's locally-required dt. Untested
+  // against this specific (predictive, pre-close-encounter) trigger
+  // before shipping -- see fix_baoab_tether.rst for the retether
+  // precedent this needs to avoid reproducing.
+  int preshrink_exile;
 
   // permanent per-atom/per-event diagnostic log (plan Sec 6.1's required
   // per-step/per-event log): empty (default) = disabled, zero overhead --
@@ -227,15 +328,16 @@ class FixBAOABTether : public FixBAOAB {
   double **om;        // per-mode angular frequency, 0 if unset (nmax x 3)
 
   // thermally-averaged effective curvature accumulator (heff_samples > 0
-  // only): Hacc is the running SUM of the raw (pre-diagonalization) 3x3
-  // mass-normalized symmetrized Hessian, row-major 9 doubles/atom. om[i]/
-  // evecs[i] are (re)diagonalized from Hacc/n_hess_samples[i] only at the
-  // first sample and once more when n_hess_samples[i] reaches heff_samples
-  // (frozen from then on) -- never on the samples in between, so the
-  // atom's mask decision stays stable through the whole window instead of
-  // thrashing every refresh; see refresh_blocks().
-  double **Hacc;            // running Hessian sum (nmax x 9)
-  int *n_hess_samples;      // samples accumulated so far, 0..heff_samples (nmax)
+  // only): Hacc is a continuously-updated exponential moving average (EMA)
+  // of the raw (pre-diagonalization) 3x3 mass-normalized symmetrized
+  // Hessian, row-major 9 doubles/atom; heff_samples sets the EMA time
+  // constant (alpha = 1/heff_samples). om[i]/evecs[i] are re-diagonalized
+  // from Hacc EVERY scheduled sample (never frozen) -- see
+  // refresh_one_atom() -- so the working mask decision stays continuously
+  // current with the atom's recent-history curvature instead of being
+  // locked to a single stale snapshot.
+  double **Hacc;            // running Hessian EMA (nmax x 9)
+  int *n_hess_samples;      // samples seen so far, saturates at heff_samples (nmax); 0 means "never sampled"
 
   // sparse per-atom response blocks J_i (mollify=yes only): for each group
   // atom i, nJ[i] (neighbor local index, 3x3 block) pairs restricted to
@@ -269,6 +371,20 @@ class FixBAOABTether : public FixBAOAB {
   // on a single rank with a generous cutoff/skin.
   bigint n_ghost_miss;
 
+  // Stage-20 read-only diagnostic (long-run light-subsystem heating
+  // investigation): cached-vs-fresh mode-eligibility disagreement, measured
+  // by diag_check_staleness() immediately after mode_is_stiff() decides the
+  // cached mask and before kinetic_guard_and_quench() can mutate it. Pure
+  // counters, exposed via compute_vector() alongside the existing event
+  // counters above; writes nothing to om[]/evecs[]/c[]/x0[]/Jtag/Jblk.
+  // Per-atom-per-step counts of MASKED-MODE COUNT agreement (0..3 masked
+  // modes cached vs. freshly re-probed), not per-mode-index agreement --
+  // see diag_check_staleness()'s doc comment for why per-index comparison
+  // is invalid for H-in-Pd's near-degenerate modes.
+  bigint n_mask_agree;
+  bigint n_mask_stale_soft;  // fresh count > cached count (dangerous: fewer modes tethered than should be)
+  bigint n_mask_stale_tight; // fresh count < cached count (harmless: more modes tethered than needed)
+
   // halo-locality cost accounting (plan Sec 6.1 honest force-call cost):
   // partial_force() calls (Newton inner loop, mollify=yes) vs. full local
   // recompute_forces_local() calls -- exposed via compute_vector().
@@ -283,15 +399,22 @@ class FixBAOABTether : public FixBAOAB {
 
   // stage-2 additions
   void solve_center(int i, double mi, double kT, double *cnew);
+  bool trial_in_range(int i, const double *xtrial) const;
   bool partial_force(int i, const double *xtrial, double *fout, double *fneigh = nullptr,
                       bool live_neighbor_positions = false) const;
+  bool full_system_force(int i, const double *xtrial, double *fout);
   void force_moll();
 
   // stage-3 additions
 
   inline bool mode_is_stiff(int i, int m) const
   {
-    if (!adapt) return (om[i][m] * update->dt) > theta;
+    // om[] is expressed in the natural eV/Angstrom/amu time unit (tau ~= 10.1805
+    // fs), not real LAMMPS metal-units ps like update->dt -- sqrt(force->ftm2v)
+    // converts it to real ps^-1 before this comparison. Only needed where om is
+    // used linearly against a real-time quantity; the squared uses elsewhere
+    // (mi*om^2 reconstructing H) are scale-invariant and must not get this factor.
+    if (!adapt) return (om[i][m] * sqrt(force->ftm2v) * update->dt) > theta;
     if (demote_cool[i] > update->ntimestep) return false;
     double om_max = MAX(om[i][0], MAX(om[i][1], om[i][2]));
     double om_min = MIN(om[i][0], MIN(om[i][1], om[i][2]));
@@ -299,6 +422,14 @@ class FixBAOABTether : public FixBAOAB {
     return om[i][m] > om_split;
   }
   void compute_om_split();
+
+  // Stage-20 read-only diagnostic: re-probes atom i's curvature at its
+  // CURRENT position (FD Hessian + jacobi3, same math as refresh_one_atom())
+  // without writing om[]/evecs[]/c[]/x0[]/Jtag/Jblk, re-applies the
+  // mode_is_stiff() eligibility test against the fresh estimate, and
+  // accumulates n_mask_agree/n_mask_stale_soft/n_mask_stale_tight against
+  // msk_cached (the mask mode_is_stiff() just produced this step).
+  void diag_check_staleness(int i, double mi, const bool *msk_cached);
 
   // fresh_sample: true (default) from refresh_blocks()'s own scheduled
   // cadence (every flagged atom's om[]/evecs[] just freshly reprobed
