@@ -110,6 +110,7 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   dt_max = -1.0;    // sentinel: default the fix-creation-time dt, resolved below
   ke_rel = 12.0;
   gamma_quench = 20.0;
+  gamma_soft = 0.0;
   gamma_quench_auto = 0;
   gamma_quench_last_logged = -1.0;
   gamma_quench_calib = 0;
@@ -145,12 +146,60 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   om_split = 0.0;
   om_split_set = 0;
   dt_lvl = -1;
+  heavy_groupbit = 0;
+  heavy_sample = 8;
+  heavy_block_tr3 = 0.0;
+  heavy_block_set = 0;
+  j_free = 0;
+  newton_debug_tag = -1;
 
   int iarg = 7;
   while (iarg < narg) {
     if (strcmp(arg[iarg], "theta") == 0) {
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether theta", error);
       theta = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "om_split") == 0) {
+      // DIAGNOSTIC-ONLY override: bypasses compute_om_split()'s one-shot
+      // group-scoped spectral-gap search entirely and latches the supplied
+      // value directly (om_split_set=1 so the refresh() bootstrap never
+      // overwrites it). Exists to test the hypothesis that compute_om_split()
+      // restricted to this fix's own group cannot find the true stiff/soft
+      // boundary when a companion fix handles the rest of the system -- see
+      // the om_split group-scope investigation. Not a production keyword.
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether om_split", error);
+      om_split = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
+      om_split_set = 1;
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "heavy_group") == 0) {
+      // DIAGNOSTIC-ONLY, deliberate match to lj_longstep_prototype.py's
+      // HPdEngine.hessian_blocks(): atoms in the named group get a single,
+      // frozen, isotropic curvature estimate (see compute_heavy_block())
+      // instead of a real per-refresh FD-Hessian probe. A known non-general
+      // shortcut, not validated reference physics -- kept only to get C++
+      // and Python behaviorally consistent for now. Not a production
+      // keyword; see python_heavy_block_frozen_approximation memory.
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether heavy_group", error);
+      int igroup = group->find(arg[iarg + 1]);
+      if (igroup == -1)
+        error->all(FLERR, "Fix baoab/tether heavy_group: group {} does not exist", arg[iarg + 1]);
+      heavy_groupbit = group->bitmask[igroup];
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "heavy_sample") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether heavy_sample", error);
+      heavy_sample = utils::inumeric(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "j_free") == 0) {
+      // DIAGNOSTIC-ONLY: matches lj_longstep_prototype.py's H/Pd engine
+      // having J identically zero (see header comment by j_free). Not a
+      // production keyword.
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether j_free", error);
+      j_free = utils::logical(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "newton_debug_tag") == 0) {
+      // THROWAWAY DIAGNOSTIC: not a production keyword, see header comment.
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether newton_debug_tag", error);
+      newton_debug_tag = utils::tnumeric(FLERR, arg[iarg + 1], false, lmp);
       iarg += 2;
     } else if (strcmp(arg[iarg], "refresh") == 0) {
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether refresh", error);
@@ -247,6 +296,10 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
         gamma_quench_auto = 0;
         iarg += 2;
       }
+    } else if (strcmp(arg[iarg], "gamma_soft") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether gamma_soft", error);
+      gamma_soft = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 2;
     } else if (strcmp(arg[iarg], "gamma_quench_calib_gain") == 0) {
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether gamma_quench_calib_gain", error);
       gamma_quench_calib_gain = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
@@ -424,7 +477,12 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   // comm (pack/unpack below) so a ghost's copy is never stale/garbage under
   // real multi-rank. See initial_integrate()/final_integrate() for the call
   // site and force_moll() comments for the matching reverse-comm fix.
-  comm_forward = 3;
+  // Also carries om[] (3 more doubles) so the Jtag/Jblk-building loop in
+  // refresh_one_atom() can test a possibly-ghost neighbor's CURRENT
+  // stiff/rattler eligibility (om-based) instead of its group membership --
+  // see that loop's comment for why group membership stopped being a valid
+  // proxy once this fix started operating on a single whole-system group.
+  comm_forward = 6;
 
   // stage-4: pack_exchange()/unpack_exchange() write a per-atom payload far
   // larger (and variable-size, up to the JMAX cap) than the base Fix class's
@@ -512,9 +570,19 @@ void FixBAOABTether::log_event(const char *event, tagint tag, double ke, double 
                                 const std::string &note)
 {
   if (!event_log_fp) return;
+  // Verlet::run() increments update->ntimestep at the TOP of its loop,
+  // before initial_integrate() (hence this fix's refresh_blocks()/
+  // solve_center()/etc.) ever runs -- so every event logged from inside
+  // initial_integrate() is evaluated on the state left over from the
+  // *previous* completed step, not the step ntimestep is about to take.
+  // Logging ntimestep-1 reports the step actually reflected by the data
+  // (and makes the very first, pre-run bootstrap REFRESH read step=0,
+  // matching the convention every non-LAMMPS reference implementation
+  // uses for its pre-loop state) instead of a LAMMPS-internal counter
+  // value that is one step ahead of the physical state being described.
   fputs(fmt::format("{} step={} tag={} ke={:.6g} ke_cap={:.6g} drift={:.6g} skin={:.6g} "
                      "om0={:.6g} om1={:.6g} om2={:.6g} dt={:.6g} note={}\n",
-                     event, update->ntimestep, tag, ke, ke_cap, drift, skin,
+                     event, update->ntimestep - 1, tag, ke, ke_cap, drift, skin,
                      om ? om[0] : -1.0, om ? om[1] : -1.0, om ? om[2] : -1.0, dt, note)
             .c_str(),
         event_log_fp);
@@ -646,6 +714,14 @@ void FixBAOABTether::initial_integrate(int /*vflag*/)
   double cq1 = exp(-gamma_quench * update->dt);
   double one_minus_cq1sq = 1.0 - cq1 * cq1;
 
+  // Baseline thermostat coefficients for unmasked, non-quench modes (see
+  // gamma_soft's header comment). Harmless to precompute unconditionally:
+  // gamma_soft == 0.0 (default) gives c1_soft == 1.0, one_minus_c1sq_soft
+  // == 0.0, so the O-step branch below reduces to the prior "p2[m] = p1[m]"
+  // no-op exactly, byte-for-byte, when the keyword is not given.
+  double c1_soft = exp(-gamma_soft * update->dt);
+  double one_minus_c1sq_soft = 1.0 - c1_soft * c1_soft;
+
   energy_onestep = 0.0;
 
   double fran_total[3] = {0.0, 0.0, 0.0};
@@ -763,6 +839,7 @@ void FixBAOABTether::initial_integrate(int /*vflag*/)
     // unchanged, matching Stage 1/2. ----
     double c2 = sqrt(kT * invmass * one_minus_c1sq);
     double cq2 = quench_active ? sqrt(kT * invmass * one_minus_cq1sq) : 0.0;
+    double c2_soft = sqrt(kT * invmass * one_minus_c1sq_soft);
     double r[3] = {random->gaussian(), random->gaussian(), random->gaussian()};
     double p2[3];
     double ke_before = 0.0, ke_after = 0.0;
@@ -770,7 +847,7 @@ void FixBAOABTether::initial_integrate(int /*vflag*/)
     for (int m = 0; m < 3; m++) {
       if (msk[m]) p2[m] = c1 * p1[m] + c2 * r[m];
       else if (quench_active) p2[m] = cq1 * p1[m] + cq2 * r[m];
-      else p2[m] = p1[m];
+      else p2[m] = c1_soft * p1[m] + c2_soft * r[m];
     }
     for (int m = 0; m < 3; m++) ke_after += p2[m] * p2[m];
     energy_onestep += 0.5 * force->mvv2e * mi * (ke_before - ke_after);
@@ -1565,6 +1642,14 @@ void FixBAOABTether::refresh_blocks()
   // per-atom-count-dependent number of forward/reverse_comm() calls used
   // to cause).
 
+  // DIAGNOSTIC-ONLY heavy_group shortcut (see header comment by
+  // heavy_groupbit): must run BEFORE the om_split bootstrap below, since
+  // Python's reference caches its frozen heavy-block estimate on the very
+  // first hessian_blocks() call too -- om_split itself is computed from a
+  // spectrum that already has every heavy atom pinned to the same frozen
+  // value, on both sides, for a true apples-to-apples match.
+  if (heavy_groupbit && !heavy_block_set) compute_heavy_block();
+
   // one-time bootstrap (adapt=yes, before om_split has ever been set):
   // mode_is_stiff()'s per-mode mask below needs om_split, but om_split
   // (D.11.1's spectral-gap split) is itself derived from the full group's
@@ -1584,6 +1669,16 @@ void FixBAOABTether::refresh_blocks()
   if (adapt && !om_split_set) {
     for (int i = 0; i < nlocal; i++) {
       if (!(mask[i] & groupbit)) continue;
+
+      if (heavy_groupbit && (mask[i] & heavy_groupbit)) {
+        double mi = rmass ? rmass[i] : mass[type[i]];
+        double om_scalar = sqrt(MAX(heavy_block_tr3 / mi, 0.0));
+        for (int m = 0; m < 3; m++) {
+          om[i][m] = om_scalar;
+          for (int a = 0; a < 3; a++) evecs[i][3 * m + a] = (a == m) ? 1.0 : 0.0;
+        }
+        continue;
+      }
 
       double mi = rmass ? rmass[i] : mass[type[i]];
       double xi[3] = {x[i][0], x[i][1], x[i][2]};
@@ -1673,12 +1768,39 @@ void FixBAOABTether::refresh_one_atom(int i, const double *xi, bool instantaneou
   double *rmass = atom->rmass;
   int *type = atom->type;
 
+  // DIAGNOSTIC-ONLY heavy_group shortcut (see header comment by
+  // heavy_groupbit): skip the real FD-Hessian probe entirely for this
+  // atom, broadcasting the single frozen isotropic estimate instead --
+  // matches Python's HPdEngine.hessian_blocks() returning the same cached
+  // _heavy_block for every heavy atom on every call. No response block is
+  // built (nJ[i] = 0): mode_is_stiff() can never go true against the
+  // frozen, below-om_split estimate this is meant to reproduce, so the
+  // real Si/Jblk computation would be all zeros anyway.
+  if (heavy_groupbit && (mask[i] & heavy_groupbit)) {
+    double mi = rmass ? rmass[i] : mass[type[i]];
+    double om_scalar = sqrt(MAX(heavy_block_tr3 / mi, 0.0));
+    for (int m = 0; m < 3; m++) {
+      om[i][m] = om_scalar;
+      for (int a = 0; a < 3; a++) evecs[i][3 * m + a] = (a == m) ? 1.0 : 0.0;
+    }
+    log_event("REFRESH", atom->tag[i], -1.0, -1.0, -1.0, -1.0, om[i], -1.0,
+              instantaneous ? "forced_heavy_frozen" : "scheduled_heavy_frozen");
+    x0[i][0] = xi[0];
+    x0[i][1] = xi[1];
+    x0[i][2] = xi[2];
+    c[i][0] = xi[0];
+    c[i][1] = xi[1];
+    c[i][2] = xi[2];
+    nJ[i] = 0;
+    return;
+  }
+
   double mi = rmass ? rmass[i] : mass[type[i]];
   double H[3][3];
 
   int jnum = 0;
   int *jlist = nullptr;
-  if (mollify && list) {
+  if (mollify && list && !j_free) {
     jlist = list->firstneigh[i];
     jnum = list->numneigh[i];
     if (jnum > JMAX)
@@ -1813,10 +1935,33 @@ void FixBAOABTether::refresh_one_atom(int i, const double *xi, bool instantaneou
   // lj_longstep_prototype.py's refresh(), "self.J[:, :, s, :] = 0.0" and
   // its accompanying comment; this is the documented fix for exactly the
   // slow light-atom heating this stage-2 port was showing).
+  //
+  // "Flagged (stiff/rattler)" used to mean "in this fix's own group" back
+  // when that group WAS exactly the rattler population (groupbit ==
+  // light-only, two-fix era) -- mask[j] & groupbit correctly meant "j is a
+  // rattler." Now that this fix can operate on a single whole-system group
+  // (e.g. "all"), every neighbor carries groupbit regardless of species,
+  // which silently excluded EVERY neighbor and zeroed the entire
+  // back-reaction (nJ[i] == 0 for every atom, confirmed via identical event
+  // logs with and without the diagnostic j_free flag -- see
+  // python_heavy_block_frozen_approximation memory). The correct, general
+  // test is CURRENT stiff/rattler ELIGIBILITY (the same om-based gate
+  // mode_is_stiff() uses, minus its demote-cooldown check, which would need
+  // demote_cool[] forward-communicated too and isn't) -- om[] now IS
+  // forward-communicated to ghosts (see pack_forward_comm()) specifically
+  // so this works for a possibly-ghost neighbor j.
   int nk = 0;
   for (int k = 0; k < jnum; k++) {
     int j = jlist[k] & NEIGHMASK;
-    if (mask[j] & groupbit) continue;
+    double om_max_j = MAX(om[j][0], MAX(om[j][1], om[j][2]));
+    bool j_eligible;
+    if (adapt) {
+      double om_min_j = MIN(om[j][0], MIN(om[j][1], om[j][2]));
+      j_eligible = (om_max_j > om_split) && (om_min_j > 0.6 * om_split);
+    } else {
+      j_eligible = (om_max_j * sqrt(force->ftm2v) * update->dt) > theta;
+    }
+    if (j_eligible) continue;
     Jtag[i][nk] = atom->tag[j];
     const double *Hck = &Hc[(size_t) k * 9];
     // Jblk_k = Hc_k . S_i, so that the back-reaction is a plain matvec
@@ -2011,6 +2156,77 @@ void FixBAOABTether::compute_om_split()
   om_split = (best_gap > 0.0) ? sqrt(freqs[best_k] * freqs[best_k + 1])
                                : (theta / update->dt) / sqrt(force->ftm2v);
   om_split_set = 1;
+}
+
+/* ----------------------------------------------------------------------
+   DIAGNOSTIC-ONLY, deliberate match to lj_longstep_prototype.py's
+   HPdEngine.hessian_blocks(): sample heavy_sample atoms from heavy_group
+   ONCE, average their raw (not mass-weighted) FD-Hessian trace/3, and
+   freeze that single isotropic scalar for the rest of the run.
+   refresh_one_atom() broadcasts sqrt(heavy_block_tr3 / mass[i]) to every
+   mode of every heavy_group atom instead of running a real per-refresh
+   probe on them -- see the header comment by heavy_groupbit and the
+   python_heavy_block_frozen_approximation memory for why this exists and
+   why it is NOT validated reference physics. Each rank samples only its
+   own locally-owned heavy_group atoms, in local-index order (closely
+   matching, not byte-identical to, Python's self.heavy[::step][:N] slice
+   order); an MPI_Allreduce sum of the per-rank trace sum and sample count
+   gives every rank the identical global average under multi-rank, cheaper
+   than compute_om_split()'s full sorted-array Allgatherv since only two
+   scalars need to agree here.
+------------------------------------------------------------------------- */
+
+void FixBAOABTether::compute_heavy_block()
+{
+  double **x = atom->x;
+  int *mask = atom->mask;
+  double *mass = atom->mass;
+  double *rmass = atom->rmass;
+  int *type = atom->type;
+  int nlocal = atom->nlocal;
+
+  std::vector<int> heavy_idx;
+  for (int i = 0; i < nlocal; i++)
+    if (mask[i] & heavy_groupbit) heavy_idx.push_back(i);
+
+  int n_heavy = (int) heavy_idx.size();
+  int step = MAX(1, n_heavy / MAX(heavy_sample, 1));
+
+  double trace_sum = 0.0;
+  int n_sampled = 0;
+  for (int k = 0; k < n_heavy && n_sampled < heavy_sample; k += step) {
+    int i = heavy_idx[k];
+    double xi[3] = {x[i][0], x[i][1], x[i][2]};
+    double H[3][3];
+
+    for (int b = 0; b < 3; b++) {
+      double fplus[3], fminus[3];
+      double xt[3] = {xi[0], xi[1], xi[2]};
+
+      xt[b] = xi[b] + eps;
+      partial_force(i, xt, fplus, nullptr, true);
+
+      xt[b] = xi[b] - eps;
+      partial_force(i, xt, fminus, nullptr, true);
+
+      for (int a = 0; a < 3; a++) H[a][b] = -(fplus[a] - fminus[a]) / (2.0 * eps);
+    }
+    // raw (not mass-weighted) trace/3, matching Python's np.trace(B)/3 --
+    // the symmetrization Python skips too (trace is unaffected by it).
+    trace_sum += (H[0][0] + H[1][1] + H[2][2]) / 3.0;
+    n_sampled++;
+  }
+
+  if (comm->nprocs > 1) {
+    double local[2] = {trace_sum, (double) n_sampled};
+    double global[2];
+    MPI_Allreduce(local, global, 2, MPI_DOUBLE, MPI_SUM, world);
+    trace_sum = global[0];
+    n_sampled = (int) global[1];
+  }
+
+  heavy_block_tr3 = (n_sampled > 0) ? trace_sum / n_sampled : 0.0;
+  heavy_block_set = 1;
 }
 
 /* ----------------------------------------------------------------------
@@ -2357,6 +2573,12 @@ void FixBAOABTether::solve_center(int i, double mi, double kT, double *cnew)
 {
   double **x = atom->x;
 
+  // THROWAWAY DIAGNOSTIC (newton_debug_tag), see header comment.
+  bool dbg = (newton_debug_tag >= 0) && (atom->tag[i] == newton_debug_tag);
+  if (dbg)
+    fprintf(stderr, "[newton_debug tag=%d step=" BIGINT_FORMAT "] om=(%.6g %.6g %.6g)\n",
+            (int) atom->tag[i], update->ntimestep, om[i][0], om[i][1], om[i][2]);
+
   bool msk[3];
   double om_top = 0.0;
   for (int m = 0; m < 3; m++) {
@@ -2395,8 +2617,21 @@ void FixBAOABTether::solve_center(int i, double mi, double kT, double *cnew)
   double res = 0.0;
   bool newton_diverged = false;
 
+  if (dbg)
+    fprintf(stderr, "  msk=(%d %d %d) any_masked=%d a_th=%.6g tol=%.6g q_now=(%.6g %.6g %.6g) "
+                     "q_warm=(%.6g %.6g %.6g)\n",
+            msk[0], msk[1], msk[2], any_masked, a_th, tol, q_now[0], q_now[1], q_now[2],
+            q_warm[0], q_warm[1], q_warm[2]);
+
   if (any_masked) {
     const int max_backtrack = 6;
+    // Backtrack-exhaustion is only a genuine hard failure when the residual
+    // is still this many multiples of tol away from converged -- see the
+    // "BACKTRACK_EXHAUSTED" comment below. No Python analog (its reactive-
+    // damping Newton scheme always accepts a step, so it never hits this
+    // code path at all); chosen empirically via newton_debug_tag tracing,
+    // which showed benign stalls landing at 1.03-1.06x tol.
+    const double newton_stall_tol_mult = 3.0;
 
     double trial[3];
     for (int k = 0; k < 3; k++) {
@@ -2404,10 +2639,7 @@ void FixBAOABTether::solve_center(int i, double mi, double kT, double *cnew)
       for (int m = 0; m < 3; m++) trial[k] += evecs[i][3 * m + k] * q[m];
     }
     double fout[3];
-    if (force_eval_full)
-      full_system_force(i, trial, fout);
-    else
-      partial_force(i, trial, fout);
+    partial_force(i, trial, fout);   // dispatches to full_system_force() internally when force_eval_full
     n_partial_force_calls++;
     double r[3] = {0, 0, 0};
     for (int m = 0; m < 3; m++)
@@ -2417,6 +2649,10 @@ void FixBAOABTether::solve_center(int i, double mi, double kT, double *cnew)
     for (int m = 0; m < 3; m++)
       if (msk[m]) res += r[m] * r[m];
     res = sqrt(res);
+
+    if (dbg)
+      fprintf(stderr, "  initial: trial=(%.6g %.6g %.6g) res=%.6g (tol=%.6g, res/tol=%.4g)\n",
+              trial[0], trial[1], trial[2], res, tol, res / MAX(tol, 1e-300));
 
     // Every candidate step below is accepted only if it both lowers the
     // residual AND lands within cutoff of a real neighbor (trial_in_range).
@@ -2433,6 +2669,12 @@ void FixBAOABTether::solve_center(int i, double mi, double kT, double *cnew)
       double raw[3] = {0, 0, 0};
       for (int m = 0; m < 3; m++)
         if (msk[m]) raw[m] = r[m] / (mi * MAX(om[i][m], 1.0e-8) * MAX(om[i][m], 1.0e-8));
+
+      if (dbg)
+        fprintf(stderr, "  iter=%d q=(%.6g %.6g %.6g) r=(%.6g %.6g %.6g) raw=(%.6g %.6g %.6g) "
+                         "damp=%.6g in_range=%d\n",
+                iter, q[0], q[1], q[2], r[0], r[1], r[2], raw[0], raw[1], raw[2], damp,
+                trial_in_range(i, trial));
 
       double scale = damp;
       bool accepted = false;
@@ -2468,7 +2710,13 @@ void FixBAOABTether::solve_center(int i, double mi, double kT, double *cnew)
           if (msk[m]) res_try += r_try[m] * r_try[m];
         res_try = sqrt(res_try);
 
-        if (trial_in_range(i, trial_try) && res_try <= res) {
+        bool in_range_try = trial_in_range(i, trial_try);
+        if (dbg)
+          fprintf(stderr, "    bt=%d scale=%.6g q_try=(%.6g %.6g %.6g) res_try=%.6g "
+                           "in_range=%d %s\n",
+                  bt, scale, q_try[0], q_try[1], q_try[2], res_try, in_range_try,
+                  (in_range_try && res_try <= res) ? "ACCEPT" : "reject");
+        if (in_range_try && res_try <= res) {
           accepted = true;
           break;
         }
@@ -2476,7 +2724,23 @@ void FixBAOABTether::solve_center(int i, double mi, double kT, double *cnew)
       }
 
       if (!accepted) {
-        newton_diverged = true;
+        // Backtracking exhausted without finding an improving, in-range
+        // step. Found via newton_debug_tag tracing (see
+        // test_ladder_isolates_newton_divergence_at_t300 memory): this
+        // commonly happens with the CURRENT residual already within a few
+        // percent of tol -- a benign nonlinear residual floor the local
+        // linear Newton model can't quite close, not a genuine divergence.
+        // Only flag the hard-failure guard (g_n below) when backtracking
+        // gives up with the residual still meaningfully unconverged (more
+        // than newton_stall_tol_mult * tol); otherwise accept the current,
+        // near-converged q/trial as the final answer for this call, same as
+        // a normal tol-satisfied exit, and let the loop end normally below.
+        if (res > newton_stall_tol_mult * tol) newton_diverged = true;
+        if (dbg)
+          fprintf(stderr, "  BACKTRACK_EXHAUSTED at iter=%d res=%.6g (tol=%.6g, res/tol=%.4g) "
+                           "-> %s\n",
+                  iter, res, tol, res / MAX(tol, 1e-300),
+                  newton_diverged ? "NEWTON_DIVERGED" : "accepted as near-converged");
         break;
       }
 
@@ -2525,6 +2789,11 @@ void FixBAOABTether::solve_center(int i, double mi, double kT, double *cnew)
       if (msk[m]) eharm += 0.5 * mi * om[i][m] * om[i][m] * q[m] * q[m];
     bool g_e = eharm > 25.0 * kT;
     if (g_e) n_guard_energy++;
+
+    if (dbg)
+      fprintf(stderr, "  FINAL: res=%.6g g_n=%d(diverged=%d) g_f=%d(flip-rel=%.4g) "
+                       "g_e=%d(eharm/kT=%.4g)\n",
+              res, g_n, newton_diverged, g_f, (a_th > 0.0) ? flip / a_th : -1.0, g_e, eharm / kT);
 
     // demotion action (adapt=yes only): exponential backoff capped at 2000
     // steps, direct port of the reference's
@@ -2630,7 +2899,7 @@ bool FixBAOABTether::trial_in_range(int i, const double *xtrial) const
 }
 
 bool FixBAOABTether::partial_force(int i, const double *xtrial, double *fout, double *fneigh,
-                                    bool live_neighbor_positions) const
+                                    bool live_neighbor_positions)
 {
   fout[0] = fout[1] = fout[2] = 0.0;
   if (!list) return false;
@@ -2643,6 +2912,15 @@ bool FixBAOABTether::partial_force(int i, const double *xtrial, double *fout, do
 
   int *jlist = list->firstneigh[i];
   int jnum = list->numneigh[i];
+
+  // force_eval full: every caller of partial_force() (not just
+  // solve_center()'s two sites) now gets a genuine whole-system force
+  // evaluation instead of the local kernel below -- see full_system_force()'s
+  // doc comment and force_eval_full's doc comment in the header. Note this
+  // silently drops the live_neighbor_positions c[j]-substitution behavior
+  // (full_system_force() always uses real positions, a documented scope
+  // limitation of this validation mode).
+  if (force_eval_full) return full_system_force(i, xtrial, fout, fneigh, jnum, jlist);
 
   if (use_local_partial_force) {
     // Mirror the clamped-center substitution used by the single()-based
@@ -2700,17 +2978,23 @@ bool FixBAOABTether::partial_force(int i, const double *xtrial, double *fout, do
 
 /* ----------------------------------------------------------------------
    force_eval full validation mode: an exact whole-system force on atom i
-   if it were placed at xtrial, for solve_center()'s Newton residual only
-   (see the force_eval keyword and solve_center()'s two call sites). Unlike
-   partial_force(), this does NOT substitute a flagged neighbor's clamped
-   center c[j] for its real position -- every other atom (rattler or not)
-   is evaluated at its actual current x[j]. That is a deliberate, known
-   scope limitation, not an oversight: it reintroduces the resonant
-   rattler-rattler coupling partial_force()'s c[j] substitution exists to
-   suppress (see that comment above), so this mode is only a clean
-   validation of the embedding-truncation hypothesis for configurations
-   with at most one flagged atom in range of any other (e.g. the dilute
-   single-H-interstitial H/Pd runs it was built to test) -- not a general
+   (and, when fneigh/jnum/jlist are supplied, on each of its listed
+   neighbors too) if atom i were placed at xtrial. partial_force() routes
+   EVERY one of its callers here -- solve_center()'s Newton residual,
+   refresh_blocks()/refresh_one_atom()'s FD-Hessian curvature probe (both
+   the atom-i diagonal block and the Hc_j/Jblk cross-derivative columns),
+   sub_step_free_atom()'s exile sub-stepping, diag_check_staleness()'s
+   per-step diagnostic -- whenever force_eval_full is set (see
+   partial_force()'s own dispatch at its top). Unlike partial_force(),
+   this does NOT substitute a flagged neighbor's clamped center c[j] for
+   its real position -- every other atom (rattler or not) is evaluated at
+   its actual current x[j]. That is a deliberate, known scope limitation,
+   not an oversight: it reintroduces the resonant rattler-rattler coupling
+   partial_force()'s c[j] substitution exists to suppress (see that
+   comment above), so this mode is only a clean validation of the
+   embedding-truncation hypothesis for configurations with at most one
+   flagged atom in range of any other (e.g. the dilute single-H-
+   interstitial H/Pd runs it was built to test) -- not a general
    substitute for the local kernel.
 
    Single-process only (guarded in the constructor): moving xtrial into
@@ -2721,11 +3005,16 @@ bool FixBAOABTether::partial_force(int i, const double *xtrial, double *fout, do
    whole-system pair/bond/.../kspace recompute force_moll() already uses
    for its own clamped-configuration force field) rather than calling
    force->pair->compute() directly, so every force contribution (not just
-   the pair style) is included. O(N) per call -- expected and acceptable
-   for a validation mode, not something to wire into a hot path.
+   the pair style) is included -- the same completeness Python's
+   lj_longstep_prototype.py/lammps_hpd_phase0.py get "for free" from
+   calling the real engine's full energy_forces() for every FD probe.
+   O(N) per call -- expected and acceptable for a validation mode, not
+   something to wire into a hot path (see force_eval_full's doc comment
+   in the header for which call sites this makes very slow).
 ------------------------------------------------------------------------- */
 
-bool FixBAOABTether::full_system_force(int i, const double *xtrial, double *fout)
+bool FixBAOABTether::full_system_force(int i, const double *xtrial, double *fout,
+                                        double *fneigh, int jnum, const int *jlist)
 {
   double **x = atom->x;
   double **f = atom->f;
@@ -2745,6 +3034,21 @@ bool FixBAOABTether::full_system_force(int i, const double *xtrial, double *fout
   fout[0] = f[i][0];
   fout[1] = f[i][1];
   fout[2] = f[i][2];
+
+  // read back each listed neighbor's own total force at this trial
+  // configuration -- the whole-system analog of partial_force()'s fneigh
+  // output, needed by refresh_one_atom()'s Hc_j/Jblk cross-derivative
+  // columns. f[j] here already reflects every force contribution on j
+  // (not just the i-j pair), which is the correct quantity for a
+  // genuine dF_j/dx_i finite difference -- recompute_forces_local() was
+  // just run for the whole local domain, not atom i alone.
+  if (fneigh)
+    for (int jj = 0; jj < jnum; jj++) {
+      int j = jlist[jj] & NEIGHMASK;
+      fneigh[3 * jj + 0] = f[j][0];
+      fneigh[3 * jj + 1] = f[j][1];
+      fneigh[3 * jj + 2] = f[j][2];
+    }
 
   x[i][0] = xreal[0];
   x[i][1] = xreal[1];
@@ -3081,6 +3385,9 @@ int FixBAOABTether::pack_forward_comm(int n, int *list, double *buf, int pbc_fla
       buf[m++] = c[j][0];
       buf[m++] = c[j][1];
       buf[m++] = c[j][2];
+      buf[m++] = om[j][0];
+      buf[m++] = om[j][1];
+      buf[m++] = om[j][2];
     }
   } else {
     double dx, dy, dz;
@@ -3098,6 +3405,10 @@ int FixBAOABTether::pack_forward_comm(int n, int *list, double *buf, int pbc_fla
       buf[m++] = c[j][0] + dx;
       buf[m++] = c[j][1] + dy;
       buf[m++] = c[j][2] + dz;
+      // om[] is a frequency, not a coordinate -- no PBC offset applies.
+      buf[m++] = om[j][0];
+      buf[m++] = om[j][1];
+      buf[m++] = om[j][2];
     }
   }
   return m;
@@ -3113,5 +3424,8 @@ void FixBAOABTether::unpack_forward_comm(int n, int first, double *buf)
     c[i][0] = buf[m++];
     c[i][1] = buf[m++];
     c[i][2] = buf[m++];
+    om[i][0] = buf[m++];
+    om[i][1] = buf[m++];
+    om[i][2] = buf[m++];
   }
 }

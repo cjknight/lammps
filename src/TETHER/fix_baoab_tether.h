@@ -110,11 +110,19 @@ class FixBAOABTether : public FixBAOAB {
   int use_local_partial_force;   // 0 = pair->single() loop, 1 = pair->local_partial_force()
 
   // force_eval full (default off, byte-identical when unused): validation-
-  // only mode that bypasses partial_force()'s local kernel entirely for
-  // solve_center()'s Newton residual, substituting a genuine whole-system
-  // force->pair->compute() per trial evaluation instead (see
-  // full_system_force()). O(N) per Newton iteration and single-process
-  // only -- not a production option, see fix_baoab_tether.rst.
+  // only mode that bypasses partial_force()'s local kernel entirely --
+  // for EVERY caller (solve_center()'s Newton residual, refresh_blocks()/
+  // refresh_one_atom()'s FD-Hessian curvature probe, sub_step_free_atom()'s
+  // exile sub-stepping, diag_check_staleness()'s per-step diagnostic) --
+  // substituting a genuine whole-system recompute_forces_local() per trial
+  // evaluation instead (see full_system_force()). O(N) per probe and
+  // single-process only -- not a production option, see
+  // fix_baoab_tether.rst. Deliberately NOT performance-tuned: this exists
+  // to find out whether local_partial_force()'s neighbor-shell truncation
+  // of the EAM embedding term explains a curvature discrepancy against a
+  // full-system reference (e.g. lj_longstep_prototype.py's FD Hessian),
+  // not to be fast. diag_check_staleness() in particular runs this every
+  // step for every mollified atom -- keep debug runs short.
   int force_eval_full;
 
   // stage-3 adaptive-dt + event machinery (all inert when adapt == 0)
@@ -123,6 +131,20 @@ class FixBAOABTether : public FixBAOAB {
   double dt_min, dt_max;  // quantized-ladder floor/ceiling (ladder: dt_max/2^dt_lvl)
   double ke_rel;          // kinetic over-excitation threshold, multiples of kT
   double gamma_quench;    // strong-friction OU coefficient during cooldown
+
+  // Baseline thermostat for modes that are NEITHER currently masked stiff
+  // NOR in a post-demotion quench window. FixBAOABTether fully overrides
+  // FixBAOAB::initial_integrate()/final_integrate() (the base class's own
+  // uniform Langevin O-step is never invoked through this derived class --
+  // confirmed by direct test: fix baoab/tether mollify no adapt no at a
+  // conventional small dt, where every mode's om*dt stays below theta so
+  // NOTHING is ever masked stiff, shows clean, steady cooling away from the
+  // target temperature with zero active thermostat, not NVE-like
+  // conservation). Default 0.0 (off) preserves prior behavior exactly;
+  // gamma_soft > 0 applies an ordinary Cartesian OU kick (same c1/c2 form as
+  // FixBAOAB's own O-step, mirrors lj_longstep_prototype.py's "gamma_soft"
+  // constructor parameter) to every unmasked, non-quench mode every step.
+  double gamma_soft;
 
   // gamma_quench auto (continuous, not a warm-up calibration): when set,
   // gamma_quench is overwritten every update_dt() call from the system's
@@ -277,6 +299,53 @@ class FixBAOABTether : public FixBAOAB {
   int om_split_set;   // 0 until compute_om_split() has run once
   int dt_lvl;          // current rung on the dt_max/2^dt_lvl ladder, -1 = uninitialized
 
+  // DIAGNOSTIC-ONLY, deliberate match to lj_longstep_prototype.py's
+  // HPdEngine.hessian_blocks(): when heavy_group is set, every atom in that
+  // LAMMPS group gets a single, isotropic, ONE-TIME-SAMPLED curvature
+  // estimate instead of a real per-refresh FD-Hessian probe -- sample
+  // heavy_sample atoms from the group once (compute_heavy_block()), average
+  // their raw trace/3, and freeze that single scalar (mass-divided per atom
+  // at use time, see refresh_one_atom()) for the rest of the run. This is a
+  // KNOWN NON-GENERAL SHORTCUT, not validated reference physics -- see the
+  // python_heavy_block_frozen_approximation memory. It exists only to get
+  // C++ and Python behaviorally consistent while the real fix (making the
+  // stiff-mode machinery robust to a genuinely drifting heavy atom) is
+  // worked out separately. Default (heavy_group unset, heavy_groupbit == 0)
+  // leaves every atom on the real, continuously refreshed per-atom probe,
+  // matching the fix's general design -- not a production keyword.
+  int heavy_groupbit;      // 0 = disabled (default: real probe for every atom)
+  int heavy_sample;        // atoms sampled to build the frozen estimate (default 8, matches Python)
+  double heavy_block_tr3;  // averaged raw trace/3 (NOT mass-divided) of the sampled blocks
+  int heavy_block_set;     // 0 until compute_heavy_block() has run once
+
+  // DIAGNOSTIC-ONLY, deliberate match to lj_longstep_prototype.py's
+  // HPdEngine.hessian_rows() (lammps_hpd_phase0.py:167-168), which returns
+  // an all-zeros array for every call -- commented "# J-free (validated)" --
+  // so FrozenHessianIntegrator.refresh()'s self.J (the dense linear-response
+  // back-reaction matrix, D.10.6) is identically zero throughout every H/Pd
+  // run: force_moll()'s `g += J^T g_s` back-reaction term never contributes
+  // anything on the Python side. C++'s force_moll() computes and applies a
+  // REAL (if sparse/halo-local-truncated) back-reaction via Jblk/Jtag built
+  // from genuine FD cross-derivatives -- a real, structural difference
+  // sitting directly in the H->Pd energy-transfer pathway, and a candidate
+  // mechanism for the heavyT gap under investigation. j_free=1 skips
+  // building Hc/Jblk/Jtag entirely in refresh_one_atom() (nJ[i] left at 0),
+  // matching Python's J=0 behavior exactly while leaving the always-active
+  // stiff-modal-row zeroing in force_moll() untouched (Python does that
+  // unconditionally too, independent of J). Default off (real sparse
+  // back-reaction, the fix's general/intended design) -- not a production
+  // keyword; see python_heavy_block_frozen_approximation memory.
+  int j_free;
+
+  // THROWAWAY DIAGNOSTIC, not a production keyword: when set (>=0), print a
+  // verbose per-iteration Newton-solve trace to stderr for exactly this one
+  // atom tag, every time solve_center() runs on it. Built to find why a
+  // handful of chronic atoms repeatedly hit the Newton-divergence guard at
+  // T300 even with heff_samples-smoothed curvature -- see
+  // test_ladder_isolates_newton_divergence_at_t300 memory. -1 = off
+  // (default, zero overhead).
+  tagint newton_debug_tag;
+
   // MACE's much larger r_cut (vs. EAM/LJ) puts a bulk Pd atom's full
   // neighbor list around ~150 within 8 A; 96 was sized for the shorter
   // pairwise cutoffs this fix was originally validated against.
@@ -401,8 +470,9 @@ class FixBAOABTether : public FixBAOAB {
   void solve_center(int i, double mi, double kT, double *cnew);
   bool trial_in_range(int i, const double *xtrial) const;
   bool partial_force(int i, const double *xtrial, double *fout, double *fneigh = nullptr,
-                      bool live_neighbor_positions = false) const;
-  bool full_system_force(int i, const double *xtrial, double *fout);
+                      bool live_neighbor_positions = false);
+  bool full_system_force(int i, const double *xtrial, double *fout, double *fneigh = nullptr,
+                          int jnum = 0, const int *jlist = nullptr);
   void force_moll();
 
   // stage-3 additions
@@ -422,6 +492,7 @@ class FixBAOABTether : public FixBAOAB {
     return om[i][m] > om_split;
   }
   void compute_om_split();
+  void compute_heavy_block();
 
   // Stage-20 read-only diagnostic: re-probes atom i's curvature at its
   // CURRENT position (FD Hessian + jacobi3, same math as refresh_one_atom())
