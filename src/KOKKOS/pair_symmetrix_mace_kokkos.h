@@ -46,7 +46,7 @@ class PairSymmetrixMACEKokkos : public Pair, public KokkosBase {
   double init_one(int, int) override;
   void init_style() override;
   bool local_partial_force(int, const double *, int, const int *, double *, double *,
-                            int = 0, double *const * = nullptr) override;
+                            const bool * = nullptr, double *const * = nullptr) override;
   int pack_forward_comm(int, int *, double *, int, int *) override;
   int pack_forward_comm_kokkos(int, DAT::tdual_int_1d, DAT::tdual_double_1d&, int, int*) override;
   void unpack_forward_comm(int, int, double *) override;
@@ -76,7 +76,7 @@ class PairSymmetrixMACEKokkos : public Pair, public KokkosBase {
   Kokkos::View<double*> xyz;
   Kokkos::View<double*> r;
 
-  // local_partial_force() scratch: flattened clamp_c/clamp_groupbit override
+  // local_partial_force() scratch: flattened clamp_c/clamp_mask override
   // (sized nlocal+nghost, rebuilt fresh each call) and the reduced per-atom
   // force buffer local_partial_force() accumulates into instead of atom->f.
   // LayoutRight (not the device-space default, LayoutLeft on GPU backends)

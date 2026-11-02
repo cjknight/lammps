@@ -27,6 +27,7 @@
 #include "neigh_list.h"
 #include "potential_file_reader.h"
 #include "update.h"
+#include "utils.h"
 
 #include <cmath>
 #include <cstring>
@@ -71,7 +72,9 @@ PairEAM::PairEAM(LAMMPS *lmp) : Pair(lmp), type2rhor(nullptr), type2z2r(nullptr)
 
   // set comm size needed by this Pair
 
-  comm_forward = 1;
+  // 2, not 1: rho[] forwarded alongside fp[] for local_partial_force()'s
+  // sake -- see pack_forward_comm()'s doc comment.
+  comm_forward = 2;
   comm_reverse = 1;
 }
 
@@ -1603,17 +1606,24 @@ double PairEAM::single(int i, int j, int itype, int jtype,
    from the last full compute() as frozen constants.
    rho_i_trial is an exact resum of i's own density at xtrial (i is the only
    atom that moved, and density is a sum of pairwise terms). rho_j_trial is
-   an exact delta correction of the cached rho[j]: remove i's contribution
-   at its real position, add i's contribution at xtrial, holding j (and
-   everyone else) fixed at whatever position this call's clamp convention
-   assigns it -- the same xj is used for both the removed and added terms,
-   so the delta is exact regardless of that choice. Neighbors beyond jlist
-   (e.g. j's own other neighbors) are not updated -- same first-neighbor-
-   shell scope as the Jtag/Jblk back-reaction this feeds.
+   an exact delta correction of the cached rho[j]: remove i's REAL
+   contribution at atom j's REAL position (matching exactly what the last
+   full compute() actually baked into rho[j] -- there is no clamp
+   substitution inside compute(), so the term to remove must be computed
+   against real x[j], never a clamped stand-in), then add i's contribution
+   at xtrial evaluated against whatever position (real or clamped) the
+   caller's clamp convention assigns to j for this trial/perturbed state.
+   An earlier version removed against the same (possibly clamped) xj used
+   for the add, which is NOT exact -- it silently fails to cancel the
+   cached term whenever a flagged neighbor's clamped center differs from
+   its live position, which is the common case for an oscillating rattler,
+   not a rare one. Neighbors beyond jlist (e.g. j's own other neighbors)
+   are not updated -- same first-neighbor-shell scope as the Jtag/Jblk
+   back-reaction this feeds.
 ------------------------------------------------------------------------- */
 
 bool PairEAM::local_partial_force(int i, const double *xtrial, int jnum, const int *jlist,
-                                   double *fout, double *fneigh, int clamp_groupbit,
+                                   double *fout, double *fneigh, const bool *clamp_mask,
                                    double *const *clamp_c)
 {
   fout[0] = fout[1] = fout[2] = 0.0;
@@ -1624,7 +1634,6 @@ bool PairEAM::local_partial_force(int i, const double *xtrial, int jnum, const i
 
   double **x = atom->x;
   int *type = atom->type;
-  int *mask = atom->mask;
   int itype = type[i];
 
   int m;
@@ -1637,7 +1646,7 @@ bool PairEAM::local_partial_force(int i, const double *xtrial, int jnum, const i
   for (int jj = 0; jj < jnum; jj++) {
     int j = jlist[jj] & NEIGHMASK;
     int jtype = type[j];
-    const double *xj = (clamp_groupbit && (mask[j] & clamp_groupbit)) ? clamp_c[j] : x[j];
+    const double *xj = (clamp_mask && clamp_mask[j]) ? clamp_c[j] : x[j];
 
     double delx = xtrial[0]-xj[0], dely = xtrial[1]-xj[1], delz = xtrial[2]-xj[2];
     rsq = delx*delx + dely*dely + delz*delz;
@@ -1664,7 +1673,7 @@ bool PairEAM::local_partial_force(int i, const double *xtrial, int jnum, const i
   for (int jj = 0; jj < jnum; jj++) {
     int j = jlist[jj] & NEIGHMASK;
     int jtype = type[j];
-    const double *xj = (clamp_groupbit && (mask[j] & clamp_groupbit)) ? clamp_c[j] : x[j];
+    const double *xj = (clamp_mask && clamp_mask[j]) ? clamp_c[j] : x[j];
 
     double delx = xtrial[0]-xj[0], dely = xtrial[1]-xj[1], delz = xtrial[2]-xj[2];
     rsq = delx*delx + dely*dely + delz*delz;
@@ -1691,25 +1700,70 @@ bool PairEAM::local_partial_force(int i, const double *xtrial, int jnum, const i
     double z2p = (coeff[0]*p + coeff[1])*p + coeff[2];
     double z2 = ((coeff[3]*p + coeff[4])*p + coeff[5])*p + coeff[6];
 
-    double rho_j_trial = rho[j];
-    double delx0 = x[i][0]-xj[0], dely0 = x[i][1]-xj[1], delz0 = x[i][2]-xj[2];
+    // The term being removed here must match what is ACTUALLY baked into
+    // the cached rho[j] -- which was built by the real compute() using
+    // atom j's true x[j], never any clamped substitute -- so this delta
+    // always removes against the real x[j], regardless of the xj clamp
+    // convention used above/below for the NEW (trial) density and force
+    // terms. Using xj (the clamp-substituted pointer) here instead of
+    // x[j] was a real bug: whenever a flagged neighbor's clamped center
+    // c[j] differs from its live x[j] (the common case, not an edge case,
+    // for an oscillating rattler), the subtraction landed on the wrong
+    // distance and so did not actually cancel the cached contribution it
+    // was meant to remove, corrupting rho_j_trial and hence fp_j_trial
+    // for every solve_center() Newton-residual call with a flagged
+    // neighbor in range (live_neighbor_positions=false; the
+    // live_neighbor_positions=true FD-Hessian probe path is unaffected
+    // since xj==x[j] there already).
+    double delx0 = x[i][0]-x[j][0], dely0 = x[i][1]-x[j][1], delz0 = x[i][2]-x[j][2];
     double rsq0 = delx0*delx0 + dely0*dely0 + delz0*delz0;
-    if (rsq0 < cutforcesq) {
-      double r0 = sqrt(rsq0);
-      double p0 = r0*rdr + 1.0;
-      int m0 = static_cast<int>(p0);
-      m0 = MIN(m0,nr-1);
-      p0 -= m0;
-      p0 = MIN(p0,1.0);
-      double *coeff0 = rhor_spline[type2rhor[itype][jtype]][m0];
-      rho_j_trial -= ((coeff0[3]*p0 + coeff0[4])*p0 + coeff0[5])*p0 + coeff0[6];
-    }
-    rho_j_trial += rho_ij_new;
 
-    int mj; double pj;
-    embedding_index(rho_j_trial,mj,pj);
-    double *coeffj = frho_spline[type2frho[jtype]][mj];
-    double fp_j_trial = (coeffj[0]*pj + coeffj[1])*pj + coeffj[2];
+    // Robustness fix: rho_j_trial's subtract-then-add reconstruction is
+    // algebraically exact (removes the i-j term at the distance ACTUALLY
+    // baked into the cached rho[j], adds it back at the trial distance),
+    // but is NOT numerically exact -- the subtract and add are two
+    // independent spline evaluations, so even when the trial displacement
+    // is genuinely tiny (an FD-probe eps step, or a near-converged Newton
+    // trial), floating-point noise of order 1e-8-1e-10 in rho_j_trial
+    // survives. compute_embedding()'s table lookup is piecewise-cubic:
+    // atoms whose density happens to sit within that same ~1e-8 of a bin
+    // edge (routine near rhomax for an atom neighboring a compressed
+    // interstitial site, not a rare edge case here) can have their bin
+    // index m flip to the adjacent segment purely from this noise, giving
+    // fp_j_trial a large, spurious jump relative to the cached fp[j] --
+    // confirmed directly (force_eval_local_regression_confirmed memory):
+    // a handful of neighbors showing fp_j_trial off by 1-2 orders of
+    // magnitude from fp[j] even at an EXACT zero-displacement probe, where
+    // the true delta is mathematically zero. Guard against this by
+    // skipping the reconstruction entirely when the trial distance hasn't
+    // genuinely changed from the real one (to far better precision than
+    // any real FD/Newton step would produce) and reusing the cached,
+    // correctly-binned fp[j] directly -- this is exact in the degenerate
+    // case and leaves genuine (much larger) displacements' reconstruction
+    // untouched.
+    double fp_j_trial;
+    if (fabs(rsq - rsq0) < 1.0e-12 * MAX(rsq0, 1.0)) {
+      fp_j_trial = fp[j];
+    } else {
+      double rho_j_trial = rho[j];
+      if (rsq0 < cutforcesq) {
+        double r0 = sqrt(rsq0);
+        double p0 = r0*rdr + 1.0;
+        int m0 = static_cast<int>(p0);
+        m0 = MIN(m0,nr-1);
+        p0 -= m0;
+        p0 = MIN(p0,1.0);
+        double *coeff0 = rhor_spline[type2rhor[itype][jtype]][m0];
+        rho_j_trial -= ((coeff0[3]*p0 + coeff0[4])*p0 + coeff0[5])*p0 + coeff0[6];
+      }
+      rho_j_trial += rho_ij_new;
+
+      int mj; double pj;
+      embedding_index(rho_j_trial,mj,pj);
+      double *coeffj = frho_spline[type2frho[jtype]][mj];
+      fp_j_trial = (coeffj[0]*pj + coeffj[1])*pj + coeffj[2];
+    }
+
 
     double recip = 1.0/r;
     double phi = z2*recip;
@@ -1736,9 +1790,22 @@ int PairEAM::pack_forward_comm(int n, int *list, double *buf, int /*pbc_flag*/, 
 {
   int i,j,m;
 
+  // rho[] is forwarded alongside fp[] (comm_forward=2, not fp[]-only) even
+  // though the ordinary compute() force loop never reads a GHOST's own
+  // rho[] -- only its fp[], which is why this was historically fp[]-only.
+  // local_partial_force() (TETHER package) is a real, in-tree consumer
+  // that reads rho[j] directly for ANY jlist entry, local or ghost, to
+  // reconstruct a neighbor's trial density -- without this, a ghost
+  // neighbor's rho[] is whatever partial sum this rank's own density pass
+  // happened to leave there (not the true value its owning rank computed),
+  // a silent, large, confirmed-real error (see
+  // local_partial_force_two_real_bugs_found memory) whenever a many-body
+  // probe's neighbor list includes a ghost atom -- the common case for any
+  // periodic system with a cutoff an appreciable fraction of the box size.
   m = 0;
   for (i = 0; i < n; i++) {
     j = list[i];
+    buf[m++] = rho[j];
     buf[m++] = fp[j];
   }
   return m;
@@ -1752,7 +1819,10 @@ void PairEAM::unpack_forward_comm(int n, int first, double *buf)
 
   m = 0;
   last = first + n;
-  for (i = first; i < last; i++) fp[i] = buf[m++];
+  for (i = first; i < last; i++) {
+    rho[i] = buf[m++];
+    fp[i] = buf[m++];
+  }
 }
 
 /* ---------------------------------------------------------------------- */

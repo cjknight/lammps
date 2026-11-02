@@ -1259,7 +1259,7 @@ struct MaceTrialPosition {
 template<class DeviceType, typename Precision>
 bool PairSymmetrixMACEKokkos<DeviceType, Precision>::local_partial_force(
     int i, const double *xtrial, int jnum, const int *jlist, double *fout, double *fneigh,
-    int clamp_groupbit, double *const *clamp_c)
+    const bool *clamp_mask, double *const *clamp_c)
 {
   fout[0] = fout[1] = fout[2] = 0.0;
   if (fneigh)
@@ -1267,15 +1267,15 @@ bool PairSymmetrixMACEKokkos<DeviceType, Precision>::local_partial_force(
 
   if (mode != "no_mpi_message_passing" || !list) return false;
 
-  atomKK->sync(execution_space, X_MASK|TYPE_MASK|MASK_MASK);
+  atomKK->sync(execution_space, X_MASK|TYPE_MASK);
 
   const int nall = atom->nlocal + atom->nghost;
   const double r_cut_squared = mace->r_cut*mace->r_cut;
 
-  // Flatten the host-resident clamp_c/clamp_groupbit substitution (see
-  // pair.h's doc comment) into device views, rebuilt fresh each call -- same
-  // cost order as the host-side mask scan it replaces.
-  const bool has_clamp = (clamp_groupbit != 0 && clamp_c != nullptr);
+  // Flatten the host-resident clamp_c/clamp_mask substitution (see pair.h's
+  // doc comment) into device views, rebuilt fresh each call -- same cost
+  // order as the host-side mask scan it replaces.
+  const bool has_clamp = (clamp_mask != nullptr && clamp_c != nullptr);
   if ((int) d_clamp_active.extent(0) < nall) {
     Kokkos::realloc(d_clamp_active, nall);
     Kokkos::realloc(d_clamp_pos, nall);
@@ -1285,9 +1285,8 @@ bool PairSymmetrixMACEKokkos<DeviceType, Precision>::local_partial_force(
   if (has_clamp) {
     auto h_active = Kokkos::create_mirror_view(clamp_active);
     auto h_pos = Kokkos::create_mirror_view(clamp_pos);
-    const int *amask = atom->mask;
     for (int idx = 0; idx < nall; idx++) {
-      if (amask[idx] & clamp_groupbit) {
+      if (clamp_mask[idx]) {
         h_active(idx) = 1;
         h_pos(idx,0) = clamp_c[idx][0];
         h_pos(idx,1) = clamp_c[idx][1];

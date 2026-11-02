@@ -38,6 +38,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <memory>
 #include <vector>
 
 using namespace LAMMPS_NS;
@@ -152,6 +153,7 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   heavy_block_set = 0;
   j_free = 0;
   newton_debug_tag = -1;
+  pforce_debug_tag = -1;
 
   int iarg = 7;
   while (iarg < narg) {
@@ -200,6 +202,11 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
       // THROWAWAY DIAGNOSTIC: not a production keyword, see header comment.
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether newton_debug_tag", error);
       newton_debug_tag = utils::tnumeric(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "pforce_debug_tag") == 0) {
+      // THROWAWAY DIAGNOSTIC: not a production keyword, see header comment.
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether pforce_debug_tag", error);
+      pforce_debug_tag = utils::tnumeric(FLERR, arg[iarg + 1], false, lmp);
       iarg += 2;
     } else if (strcmp(arg[iarg], "refresh") == 0) {
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether refresh", error);
@@ -1817,6 +1824,27 @@ void FixBAOABTether::refresh_one_atom(int i, const double *xi, bool instantaneou
     fj_minus.resize((size_t) jnum * 3);
   }
 
+  // THROWAWAY DIAGNOSTIC (pforce_debug_tag): zero-perturbation sanity
+  // check, independent of the eps-probe loop below -- do local_partial_force()
+  // and full_system_force() agree with EACH OTHER (not with any cached
+  // atom->f[i]) at xtrial == xi exactly? Any disagreement here is a pure
+  // formula/implementation bug, not a staleness or clamp-convention
+  // question, since no displacement or clamp substitution is involved
+  // (jnum==0 below forces live_neighbor_positions's clamp branch moot).
+  if (!force_eval_full && pforce_debug_tag >= 0 && atom->tag[i] == pforce_debug_tag) {
+    double f0_local[3], f0_full[3];
+    partial_force(i, xi, f0_local, nullptr, true);
+    full_system_force(i, xi, f0_full, nullptr, 0, nullptr);
+    utils::logmesg(lmp, "PFORCE_ZEROPROBE step={} tag={} f0_local=({:.6g},{:.6g},{:.6g}) "
+                   "f0_full=({:.6g},{:.6g},{:.6g})\n", update->ntimestep, pforce_debug_tag,
+                   f0_local[0], f0_local[1], f0_local[2], f0_full[0], f0_full[1], f0_full[2]);
+    // undo full_system_force()'s rho[]/fp[] cache corruption -- see the
+    // identical note in partial_force()'s pforce_debug_tag branch.
+    double xnow[3] = {atom->x[i][0], atom->x[i][1], atom->x[i][2]};
+    double f0_restore_dummy[3];
+    full_system_force(i, xnow, f0_restore_dummy, nullptr, 0, nullptr);
+  }
+
   for (int b = 0; b < 3; b++) {
     double fplus[3], fminus[3];
     double xt[3] = {xi[0], xi[1], xi[2]};
@@ -2862,6 +2890,41 @@ void FixBAOABTether::solve_center(int i, double mi, double kT, double *cnew)
 ------------------------------------------------------------------------- */
 
 /* ----------------------------------------------------------------------
+   true if atom j is CURRENTLY (or as of its last refresh) a stiff/rattler
+   atom, and so should contribute to a Newton-residual evaluation via its
+   clamped center c[j] rather than its live x[j] -- the actual intent
+   behind every "flagged neighbor" clamp substitution below (see
+   trial_in_range()/partial_force()'s doc comments for why the
+   substitution exists at all: suppressing resonant rattler-rattler
+   coupling in the Newton solve). Deliberately NOT `mask[j] & groupbit`:
+   that bit meant "j is a rattler" back when this fix's own group WAS
+   exactly the rattler population (two-fix era), but on a single
+   whole-system group (e.g. "all") it is true for EVERY atom, including
+   an ordinary cage atom undergoing perfectly normal thermal motion --
+   clamping those to a stale, refresh-cadence-frozen c[j] instead of their
+   real position is not a resonance-suppression measure for them, it is
+   just wrong, and was never caught because it doesn't crash or show up in
+   the standard diagnostic suite (see local_partial_force_two_real_bugs_found
+   memory, confirmed directly via a small controlled reproducer: solve_center()
+   Newton-residual calls showed 50-220% relative force error, even at zero
+   atom-i displacement, traced to exactly this). Same om-based eligibility
+   test as refresh_one_atom()'s nk/Jtag loop (duplicated rather than shared,
+   same reasoning as that site: trivially removable, and the two loops
+   want OPPOSITE senses of "eligible" -- that loop excludes eligible
+   neighbors from the back-reaction, this one clamps them).
+------------------------------------------------------------------------- */
+
+bool FixBAOABTether::neighbor_clamp_eligible(int j) const
+{
+  double om_max_j = MAX(om[j][0], MAX(om[j][1], om[j][2]));
+  if (adapt) {
+    double om_min_j = MIN(om[j][0], MIN(om[j][1], om[j][2]));
+    return (om_max_j > om_split) && (om_min_j > 0.6 * om_split);
+  }
+  return (om_max_j * sqrt(force->ftm2v) * update->dt) > theta;
+}
+
+/* ----------------------------------------------------------------------
    true if xtrial is within cutoff of at least one of atom i's real
    neighbors (same clamped-center substitution and neighbor list as
    partial_force()'s fallback loop below). Used by solve_center()'s
@@ -2877,7 +2940,6 @@ bool FixBAOABTether::trial_in_range(int i, const double *xtrial) const
 
   double **x = atom->x;
   int *type = atom->type;
-  int *mask = atom->mask;
   int itype = type[i];
   double **cutsq = force->pair->cutsq;
 
@@ -2887,7 +2949,7 @@ bool FixBAOABTether::trial_in_range(int i, const double *xtrial) const
   for (int jj = 0; jj < jnum; jj++) {
     int j = jlist[jj] & NEIGHMASK;
     int jtype = type[j];
-    const double *xj = (mask[j] & groupbit) ? c[j] : x[j];
+    const double *xj = neighbor_clamp_eligible(j) ? c[j] : x[j];
 
     double delx = xtrial[0] - xj[0];
     double dely = xtrial[1] - xj[1];
@@ -2906,7 +2968,6 @@ bool FixBAOABTether::partial_force(int i, const double *xtrial, double *fout, do
 
   double **x = atom->x;
   int *type = atom->type;
-  int *mask = atom->mask;
   int itype = type[i];
   double **cutsq = force->pair->cutsq;
 
@@ -2924,23 +2985,107 @@ bool FixBAOABTether::partial_force(int i, const double *xtrial, double *fout, do
 
   if (use_local_partial_force) {
     // Mirror the clamped-center substitution used by the single()-based
-    // fallback below (real x[j] -> c[j] for a flagged neighbor, when
-    // !live_neighbor_positions): local_partial_force() applies this itself,
-    // internally, to every subgraph atom it reads (not just jlist), via the
-    // clamp_groupbit/clamp_c pair. c[] is kept forward-comm'd/PBC-shifted to
-    // match x[]'s image (see pack_forward_comm()/unpack_forward_comm()), so
-    // it is safe to hand to the pair style for ghost indices too.
-    int clamp_groupbit = live_neighbor_positions ? 0 : groupbit;
+    // fallback below (real x[j] -> c[j] for a CURRENTLY stiff/rattler-
+    // eligible atom, when !live_neighbor_positions): local_partial_force()
+    // applies this itself, internally, via the clamp_mask/clamp_c pair,
+    // indexed by atom index (not `mask[j] & groupbit` -- see
+    // neighbor_clamp_eligible()'s doc comment for why that would be wrong
+    // on a single whole-system group) so a multi-hop implementation (e.g.
+    // PairSymmetrixMACE) can apply it to any atom it encounters, not just
+    // atom i's direct jlist neighbors. Sized nlocal+nghost and built fresh
+    // each call -- a real but modest O(N) cost on top of
+    // local_partial_force()'s own, only paid for Newton-residual calls.
+    // c[] is kept forward-comm'd/PBC-shifted to match x[]'s image (see
+    // pack_forward_comm()/unpack_forward_comm()), so it is safe to hand to
+    // the pair style for ghost indices too.
+    // std::vector<bool> is bit-packed and has no .data(); use a plain
+    // heap buffer so this can be handed to the Pair interface as bool*.
+    std::unique_ptr<bool[]> clamp_mask;
+    if (!live_neighbor_positions) {
+      int nall = atom->nlocal + atom->nghost;
+      clamp_mask = std::make_unique<bool[]>(nall);
+      for (int k = 0; k < nall; k++) clamp_mask[k] = neighbor_clamp_eligible(k);
+    }
+    const bool *clamp_mask_ptr = clamp_mask.get();
     double *const *clamp_c = live_neighbor_positions ? nullptr : (double *const *) c;
-    return force->pair->local_partial_force(i, xtrial, jnum, jlist, fout, fneigh,
-                                             clamp_groupbit, clamp_c);
+    bool ok = force->pair->local_partial_force(i, xtrial, jnum, jlist, fout, fneigh,
+                                                clamp_mask_ptr, clamp_c);
+
+    // THROWAWAY DIAGNOSTIC (pforce_debug_tag), see header comment: side-
+    // channel comparison against full_system_force() for the identical
+    // (i, xtrial), without altering which result (fout above) is actually
+    // used by the caller. IMPORTANT: full_system_force() recomputes and
+    // leaves the pair style's GLOBAL rho[]/fp[] caches in the TRIAL
+    // configuration's state -- it only restores f[] (see its own doc
+    // comment/implementation), not rho[]/fp[]. That is harmless under
+    // normal force_eval_full operation (every call there is a fresh
+    // full_system_force() call too, so nothing ever reads a stale
+    // in-between cache), but calling it here, as a side channel while
+    // use_local_partial_force is the ACTIVE path, would otherwise corrupt
+    // the very rho[j] cache local_partial_force()'s delta-correction
+    // depends on for every subsequent call this step -- silently
+    // contaminating the "local" results this diagnostic is supposed to be
+    // comparing against, and compounding across repeated probe/Newton
+    // calls. Undo that corruption immediately with one extra no-op
+    // full_system_force() call (xtrial == the real x[i], captured before
+    // the comparison call moved it) before returning -- 2x the diagnostic's
+    // own O(N) cost, never incurred unless pforce_debug_tag is set.
+    if (pforce_debug_tag >= 0 && atom->tag[i] == pforce_debug_tag) {
+      double xreal_now[3] = {x[i][0], x[i][1], x[i][2]};
+      double fout_full[3];
+      full_system_force(i, xtrial, fout_full, nullptr, 0, nullptr);
+      double dmag = sqrt((fout[0]-fout_full[0])*(fout[0]-fout_full[0]) +
+                          (fout[1]-fout_full[1])*(fout[1]-fout_full[1]) +
+                          (fout[2]-fout_full[2])*(fout[2]-fout_full[2]));
+      double fmag = sqrt(fout_full[0]*fout_full[0] + fout_full[1]*fout_full[1] +
+                          fout_full[2]*fout_full[2]);
+      double disp = sqrt((xtrial[0]-xreal_now[0])*(xtrial[0]-xreal_now[0]) +
+                          (xtrial[1]-xreal_now[1])*(xtrial[1]-xreal_now[1]) +
+                          (xtrial[2]-xreal_now[2])*(xtrial[2]-xreal_now[2]));
+      // TEMPORARY forensic check (user's hypothesis): is any neighbor BOTH
+      // currently clamp-eligible AND within force cutoff of xtrial? If so,
+      // local correctly clamps it (c[j]) while full_system_force() always
+      // uses its real x[j] (documented scope limitation, not a bug) -- the
+      // two are EXPECTED to disagree there, not a sign of a local defect.
+      int n_eligible_in_range = 0;
+      double min_eligible_r = -1.0;
+      if (!live_neighbor_positions) {
+        double **cutsq = force->pair->cutsq;
+        int *type = atom->type;
+        int itype = type[i];
+        for (int jj = 0; jj < jnum; jj++) {
+          int j = jlist[jj] & NEIGHMASK;
+          if (!neighbor_clamp_eligible(j)) continue;
+          double delx = xtrial[0]-x[j][0], dely = xtrial[1]-x[j][1], delz = xtrial[2]-x[j][2];
+          double rsq = delx*delx+dely*dely+delz*delz;
+          if (rsq < cutsq[itype][type[j]]) {
+            n_eligible_in_range++;
+            double r = sqrt(rsq);
+            if (min_eligible_r < 0.0 || r < min_eligible_r) min_eligible_r = r;
+          }
+        }
+      }
+
+      utils::logmesg(lmp, "PFORCE_DEBUG step={} tag={} live={} jnum={} disp={:.6g} "
+                     "n_elig_in_range={} min_elig_r={:.6g} "
+                     "fout_local=({:.6g},{:.6g},{:.6g}) fout_full=({:.6g},{:.6g},{:.6g}) "
+                     "|delta|={:.6g} |full|={:.6g} rel={:.6g}\n",
+                     update->ntimestep, pforce_debug_tag, live_neighbor_positions, jnum, disp,
+                     n_eligible_in_range, min_eligible_r,
+                     fout[0], fout[1], fout[2], fout_full[0], fout_full[1], fout_full[2],
+                     dmag, fmag, fmag > 0.0 ? dmag / fmag : 0.0);
+
+      double fout_restore_dummy[3];
+      full_system_force(i, xreal_now, fout_restore_dummy, nullptr, 0, nullptr);
+    }
+    return ok;
   }
 
   for (int jj = 0; jj < jnum; jj++) {
     int j = jlist[jj] & NEIGHMASK;
     int jtype = type[j];
 
-    // A neighbor that is itself a flagged (rattler) atom must contribute
+    // A neighbor that is CURRENTLY stiff/rattler-eligible must contribute
     // via its own current CENTER, not its instantaneous real position --
     // otherwise atom i's clamped equilibrium responds directly to atom j's
     // fast real-time oscillation phase, a resonant parametric-coupling
@@ -2950,8 +3095,10 @@ bool FixBAOABTether::partial_force(int i, const double *xtrial, double *fout, do
     // every force evaluation, never at their real xw positions; it is the
     // analogous fix for the Newton solve itself, complementing (not
     // duplicating) the rattler-rattler Jblk exclusion in refresh_blocks(),
-    // which only concerns the back-reaction operator.
-    const double *xj = (!live_neighbor_positions && (mask[j] & groupbit)) ? c[j] : x[j];
+    // which only concerns the back-reaction operator. See
+    // neighbor_clamp_eligible()'s doc comment for why this is an om-based
+    // eligibility test, not `mask[j] & groupbit`.
+    const double *xj = (!live_neighbor_positions && neighbor_clamp_eligible(j)) ? c[j] : x[j];
 
     double delx = xtrial[0] - xj[0];
     double dely = xtrial[1] - xj[1];
@@ -3011,6 +3158,21 @@ bool FixBAOABTether::partial_force(int i, const double *xtrial, double *fout, do
    O(N) per call -- expected and acceptable for a validation mode, not
    something to wire into a hot path (see force_eval_full's doc comment
    in the header for which call sites this makes very slow).
+
+   LATENT CONSTRAINT: only f[] (and atom i's position) are saved/restored
+   around the trial recompute -- the pair style's own GLOBAL rho[]/fp[]
+   caches are deliberately left in the TRIAL configuration's state, not
+   restored. Harmless under force_eval_full's actual (sole, exclusive) use
+   -- every partial_force() call routes here when it's set, so every call
+   is its own fresh, self-consistent full recompute and nothing ever reads
+   a stale in-between rho[]/fp[] value. But this function must NEVER be
+   called as a side comparison while use_local_partial_force's path is the
+   one actually in effect without separately restoring rho[]/fp[] first
+   (e.g. a second full_system_force() call at the real, unperturbed
+   configuration) -- local_partial_force()'s rho_j_trial delta-correction
+   reads rho[j] directly, and would otherwise silently use a corrupted
+   baseline for every subsequent call this step. pforce_debug_tag's
+   comparison code does this restore explicitly; see its doc comment.
 ------------------------------------------------------------------------- */
 
 bool FixBAOABTether::full_system_force(int i, const double *xtrial, double *fout,
@@ -3163,6 +3325,36 @@ void FixBAOABTether::force_moll()
     x[i][2] = xsave[3 * k + 2];
   }
   comm->forward_comm();
+
+  // The recompute_forces_local() call above ran at the CLAMPED geometry,
+  // so the pair style's global rho[]/fp[] caches are now left reflecting
+  // "every flagged atom sitting at its clamped center" -- not the true,
+  // just-restored real positions. f[i] (this function's actual output:
+  // masked-mode-zeroed force plus the Jblk back-reaction) is correct and
+  // must be preserved exactly as computed above, but every OTHER caller
+  // of local_partial_force() for the rest of this step (sub_step_free_atom(),
+  // kinetic_guard_and_quench()'s instantaneous re-tether, exile handling,
+  // diag_check_staleness(), and refresh_one_atom() if called again later
+  // via a mid-step forced refresh) would otherwise silently read this
+  // stale clamped-state rho[j]/fp[j] until the step's own ordinary
+  // pair->compute() eventually runs -- confirmed as a real, large (often
+  // order-unity relative force error) effect via force_eval_local_regression's
+  // pforce_debug_tag instrumentation, not merely a hypothetical risk. Save
+  // f[] (the output above), do one more recompute at the now-real
+  // positions to refresh rho[]/fp[] correctly, then restore f[] -- same
+  // save/recompute/restore idiom full_system_force() already uses for its
+  // own trial evaluations. Skipped entirely under force_eval_full: every
+  // local_partial_force()-based consumer is unreachable there (partial_force()
+  // routes everything through full_system_force() instead, which always
+  // does its own fresh recompute and never reads this cache), so the extra
+  // O(N) pass would be pure overhead with no behavioral effect.
+  if (!force_eval_full) {
+    int ntotal = atom->nlocal + atom->nghost;
+    std::vector<double> fsave(3 * ntotal);
+    if (ntotal) memcpy(fsave.data(), &f[0][0], 3 * ntotal * sizeof(double));
+    recompute_forces_local();
+    if (ntotal) memcpy(&f[0][0], fsave.data(), 3 * ntotal * sizeof(double));
+  }
 }
 
 /* ---------------------------------------------------------------------- */

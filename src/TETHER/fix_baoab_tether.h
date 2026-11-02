@@ -346,6 +346,17 @@ class FixBAOABTether : public FixBAOAB {
   // (default, zero overhead).
   tagint newton_debug_tag;
 
+  // THROWAWAY DIAGNOSTIC, not a production keyword: when set (>=0), every
+  // time partial_force() is called for this one atom tag with
+  // force_eval_full OFF (local_partial_force()), ALSO compute
+  // full_system_force() for the identical (i, xtrial) and print both
+  // fout's and the relative difference to stderr. Does not change which
+  // result is actually used -- pure side-channel comparison, built to
+  // localize the force_eval local-vs-full gap found in
+  // force_eval_local_regression_confirmed. -1 = off (default, zero
+  // overhead).
+  tagint pforce_debug_tag;
+
   // MACE's much larger r_cut (vs. EAM/LJ) puts a bulk Pd atom's full
   // neighbor list around ~150 within 8 A; 96 was sized for the shorter
   // pairwise cutoffs this fix was originally validated against.
@@ -468,6 +479,7 @@ class FixBAOABTether : public FixBAOAB {
 
   // stage-2 additions
   void solve_center(int i, double mi, double kT, double *cnew);
+  bool neighbor_clamp_eligible(int j) const;
   bool trial_in_range(int i, const double *xtrial) const;
   bool partial_force(int i, const double *xtrial, double *fout, double *fneigh = nullptr,
                       bool live_neighbor_positions = false);

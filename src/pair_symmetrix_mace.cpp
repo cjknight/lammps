@@ -780,7 +780,7 @@ void PairSymmetrixMACE::compute_no_mpi_message_passing(int eflag, int vflag)
 // i -- with every position read routed through pos() instead of raw
 // atom->x[], so the trial/clamp substitution below still applies. This
 // reproduces compute_no_mpi_message_passing()'s own result exactly when
-// clamp_groupbit == 0 and xtrial == atom->x[i], and costs about as much as
+// clamp_mask == nullptr and xtrial == atom->x[i], and costs about as much as
 // one pair->compute() pass per call -- accepted for correctness given
 // MACE's role here as an interim reference/teacher model, not a permanent
 // production force field.
@@ -795,21 +795,26 @@ void PairSymmetrixMACE::compute_no_mpi_message_passing(int eflag, int vflag)
 // calls (fix_baoab_tether calls this from refresh_blocks()/solve_center(),
 // never interleaved with compute()).
 //
-// Clamped-neighbor substitution: when clamp_groupbit != 0 and clamp_c !=
-// nullptr, any atom j (j != i) with atom->mask[j] & clamp_groupbit uses
-// clamp_c[j] instead of atom->x[j], matching the substitution the
+// Clamped-neighbor substitution: when clamp_mask != nullptr and clamp_c !=
+// nullptr, any atom idx (idx != i) with clamp_mask[idx] true uses
+// clamp_c[idx] instead of atom->x[idx], matching the substitution the
 // single()-based fallback already applies per-pair in
 // FixBAOABTether::partial_force(). pos() is the single choke point for
 // every position read in this function, so the substitution applies
 // uniformly no matter how many hops separate the flagged atom from i --
 // including cases the pairwise single() path could never express in the
-// first place. atom->mask is valid for ghost indices (LAMMPS border comm
-// carries it for every atom style); clamp_c is expected to already be
+// first place. Indexed by atom index (not group membership: see
+// Pair::local_partial_force()'s doc comment and
+// FixBAOABTether::neighbor_clamp_eligible() for why -- on a single
+// whole-system group, `mask[idx] & groupbit` is true for every atom, not
+// just genuinely stiff/rattler ones). clamp_mask is sized
+// atom->nlocal+atom->nghost and must already cover every ghost index this
+// function might encounter; clamp_c is expected to already be
 // forward-comm'd/PBC-shifted to match atom->x's image (see
 // FixBAOABTether::pack_forward_comm()).
 bool PairSymmetrixMACE::local_partial_force(int i, const double *xtrial, int jnum,
                                              const int *jlist, double *fout, double *fneigh,
-                                             int clamp_groupbit, double *const *clamp_c)
+                                             const bool *clamp_mask, double *const *clamp_c)
 {
   fout[0] = fout[1] = fout[2] = 0.0;
   if (fneigh)
@@ -821,7 +826,7 @@ bool PairSymmetrixMACE::local_partial_force(int i, const double *xtrial, int jnu
 
   auto pos = [&](int idx, double *out) {
     if (idx == i) { out[0] = xtrial[0]; out[1] = xtrial[1]; out[2] = xtrial[2]; }
-    else if (clamp_groupbit && (atom->mask[idx] & clamp_groupbit)) {
+    else if (clamp_mask && clamp_mask[idx]) {
       out[0] = clamp_c[idx][0]; out[1] = clamp_c[idx][1]; out[2] = clamp_c[idx][2];
     }
     else { out[0] = atom->x[idx][0]; out[1] = atom->x[idx][1]; out[2] = atom->x[idx][2]; }

@@ -194,23 +194,43 @@ class Pair : protected Pointers {
   // same trial perturbation. Default no-op mirrors single()'s pattern for
   // pair styles that don't implement it (see has_local_partial_force).
   //
-  // clamp_groupbit/clamp_c (both optional, default off): when
-  // clamp_groupbit != 0 and clamp_c != nullptr, any subgraph atom j (j !=
-  // i) with atom->mask[j] & clamp_groupbit uses clamp_c[j] instead of
-  // atom->x[j]. This lets a many-body pair style honor the same "flagged
-  // neighbor uses its clamped center" substitution the single()-based
-  // caller already applies per-pair, for pair styles whose force is a
-  // genuinely multi-hop function of the neighborhood and so cannot express
-  // the substitution via jlist/fneigh alone.
+  // clamp_mask/clamp_c (both optional, default off): when clamp_mask !=
+  // nullptr and clamp_c != nullptr, any atom index idx (idx != i, local or
+  // ghost, 0..atom->nlocal+atom->nghost-1) with clamp_mask[idx] true uses
+  // clamp_c[idx] instead of atom->x[idx]. This lets a many-body pair style
+  // honor the same "flagged neighbor uses its clamped center" substitution
+  // the single()-based caller already applies per-pair, for pair styles
+  // whose force is a genuinely multi-hop function of the neighborhood (not
+  // expressible via jlist/fneigh alone) -- indexed by atom index rather
+  // than by position in jlist so a multi-hop implementation can apply it
+  // to any atom it encounters, not just atom i's direct neighbors.
+  // clamp_mask reflects a per-call, per-atom decision the caller works out
+  // (e.g. from its own current curvature state), not a static property of
+  // the atom such as group membership.
   virtual bool local_partial_force(int /*i*/, const double * /*xtrial*/, int jnum,
                                     const int * /*jlist*/, double *fout, double *fneigh,
-                                    int /*clamp_groupbit*/ = 0, double *const * /*clamp_c*/ = nullptr)
+                                    const bool * /*clamp_mask*/ = nullptr,
+                                    double *const * /*clamp_c*/ = nullptr)
   {
     fout[0] = fout[1] = fout[2] = 0.0;
     if (fneigh)
       for (int jj = 0; jj < jnum; jj++) fneigh[3 * jj] = fneigh[3 * jj + 1] = fneigh[3 * jj + 2] = 0.0;
     return false;
   }
+
+  // Diagnostic accessors (added for the TETHER package's local_partial_force()
+  // debugging): read back this pair style's own per-atom density/
+  // embedding-derivative cache, for a many-body style that keeps one (see
+  // has_local_partial_force). Lets a caller ground-truth
+  // local_partial_force()'s internal reconstruction against a real full
+  // recompute at the same trial configuration, without needing a
+  // pair-style-specific friend declaration or cast -- this is how the
+  // PairEAM ghost-forward-comm bug (rho[] never sent to ghosts, only
+  // fp[]) was actually found; see
+  // local_partial_force_two_real_bugs_found project memory. Default no-op
+  // for pair styles without such a cache.
+  virtual double get_rho(int /*i*/) const { return 0.0; }
+  virtual double get_fp(int /*i*/) const { return 0.0; }
 
   virtual void finish() {}
   virtual void settings(int, char **) = 0;
