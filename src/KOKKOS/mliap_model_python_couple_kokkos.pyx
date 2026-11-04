@@ -9,6 +9,11 @@ import pickle
 
 # For converting C arrays to numpy arrays
 import numpy
+
+import warnings
+warnings.filterwarnings("ignore", message=".*Overriding a previously registered kernel.*")
+warnings.filterwarnings("ignore", message=".*smallest subnormal.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="torch.*")
 import torch
 
 mode = "cpu"
