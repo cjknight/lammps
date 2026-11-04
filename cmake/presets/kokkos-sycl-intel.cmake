@@ -14,7 +14,9 @@ set(FFT_SINGLE ON CACHE BOOL "" FORCE)
 
 unset(USE_INTERNAL_LINALG)
 unset(USE_INTERNAL_LINALG CACHE)
-set(BLAS_VENDOR "Intel10_64_dyn")
+#set(BLAS_VENDOR "Intel10_64_dyn")
+#set(BLA_VENDOR "Intel10_64lp")
+set(MKL_INTERFACE lp64)
 
 # hide deprecation warnings temporarily for stable release
 set(Kokkos_ENABLE_DEPRECATION_WARNINGS OFF CACHE BOOL "" FORCE)
