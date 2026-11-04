@@ -22,6 +22,7 @@
 #include "force.h"
 #include "memory.h"
 #include "neigh_list.h"
+#include "neigh_request.h"
 #include "neighbor.h"
 
 #include <algorithm>
@@ -183,8 +184,21 @@ void PairSymmetrixMACE::init_style()
   if (atom->map_user == atom->MAP_NONE) error->all(FLERR, "symmetrix/mace requires \'atom_modify map [yes|array|hash]\'");
   if (force->newton_pair == 0) error->all(FLERR, "symmetrix/mace requires newton pair on");
 
+  // Without an explicit cutoff, Neighbor::init() sizes this request's
+  // per-type cutoff table from force->pair->cutsq[][] -- the GLOBAL
+  // production pair style's own cutoff, not mace->r_cut. That is normally
+  // harmless (this *is* the production pair style in the common case, so
+  // its own cutoff and mace->r_cut agree by construction), but when this
+  // Pair instance is constructed standalone, independent of force->pair
+  // (e.g. as a "teacher" potential driven directly by another fix/compute
+  // rather than through the normal pair_style/pair_coeff commands), its
+  // neighbor list would otherwise be silently truncated to whatever the
+  // ACTUAL production pair's shorter cutoff happens to be -- no error, just
+  // a quietly wrong (too-short-ranged) node/edge graph. set_cutoff_max()
+  // ties this request's cutoff to this instance's own mace->r_cut instead.
   if (mode == "no_domain_decomposition" or mode == "mpi_message_passing") {
-    neighbor->add_request(this, NeighConst::REQ_FULL);
+    NeighRequest *req = neighbor->add_request(this, NeighConst::REQ_FULL);
+    req->set_cutoff_max(mace->r_cut);
   } else {
     // enforce the communication cutoff is more than twice the model cutoff
     const double comm_cutoff = comm->get_comm_cutoff();
@@ -196,7 +210,8 @@ void PairSymmetrixMACE::init_style()
       comm->modify_params(2, args);
       if (comm->me == 0) utils::logmesg(lmp, "symmetrix/mace is setting the communication cutoff to {}", cutoff_val);
     }
-    neighbor->add_request(this, NeighConst::REQ_FULL | NeighConst::REQ_GHOST);
+    NeighRequest *req = neighbor->add_request(this, NeighConst::REQ_FULL | NeighConst::REQ_GHOST);
+    req->set_cutoff_max(mace->r_cut);
   }
 }
 

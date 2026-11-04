@@ -26,6 +26,7 @@ FixStyle(baoab/tether,FixBAOABTether);
 
 #include <cmath>
 #include <string>
+#include <vector>
 
 namespace LAMMPS_NS {
 
@@ -357,6 +358,37 @@ class FixBAOABTether : public FixBAOAB {
   // overhead).
   tagint pforce_debug_tag;
 
+  // D.14 self-distilled surrogate hierarchy (design doc), RESPA-style
+  // teacher/student composition -- EXPERIMENTAL, off by default
+  // (teacher_every == 0 reproduces today's single-fidelity behavior byte-
+  // for-byte; see fix_baoab_tether.rst). The production pair style
+  // (force->pair, set via the ordinary pair_style/pair_coeff commands) is
+  // the cheap STUDENT: every inner step's mollifier machinery (Hessian
+  // blocks, Newton solve, modal mask, back-reaction J) runs on it exactly
+  // as today. teacher_pair is a SECOND, independently-constructed Pair
+  // object (never registered as force->pair) standing in for the
+  // expensive TEACHER (e.g. a foundation MLIP) -- called only once every
+  // teacher_every steps, via a whole-system teacher_pair->compute(0,0) at
+  // the student's own clamped configuration, mirroring force_moll()'s
+  // existing move-to-center/recompute/restore pattern. See
+  // d14_respa_mechanism_port memory and lj_multifidelity_experiment.py
+  // (the validated Python reference this ports) for the full design.
+  class Pair *teacher_pair;     // owned; nullptr unless teacher_every > 0
+  std::string teacher_style_name;
+  std::vector<std::string> teacher_settings_args;   // from "teacher_style <n> <name> <args...>"
+  std::vector<std::string> teacher_coeff_args;      // from "teacher_coeff <n> <args...>"
+  int teacher_every;            // 0 (default) = disabled; the D.14 outer ratio "m"
+  bigint outer_cycle_start;     // ntimestep the current outer cycle began
+  bigint n_teacher_calls;       // diagnostic: teacher_pair->compute() calls (compute_vector())
+
+  // carried half-kick impulse per flagged atom (nmax x 3): 0.5*teacher_every*dt*
+  // F_delta/m, already modal-filtered + back-reaction-applied by
+  // apply_modal_filter_and_backreaction(). Reused, leapfrog-style, as both
+  // the closing half-kick of the outer cycle that just computed it and the
+  // opening half-kick of the next one -- see initial_integrate()/
+  // final_integrate(). Harmless all-zero default when teacher_every == 0.
+  double **f_delta;
+
   // MACE's much larger r_cut (vs. EAM/LJ) puts a bulk Pd atom's full
   // neighbor list around ~150 within 8 A; 96 was sized for the shorter
   // pairwise cutoffs this fix was originally validated against.
@@ -486,6 +518,11 @@ class FixBAOABTether : public FixBAOAB {
   bool full_system_force(int i, const double *xtrial, double *fout, double *fneigh = nullptr,
                           int jnum = 0, const int *jlist = nullptr);
   void force_moll();
+  void apply_modal_filter_and_backreaction();
+
+  // D.14 additions
+  void teacher_outer_kick();
+  void compute_force_delta();
 
   // stage-3 additions
 

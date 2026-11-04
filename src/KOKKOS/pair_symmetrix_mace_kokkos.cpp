@@ -201,8 +201,15 @@ void PairSymmetrixMACEKokkos<DeviceType, Precision>::init_style()
   if (atom->map_user == atom->MAP_NONE) error->all(FLERR, "symmetrix/mace/kk requires \'atom_modify map [yes|array|hash]\'");
   if (force->newton_pair == 0) error->all(FLERR, "symmetrix/mace/kk requires newton pair on");
 
+  // See the matching comment in PairSymmetrixMACE::init_style()
+  // (non-KOKKOS): without set_cutoff_max(), this request's per-type cutoff
+  // table is sized from the GLOBAL production pair style's cutoff, not this
+  // instance's own mace->r_cut -- silently wrong if this Pair is ever
+  // constructed standalone (e.g. a "teacher" potential) rather than as
+  // force->pair itself.
   if (mode == "no_domain_decomposition" or mode == "mpi_message_passing") {
     auto request = neighbor->add_request(this, NeighConst::REQ_FULL);
+    request->set_cutoff_max(mace->r_cut);
     request->set_kokkos_host(std::is_same_v<DeviceType,LMPHostType> &&
                              !std::is_same_v<DeviceType,LMPDeviceType>);
     request->set_kokkos_device(std::is_same_v<DeviceType,LMPDeviceType>);
@@ -218,6 +225,7 @@ void PairSymmetrixMACEKokkos<DeviceType, Precision>::init_style()
       if (comm->me == 0) error->warning(FLERR, "symmetrix/mace/kk is setting the communication cutoff to {}", cutoff_val);
     }
     auto request = neighbor->add_request(this, NeighConst::REQ_FULL | NeighConst::REQ_GHOST);
+    request->set_cutoff_max(mace->r_cut);
     request->set_kokkos_host(std::is_same_v<DeviceType,LMPHostType> &&
                              !std::is_same_v<DeviceType,LMPDeviceType>);
     request->set_kokkos_device(std::is_same_v<DeviceType,LMPDeviceType>);

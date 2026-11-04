@@ -87,7 +87,8 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
     FixBAOAB(lmp, check_base_args(lmp, narg), arg), list(nullptr), x0(nullptr), c(nullptr),
     evecs(nullptr), om(nullptr), Hacc(nullptr), n_hess_samples(nullptr), nJ(nullptr),
     Jtag(nullptr), Jblk(nullptr), demote_count(nullptr), last_demote(nullptr),
-    demote_cool(nullptr), quench_exempt(nullptr), last_ke(nullptr)
+    demote_cool(nullptr), quench_exempt(nullptr), last_ke(nullptr), teacher_pair(nullptr),
+    f_delta(nullptr)
 {
   theta = -1.0;
   refresh_every = -1;
@@ -154,6 +155,10 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   j_free = 0;
   newton_debug_tag = -1;
   pforce_debug_tag = -1;
+
+  teacher_every = 0;
+  outer_cycle_start = 0;
+  n_teacher_calls = 0;
 
   int iarg = 7;
   while (iarg < narg) {
@@ -375,6 +380,38 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether event_log", error);
       event_log_filename = arg[iarg + 1];
       iarg += 2;
+    } else if (strcmp(arg[iarg], "teacher_style") == 0) {
+      // EXPERIMENTAL (D.14 RESPA multi-fidelity, see header comment by
+      // teacher_pair): "teacher_style <n> <pair_style_name> <arg1> ... <argN>",
+      // an explicit leading count since a pair style's own settings() args
+      // vary in number (e.g. "symmetrix/mace no_mpi_message_passing" is 2
+      // tokens). Stored now, actually constructed in init() once the
+      // production pair style (needed to size/validate against) is final.
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether teacher_style", error);
+      int n = utils::inumeric(FLERR, arg[iarg + 1], false, lmp);
+      if (n < 1) error->all(FLERR, iarg + 1, "Fix baoab/tether teacher_style count must be >= 1");
+      if (iarg + 2 + n > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether teacher_style", error);
+      teacher_style_name = arg[iarg + 2];
+      teacher_settings_args.clear();
+      for (int k = 1; k < n; k++) teacher_settings_args.emplace_back(arg[iarg + 2 + k]);
+      iarg += 2 + n;
+    } else if (strcmp(arg[iarg], "teacher_coeff") == 0) {
+      // EXPERIMENTAL: "teacher_coeff <n> <arg1> ... <argN>", passed to
+      // teacher_pair->coeff() verbatim in init() (e.g.
+      // "5 * * mace-mp-0b3-medium-1-46.json H Pd"). Same leading-count
+      // convention as teacher_style, for the same reason.
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether teacher_coeff", error);
+      int n = utils::inumeric(FLERR, arg[iarg + 1], false, lmp);
+      if (n < 1) error->all(FLERR, iarg + 1, "Fix baoab/tether teacher_coeff count must be >= 1");
+      if (iarg + 2 + n > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether teacher_coeff", error);
+      teacher_coeff_args.clear();
+      for (int k = 0; k < n; k++) teacher_coeff_args.emplace_back(arg[iarg + 2 + k]);
+      iarg += 2 + n;
+    } else if (strcmp(arg[iarg], "teacher_every") == 0) {
+      // EXPERIMENTAL: the D.14 outer ratio "m". 0 (default) = disabled.
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether teacher_every", error);
+      teacher_every = utils::inumeric(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 2;
     } else {
       error->all(FLERR, iarg, "Unknown fix baoab/tether keyword {}", arg[iarg]);
     }
@@ -519,7 +556,7 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   // diagnostic (cached-vs-fresh mode-eligibility disagreement) -- see
   // n_mask_agree/n_mask_stale_soft/n_mask_stale_tight in the header.
   vector_flag = 1;
-  size_vector = 11;
+  size_vector = 12;
   extvector = 0;
 
   // per-atom persistent state (curvature-block eigenvectors/frequencies,
@@ -553,6 +590,9 @@ FixBAOABTether::~FixBAOABTether()
   memory->destroy(demote_cool);
   memory->destroy(quench_exempt);
   memory->destroy(last_ke);
+  memory->destroy(f_delta);
+
+  delete teacher_pair;
 
   // event_log_fp is a SafeFilePtr member: its own destructor closes the
   // file (if opened) automatically, no explicit fclose() needed here.
@@ -624,6 +664,37 @@ void FixBAOABTether::init()
     // atom's own pair-style neighbors, every step -- not the half-list
     // "i<j" restriction, and not just occasionally (plan doc SS5.1).
     neighbor->add_request(this, NeighConst::REQ_FULL);
+  }
+
+  // D.14 teacher/student composition (EXPERIMENTAL, see header comment by
+  // teacher_pair): construct the standalone teacher Pair object ONCE (not
+  // re-constructed/re-loaded on every "run" command), independent of
+  // force->pair -- mirrors Input::pair_style()'s own
+  // create_pair()+settings() sequence (see force.cpp), except the result is
+  // never assigned to force->pair. teacher_pair->init() itself IS re-run
+  // every init() call below, same as force->pair's own re-init on every run
+  // and this fix's own neighbor->add_request() above -- it registers
+  // teacher_pair's own neighbor-list request for this run.
+  if (teacher_every > 0) {
+    if (!mollify) error->all(FLERR, "Fix baoab/tether teacher_every requires mollify yes");
+    if (teacher_style_name.empty())
+      error->all(FLERR, "Fix baoab/tether teacher_every requires teacher_style");
+    if (teacher_coeff_args.empty())
+      error->all(FLERR, "Fix baoab/tether teacher_every requires teacher_coeff");
+
+    if (!teacher_pair) {
+      int sflag;
+      teacher_pair = force->new_pair(teacher_style_name, 0, sflag);
+
+      std::vector<char *> settings_argv;
+      for (auto &s : teacher_settings_args) settings_argv.push_back(const_cast<char *>(s.c_str()));
+      teacher_pair->settings((int) settings_argv.size(), settings_argv.data());
+
+      std::vector<char *> coeff_argv;
+      for (auto &s : teacher_coeff_args) coeff_argv.push_back(const_cast<char *>(s.c_str()));
+      teacher_pair->coeff((int) coeff_argv.size(), coeff_argv.data());
+    }
+    teacher_pair->init();
   }
 
   // force an immediate curvature-block acquisition on the first
@@ -709,6 +780,15 @@ void FixBAOABTether::initial_integrate(int /*vflag*/)
       solve_center(i, mi, kT, c[i]);
     }
     force_moll();
+
+    // D.14 teacher/student composition (EXPERIMENTAL, teacher_every > 0
+    // only): this step OPENS a new outer cycle -- apply the carried
+    // f_delta impulse (computed at the close of the PREVIOUS cycle, or
+    // left all-zero before the first one) before the ordinary B-kick below
+    // consumes atom->f. See teacher_outer_kick()'s doc comment.
+    if (teacher_every > 0 &&
+        (update->ntimestep - outer_cycle_start) % teacher_every == 0)
+      teacher_outer_kick();
   }
 
   double one_minus_c1sq = 1.0 - c1 * c1;
@@ -989,6 +1069,20 @@ void FixBAOABTether::final_integrate()
       solve_center(i, mi, kT, c[i]);
     }
     force_moll();
+
+    // D.14 teacher/student composition (EXPERIMENTAL, teacher_every > 0
+    // only): this step CLOSES the current outer cycle -- recompute f_delta
+    // fresh at the NEW clamped geometry (one teacher call), apply it as
+    // this cycle's closing half-kick, then advance outer_cycle_start so the
+    // SAME freshly-computed f_delta becomes the next cycle's opening
+    // half-kick in the following initial_integrate() call (the leapfrog
+    // reuse the Python reference's run_mf() relies on).
+    if (teacher_every > 0 &&
+        (update->ntimestep - outer_cycle_start + 1) % teacher_every == 0) {
+      compute_force_delta();
+      teacher_outer_kick();
+      outer_cycle_start += teacher_every;
+    }
   }
 
   for (int i = 0; i < nlocal; i++) {
@@ -3237,9 +3331,22 @@ bool FixBAOABTether::full_system_force(int i, const double *xtrial, double *fout
    integrator's actual state.
 ------------------------------------------------------------------------- */
 
-void FixBAOABTether::force_moll()
+// Extracted from force_moll() (pure refactor, no behavior change there) so
+// the D.14 teacher/student composition (compute_force_delta()) can apply
+// the IDENTICAL modal-mask-zeroing + sparse back-reaction filter to the
+// teacher's raw force that force_moll() already applies to the student's.
+// Always operates on atom->f directly, for every currently-flagged atom:
+// not a generic "filter an arbitrary per-atom array" helper -- the
+// comm->reverse_comm() call below is hardwired to atom->f by LAMMPS itself
+// (see comm.h), so a caller-supplied buffer would silently NOT get the
+// back-reaction's ghost contributions shipped home. Callers that need to
+// filter something other than the production force (e.g. the teacher's raw
+// compute() output) must first PLACE that result into atom->f themselves
+// (zeroing/saving/restoring whatever was there before, exactly as
+// force_moll() itself and recompute_forces_local() already do for their own
+// out-of-band recomputes) before calling this.
+void FixBAOABTether::apply_modal_filter_and_backreaction()
 {
-  double **x = atom->x;
   double **f = atom->f;
   int *mask = atom->mask;
   int nlocal = atom->nlocal;
@@ -3249,29 +3356,15 @@ void FixBAOABTether::force_moll()
   for (int i = 0; i < nlocal; i++)
     if (mask[i] & groupbit) flagged.push_back(i);
 
-  std::vector<double> xsave(3 * flagged.size());
-  for (size_t k = 0; k < flagged.size(); k++) {
-    int i = flagged[k];
-    xsave[3 * k + 0] = x[i][0];
-    xsave[3 * k + 1] = x[i][1];
-    xsave[3 * k + 2] = x[i][2];
-    x[i][0] = c[i][0];
-    x[i][1] = c[i][1];
-    x[i][2] = c[i][2];
-  }
-
-  comm->forward_comm();
-
-  recompute_forces_local();
-
-  // stage-4: recompute_forces_local()'s own comm->reverse_comm() above
-  // (inside its final line) already sent home every ghost's raw
-  // pair-force contribution -- but AtomVec::unpack_reverse() only adds
-  // into the OWNER's f[], it never clears the GHOST's own f[] slot
-  // afterward. Zero the ghost region now so the back-reaction loop below
-  // writes into a clean slate; the second comm->reverse_comm() after that
-  // loop then sends home exactly the NEW back-reaction contribution, with
-  // no double-counting of the already-reconciled raw pair force.
+  // stage-4: the caller's own recompute (recompute_forces_local() or an
+  // equivalent out-of-band compute()) already sent home every ghost's raw
+  // pair-force contribution via its own reverse_comm -- but
+  // AtomVec::unpack_reverse() only adds into the OWNER's f[], it never
+  // clears the GHOST's own f[] slot afterward. Zero the ghost region now so
+  // the back-reaction loop below writes into a clean slate; the second
+  // comm->reverse_comm() after that loop then sends home exactly the NEW
+  // back-reaction contribution, with no double-counting of the
+  // already-reconciled raw pair force.
   if (atom->nghost) memset(&f[atom->nlocal][0], 0, 3 * sizeof(double) * atom->nghost);
 
   for (size_t k = 0; k < flagged.size(); k++) {
@@ -3317,6 +3410,37 @@ void FixBAOABTether::force_moll()
   // into f[j] itself regardless of the pair style's newton setting, so it
   // always needs the trip home.
   comm->reverse_comm();
+}
+
+/* ---------------------------------------------------------------------- */
+
+void FixBAOABTether::force_moll()
+{
+  double **x = atom->x;
+  double **f = atom->f;
+  int *mask = atom->mask;
+  int nlocal = atom->nlocal;
+
+  std::vector<int> flagged;
+  flagged.reserve(nlocal);
+  for (int i = 0; i < nlocal; i++)
+    if (mask[i] & groupbit) flagged.push_back(i);
+
+  std::vector<double> xsave(3 * flagged.size());
+  for (size_t k = 0; k < flagged.size(); k++) {
+    int i = flagged[k];
+    xsave[3 * k + 0] = x[i][0];
+    xsave[3 * k + 1] = x[i][1];
+    xsave[3 * k + 2] = x[i][2];
+    x[i][0] = c[i][0];
+    x[i][1] = c[i][1];
+    x[i][2] = c[i][2];
+  }
+
+  comm->forward_comm();
+
+  recompute_forces_local();
+  apply_modal_filter_and_backreaction();
 
   for (size_t k = 0; k < flagged.size(); k++) {
     int i = flagged[k];
@@ -3357,6 +3481,135 @@ void FixBAOABTether::force_moll()
   }
 }
 
+/* ----------------------------------------------------------------------
+   D.14 teacher/student composition (EXPERIMENTAL, teacher_every > 0 only):
+   called once per outer cycle CLOSE, from final_integrate(), immediately
+   after this step's own force_moll() call -- at that point atom->f holds
+   the FILTERED STUDENT force for every flagged atom (what final_integrate()'s
+   own closing B-kick loop, right after this call, must still see
+   byte-identical). Computes f_delta[i] = filtered-teacher - filtered-student
+   at the SAME clamped geometry, mirroring the Python reference's
+   _force_delta() (lj_multifidelity_experiment.py): since
+   apply_modal_filter_and_backreaction() is linear, filter(Ft) - filter(Fs)
+   equals filter(Ft - Fs) -- re-filtering the teacher's raw force separately
+   and subtracting the already-filtered student force (snapshotted below)
+   avoids needing a second communication primitive for an arbitrary non-f[]
+   buffer (reverse_comm()/forward_comm() are hardwired to atom->f/atom->x).
+
+   Snapshots and restores the WHOLE local+ghost f[] array, not just flagged
+   atoms: teacher_pair->compute(0,0) is a genuine whole-system call (every
+   atom within its cutoff, not only flagged ones), and
+   apply_modal_filter_and_backreaction()'s own back-reaction loop can touch
+   arbitrary neighbors of a flagged atom too -- every one of those must come
+   back exactly as force_moll() left it, same idiom as force_moll()'s own
+   save/recompute/restore tail just above. Does NOT need an analogous
+   rho[]/fp[]-style cache restore for teacher_pair itself: nothing else this
+   step calls teacher_pair again (unlike force->pair, which
+   local_partial_force() callers read all over this file), and force->pair's
+   own caches are untouched here (only teacher_pair->compute() runs).
+------------------------------------------------------------------------- */
+
+void FixBAOABTether::compute_force_delta()
+{
+  double **x = atom->x;
+  double **f = atom->f;
+  int *mask = atom->mask;
+  int nlocal = atom->nlocal;
+  int ntotal = nlocal + atom->nghost;
+
+  std::vector<int> flagged;
+  flagged.reserve(nlocal);
+  for (int i = 0; i < nlocal; i++)
+    if (mask[i] & groupbit) flagged.push_back(i);
+
+  std::vector<double> fsave(3 * ntotal);
+  if (ntotal) memcpy(fsave.data(), &f[0][0], 3 * ntotal * sizeof(double));
+
+  std::vector<double> xsave(3 * flagged.size());
+  for (size_t k = 0; k < flagged.size(); k++) {
+    int i = flagged[k];
+    xsave[3 * k + 0] = x[i][0];
+    xsave[3 * k + 1] = x[i][1];
+    xsave[3 * k + 2] = x[i][2];
+    x[i][0] = c[i][0];
+    x[i][1] = c[i][1];
+    x[i][2] = c[i][2];
+  }
+  comm->forward_comm();
+
+  // raw teacher force at the clamped geometry -- a genuine whole-system
+  // compute(), NOT local_partial_force(): intentionally rare (once per
+  // outer cycle, teacher_every steps) and O(N) per call, see teacher_pair's
+  // header doc comment for why this is the chosen design.
+  force_clear_local();
+  teacher_pair->compute(0, 0);
+  if (force->newton) comm->reverse_comm();
+  n_teacher_calls++;
+
+  apply_modal_filter_and_backreaction();
+
+  // f[] now holds the filtered TEACHER force; extract f_delta for flagged
+  // atoms before restoring f[] to the student's snapshot below. A genuine
+  // FORCE (eV/Angstrom), not yet divided by mass -- teacher_outer_kick()
+  // divides by mass at the point of use, same convention as every other
+  // velocity update in this file (see dtfm = dtf*invmass elsewhere).
+  for (size_t k = 0; k < flagged.size(); k++) {
+    int i = flagged[k];
+    f_delta[i][0] = f[i][0] - fsave[3 * i + 0];
+    f_delta[i][1] = f[i][1] - fsave[3 * i + 1];
+    f_delta[i][2] = f[i][2] - fsave[3 * i + 2];
+  }
+
+  for (size_t k = 0; k < flagged.size(); k++) {
+    int i = flagged[k];
+    x[i][0] = xsave[3 * k + 0];
+    x[i][1] = xsave[3 * k + 1];
+    x[i][2] = xsave[3 * k + 2];
+  }
+  comm->forward_comm();
+
+  if (ntotal) memcpy(&f[0][0], fsave.data(), 3 * ntotal * sizeof(double));
+}
+
+/* ----------------------------------------------------------------------
+   D.14 teacher/student composition (EXPERIMENTAL): the symmetric half-kick
+   impulse 0.5*teacher_every*dt*f_delta[i]/m_i bracketing the teacher_every
+   inner steps, applied directly to v[i] -- deliberately NOT folded into
+   atom->f (which modal_force_correction()/force_moll() already manage for
+   the student force), so this stays a clean, separate addition mirroring
+   the Python reference's own "vw += 0.5*m*dt*gd" (lj_multifidelity_
+   experiment.py), independent of whichever force-based bookkeeping is
+   happening elsewhere this step. Called from both initial_integrate()
+   (the carried f_delta from the previous cycle's close) and
+   final_integrate() (the freshly computed f_delta, right after
+   compute_force_delta() refreshes it) -- see the D.14 outer-cycle-boundary
+   checks there. Same exile_substep exclusion as the ordinary B-kick: an
+   exiled atom already gets its own full-step local treatment via
+   sub_step_free_atom() and must not also receive this shared-pipeline kick.
+------------------------------------------------------------------------- */
+
+void FixBAOABTether::teacher_outer_kick()
+{
+  double **v = atom->v;
+  double *mass = atom->mass;
+  double *rmass = atom->rmass;
+  int *type = atom->type;
+  int *mask = atom->mask;
+  int nlocal = atom->nlocal;
+
+  double half_m_dt = 0.5 * teacher_every * update->dt;
+
+  for (int i = 0; i < nlocal; i++) {
+    if (!(mask[i] & groupbit)) continue;
+    if (exile_substep && demote_cool[i] > update->ntimestep) continue;
+    double mi = rmass ? rmass[i] : mass[type[i]];
+    double scale = half_m_dt * force->ftm2v / mi;
+    v[i][0] += scale * f_delta[i][0];
+    v[i][1] += scale * f_delta[i][1];
+    v[i][2] += scale * f_delta[i][2];
+  }
+}
+
 /* ---------------------------------------------------------------------- */
 
 void FixBAOABTether::force_clear_local()
@@ -3387,7 +3640,7 @@ void FixBAOABTether::recompute_forces_local()
 
 double FixBAOABTether::memory_usage()
 {
-  double bytes = (double) atom->nmax * (3 + 3 + 9 + 3 + 1) * sizeof(double);
+  double bytes = (double) atom->nmax * (3 + 3 + 9 + 3 + 1 + 3) * sizeof(double);
   bytes += (double) atom->nmax * sizeof(int);
   bytes += (double) atom->nmax * JMAX * sizeof(tagint);
   bytes += (double) atom->nmax * JMAX * 9 * sizeof(double);
@@ -3407,7 +3660,10 @@ double FixBAOABTether::memory_usage()
    generous cutoff/skin). [8..10] stage-20 read-only diagnostic: cached-vs-
    fresh mode-eligibility agreement/disagreement counts from
    diag_check_staleness() -- see n_mask_agree/n_mask_stale_soft/
-   n_mask_stale_tight in the header.
+   n_mask_stale_tight in the header. [11] D.14 (EXPERIMENTAL): teacher_pair
+   ->compute() calls (n_teacher_calls) -- the MLIP-call-count headline
+   metric for the teacher/student composition, always 0 when
+   teacher_every == 0.
 ------------------------------------------------------------------------- */
 
 double FixBAOABTether::compute_vector(int n)
@@ -3424,6 +3680,7 @@ double FixBAOABTether::compute_vector(int n)
     case 8: return (double) n_mask_agree;
     case 9: return (double) n_mask_stale_soft;
     case 10: return (double) n_mask_stale_tight;
+    case 11: return (double) n_teacher_calls;
     default: return 0.0;
   }
 }
@@ -3447,6 +3704,7 @@ void FixBAOABTether::grow_arrays(int nmax)
   memory->grow(demote_cool, nmax, "baoab/tether:demote_cool");
   memory->grow(quench_exempt, nmax, "baoab/tether:quench_exempt");
   memory->grow(last_ke, nmax, "baoab/tether:last_ke");
+  memory->grow(f_delta, nmax, 3, "baoab/tether:f_delta");
 
   // zero-init on every grow (not just the newly-added tail): correctness-
   // critical since mode_is_stiff() reads demote_cool unconditionally for
@@ -3469,6 +3727,7 @@ void FixBAOABTether::grow_arrays(int nmax)
     demote_cool[i] = 0;
     quench_exempt[i] = 0;
     last_ke[i] = 0.0;
+    f_delta[i][0] = f_delta[i][1] = f_delta[i][2] = 0.0;
     nJ[i] = 0;
     for (int a = 0; a < 9; a++) Hacc[i][a] = 0.0;
     n_hess_samples[i] = 0;
@@ -3497,6 +3756,7 @@ void FixBAOABTether::copy_arrays(int i, int j, int /*delflag*/)
   demote_cool[j] = demote_cool[i];
   quench_exempt[j] = quench_exempt[i];
   last_ke[j] = last_ke[i];
+  for (int k = 0; k < 3; k++) f_delta[j][k] = f_delta[i][k];
 }
 
 /* ---------------------------------------------------------------------- */
@@ -3522,6 +3782,7 @@ int FixBAOABTether::pack_exchange(int i, double *buf)
   buf[m++] = ubuf(demote_cool[i]).d;
   buf[m++] = ubuf(quench_exempt[i]).d;
   buf[m++] = last_ke[i];
+  for (int k = 0; k < 3; k++) buf[m++] = f_delta[i][k];
   return m;
 }
 
@@ -3548,6 +3809,7 @@ int FixBAOABTether::unpack_exchange(int nlocal, double *buf)
   demote_cool[nlocal] = (bigint) ubuf(buf[m++]).i;
   quench_exempt[nlocal] = (bigint) ubuf(buf[m++]).i;
   last_ke[nlocal] = buf[m++];
+  for (int k = 0; k < 3; k++) f_delta[nlocal][k] = buf[m++];
   return m;
 }
 
