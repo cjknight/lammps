@@ -110,6 +110,47 @@ class FixBAOABTether : public FixBAOAB {
   double solve_tol_rel;  // Newton convergence tol, relative to thermal amplitude
   int use_local_partial_force;   // 0 = pair->single() loop, 1 = pair->local_partial_force()
 
+  // solve_center()'s guard-threshold constants, exposed as keywords instead
+  // of hardcoded locals/literals -- see water_newton_guard_unit_scale_bug
+  // memory and the "Parameterize solve_center()'s guard-threshold constants"
+  // plan for the full derivation. Each is a dimensionless multiple of a_th
+  // (the thermal amplitude of the stiffest masked mode) -- newton_tol_rel
+  // directly (replacing the old confusing "20.0*0.25" indirection ported
+  // from the Python reference's separately-hardcoded 20.0), flip_rel and
+  // newton_cap_rel likewise; energy_guard_rel is a multiple of kT (eharm's
+  // own natural scale), not of a_th directly. Defaults reproduce today's
+  // pre-existing hardcoded values exactly. Negative = disabled (matches
+  // this file's own newton_debug_tag/pforce_debug_tag idiom for "off",
+  // since every valid value here is a strictly positive multiplier and
+  // there is no finite "neutral" value for an inequality threshold or a
+  // clamp the way 1.0 is neutral for a blend weight).
+  double newton_tol_rel;    // g_n: res > newton_tol_rel*a_th; default 5.0
+  double flip_rel;          // g_f: flip > flip_rel*a_th; default 14.0
+  double energy_guard_rel;  // g_e: eharm > energy_guard_rel*kT*(mvv2e when a_th_mass_scale); default 25.0
+  double newton_cap_rel;    // per-iter Newton step cap multiplier; default 8.0
+
+  // EXPERIMENTAL, opt-in, default 0 (byte-identical to today when unset).
+  // solve_center()'s a_th (thermal amplitude of the stiffest masked mode)
+  // and the eharm energy guard both compare against a quantity that is
+  // missing a division by the atom's own mass and uses a `kT` already
+  // divided by force->mvv2e where the dimensionally-correct formula needs
+  // the raw force->boltz*t_target instead -- see
+  // water_newton_guard_unit_scale_bug memory for the full derivation and
+  // numeric verification (confirmed on 3 independent atoms/unit styles).
+  // The corrected scale was tested directly against the validated H/Pd
+  // production config and found to DESTABILIZE it on a second seed (mean
+  // heavyT 299K -> 23,608K) -- adapt=yes feeds these guards straight into
+  // demote_atom(), and H/Pd's whole validated history rests on their
+  // CURRENT (dimensionally wrong, but empirically road-tested) scale.
+  // 0 (default) = today's exact formula, unconditionally, for every
+  // system including this one. 1 = use the corrected,
+  // mass-and-unit-consistent scale instead -- intended for systems in
+  // unit styles other than metal (e.g. water in `real` units), where the
+  // uncorrected scale is instead far too TIGHT (guards fire on ordinary
+  // thermal bond vibration). Never flip this on for an existing validated
+  // metal-units config without re-running its own multi-seed regression.
+  int a_th_mass_scale;
+
   // force_eval full (default off, byte-identical when unused): validation-
   // only mode that bypasses partial_force()'s local kernel entirely --
   // for EVERY caller (solve_center()'s Newton residual, refresh_blocks()/
@@ -391,8 +432,27 @@ class FixBAOABTether : public FixBAOAB {
 
   // MACE's much larger r_cut (vs. EAM/LJ) puts a bulk Pd atom's full
   // neighbor list around ~150 within 8 A; 96 was sized for the shorter
-  // pairwise cutoffs this fix was originally validated against.
-  static constexpr int JMAX = 256;    // per-atom response-block neighbor cap
+  // pairwise cutoffs this fix was originally validated against. Bumped
+  // again for flexible SPC/Fw water: lj/cut/coul/long's 9 A cutoff + 2 A
+  // skin gives an 11 A full-list radius, and liquid water's atom density
+  // (~0.1 atom/Angstrom^3, 3x a comparable metal's atom count per volume)
+  // puts a bulk atom's full neighbor list around ~550-600 -- confirmed by
+  // a direct JMAX-exceeded error at 256 on this project's own water
+  // workload. Same "raise and recompile" precedent as the EAM->MACE bump;
+  // not expected to need per-system tuning beyond this going forward.
+  static constexpr int JMAX = 1024;    // per-atom response-block neighbor cap
+
+  // Bonded (bond/angle) local-force support: a stiff bond's partner is
+  // almost always EXCLUDED from the pairwise neighbor list by special_bonds
+  // (e.g. this project's water workload uses the LAMMPS default
+  // special_bonds 0/0/0, fully excluding 1-2 pairs from pairwise LJ/Coulomb)
+  // -- so it is invisible to both partial_force()'s pairwise kernel and
+  // refresh_one_atom()'s pairwise-jlist-sourced back-reaction unless handled
+  // separately. See partial_force_add_bonded()/refresh_one_atom(). 8 is
+  // generous for flexible SPC/Fw water (max 2 bonds/atom) and any small-
+  // molecule system this fix is likely to see next; raise if a future
+  // system needs more bonds per atom than this.
+  static constexpr int BOND_JMAX = 8;
 
   bigint last_refresh_step;
   bigint last_promote_check;   // ntimestep of the last promote_every recheck, -1 = none yet
@@ -514,9 +574,13 @@ class FixBAOABTether : public FixBAOAB {
   bool neighbor_clamp_eligible(int j) const;
   bool trial_in_range(int i, const double *xtrial) const;
   bool partial_force(int i, const double *xtrial, double *fout, double *fneigh = nullptr,
-                      bool live_neighbor_positions = false);
+                      bool live_neighbor_positions = false, tagint *bond_tag = nullptr,
+                      double *bond_fneigh = nullptr, int *bond_jnum_out = nullptr);
   bool full_system_force(int i, const double *xtrial, double *fout, double *fneigh = nullptr,
                           int jnum = 0, const int *jlist = nullptr);
+  void partial_force_add_bonded(int i, const double *xtrial, double *fout,
+                                 bool live_neighbor_positions, tagint *bond_tag,
+                                 double *bond_fneigh, int *bond_jnum_out) const;
   void force_moll();
   void apply_modal_filter_and_backreaction();
 

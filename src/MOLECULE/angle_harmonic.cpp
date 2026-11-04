@@ -265,6 +265,59 @@ double AngleHarmonic::single(int type, int i1, int i2, int i3)
   return tk * dtheta;
 }
 
+/* ----------------------------------------------------------------------
+   trial-position force evaluation (see Angle::single_force()'s doc
+   comment in angle.h): identical force math to compute()'s inner loop
+   (the a/a11/a12/a22/f1/f3 derivation), operating on explicit x1/x2/x3
+   instead of atom->x[i1/i2/i3] -- no minimum_image() here, matching
+   compute()'s own convention: the caller (fix baoab/tether's
+   partial_force_add_bonded()) is responsible for handing in positions
+   that are already the correct, nearby periodic images (the same
+   atom->map()+domain->closest_image() resolution Angle::compute() itself
+   relies on via neighbor->anglelist having been built that way).
+------------------------------------------------------------------------- */
+
+bool AngleHarmonic::single_force(int type, const double *x1, const double *x2, const double *x3,
+                                  double *f1, double *f3)
+{
+  double delx1 = x1[0] - x2[0];
+  double dely1 = x1[1] - x2[1];
+  double delz1 = x1[2] - x2[2];
+  double rsq1 = delx1 * delx1 + dely1 * dely1 + delz1 * delz1;
+  double r1 = sqrt(rsq1);
+
+  double delx2 = x3[0] - x2[0];
+  double dely2 = x3[1] - x2[1];
+  double delz2 = x3[2] - x2[2];
+  double rsq2 = delx2 * delx2 + dely2 * dely2 + delz2 * delz2;
+  double r2 = sqrt(rsq2);
+
+  double c = delx1 * delx2 + dely1 * dely2 + delz1 * delz2;
+  c /= r1 * r2;
+  if (c > 1.0) c = 1.0;
+  if (c < -1.0) c = -1.0;
+
+  double s = sqrt(1.0 - c * c);
+  if (s < SMALL) s = SMALL;
+  s = 1.0 / s;
+
+  double dtheta = acos(c) - theta0[type];
+  double tk = k[type] * dtheta;
+
+  double a = -2.0 * tk * s;
+  double a11 = a * c / rsq1;
+  double a12 = -a / (r1 * r2);
+  double a22 = a * c / rsq2;
+
+  f1[0] = a11 * delx1 + a12 * delx2;
+  f1[1] = a11 * dely1 + a12 * dely2;
+  f1[2] = a11 * delz1 + a12 * delz2;
+  f3[0] = a22 * delx2 + a12 * delx1;
+  f3[1] = a22 * dely2 + a12 * dely1;
+  f3[2] = a22 * delz2 + a12 * delz1;
+  return true;
+}
+
 /* ---------------------------------------------------------------------- */
 
 void AngleHarmonic::born_matrix(int type, int i1, int i2, int i3, double &du, double &du2)

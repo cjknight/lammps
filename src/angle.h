@@ -60,6 +60,26 @@ class Angle : protected Pointers {
   virtual void read_restart_settings(FILE *) {};
   virtual void write_data(FILE *) {}
   virtual double single(int, int, int, int) = 0;
+
+  // Trial-position force evaluation, as opposed to single()'s energy-only,
+  // atom->x-captive convention (single() reads positions directly from
+  // atom->x[i1/i2/i3] and returns no force, so it cannot be used to probe a
+  // hypothetical/trial position the way Pair::single() or Bond::single()
+  // can via their rsq argument). Added for fix baoab/tether's bonded
+  // local-force probe (see partial_force_add_bonded() in
+  // TETHER/fix_baoab_tether.cpp): given explicit positions for the angle's
+  // three atoms, returns the force on atom1 (f1) and atom3 (f3); the force
+  // on atom2 (the middle/vertex atom) is -(f1+f3), the same convention
+  // Angle::compute() implementations already use. Default returns false
+  // (unsupported) so this is opt-in per style, mirroring
+  // Pair::local_partial_force()'s has_local_partial_force/false-by-default
+  // pattern for the same kind of project-specific addition.
+  virtual bool single_force(int /*type*/, const double * /*x1*/, const double * /*x2*/,
+                             const double * /*x3*/, double * /*f1*/, double * /*f3*/)
+  {
+    return false;
+  }
+
   virtual void born_matrix(int /*atype*/, int /*at1*/, int /*at2*/, int /*at3*/, double &du,
                            double &du2)
   {

@@ -105,6 +105,11 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   solve_tol_rel = 0.005;
   use_local_partial_force = 0;
   force_eval_full = 0;
+  a_th_mass_scale = 0;
+  newton_tol_rel = 5.0;
+  flip_rel = 14.0;
+  energy_guard_rel = 25.0;
+  newton_cap_rel = 8.0;
 
   adapt = 0;
   c_acc = 0.25;
@@ -249,6 +254,28 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
     } else if (strcmp(arg[iarg], "solve_tol_rel") == 0) {
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether solve_tol_rel", error);
       solve_tol_rel = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "a_th_mass_scale") == 0) {
+      if (iarg + 2 > narg)
+        utils::missing_cmd_args(FLERR, "fix baoab/tether a_th_mass_scale", error);
+      a_th_mass_scale = utils::logical(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "newton_tol_rel") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether newton_tol_rel", error);
+      newton_tol_rel = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "flip_rel") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether flip_rel", error);
+      flip_rel = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "energy_guard_rel") == 0) {
+      if (iarg + 2 > narg)
+        utils::missing_cmd_args(FLERR, "fix baoab/tether energy_guard_rel", error);
+      energy_guard_rel = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "newton_cap_rel") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether newton_cap_rel", error);
+      newton_cap_rel = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
       iarg += 2;
     } else if (strcmp(arg[iarg], "adapt") == 0) {
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether adapt", error);
@@ -658,6 +685,27 @@ void FixBAOABTether::init()
                          "either single() or local_partial_force()");
     if (atom->map_style == Atom::MAP_NONE)
       error->all(FLERR, "Fix baoab/tether mollify yes requires atom_modify map (yes|array)");
+
+    // Bonded local-force support (partial_force_add_bonded()/
+    // refresh_one_atom()) does its own per-atom atom->bond_atom[]/
+    // atom->angle_atom1/2/3[] lookup rather than LAMMPS's own
+    // neighbor->bondlist/anglelist (those are deduplicated, non-atom-
+    // indexed flat lists built assuming newton_bond's one-sided storage
+    // convention -- wrong tool for "given atom i, find its bonded
+    // partners now"). That per-atom lookup only works if every bond/angle
+    // is stored symmetrically on ALL its member atoms, which requires
+    // newton_bond off (LAMMPS's default, newton_bond on, stores each one
+    // on only whichever atom came first in the data file's Bonds/Angles
+    // section -- see water_bonded_kspace_scoping memory). No such
+    // requirement exists for kspace: it is never evaluated by
+    // partial_force() at all, only by the whole-system
+    // recompute_forces_local() path, which doesn't need per-atom topology.
+    if (force->bond && force->newton_bond)
+      error->all(FLERR, "Fix baoab/tether mollify yes with a bond style requires "
+                         "newton_bond off (needed for symmetric per-atom bond storage)");
+    if (force->angle && force->newton_bond)
+      error->all(FLERR, "Fix baoab/tether mollify yes with an angle style requires "
+                         "newton_bond off (needed for symmetric per-atom angle storage)");
 
     // private, non-occasional full neighbor list: the damped-Newton inner
     // loop (solve_center()/partial_force()) needs every one of a flagged
@@ -1918,6 +1966,23 @@ void FixBAOABTether::refresh_one_atom(int i, const double *xi, bool instantaneou
     fj_minus.resize((size_t) jnum * 3);
   }
 
+  // Bonded-partner response columns (see partial_force_add_bonded()): a
+  // stiff bond's partner is typically excluded from the pairwise jlist
+  // above by special_bonds, so it needs its own, separate Hc-style buffer
+  // -- n_bond is the same every FD evaluation (atom i's own bond topology
+  // doesn't change within one refresh_one_atom() call), so the last
+  // (b==2) probe's count is authoritative. No-op allocation (BOND_JMAX is
+  // a small fixed cap) when force->bond is unset.
+  std::vector<tagint> bond_tag_buf;
+  std::vector<double> bj_plus, bj_minus, Hc_bond;
+  int n_bond = 0;
+  if (mollify && force->bond) {
+    bond_tag_buf.resize(BOND_JMAX);
+    bj_plus.resize((size_t) BOND_JMAX * 3);
+    bj_minus.resize((size_t) BOND_JMAX * 3);
+    Hc_bond.assign((size_t) BOND_JMAX * 9, 0.0);
+  }
+
   // THROWAWAY DIAGNOSTIC (pforce_debug_tag): zero-perturbation sanity
   // check, independent of the eps-probe loop below -- do local_partial_force()
   // and full_system_force() agree with EACH OTHER (not with any cached
@@ -1942,12 +2007,18 @@ void FixBAOABTether::refresh_one_atom(int i, const double *xi, bool instantaneou
   for (int b = 0; b < 3; b++) {
     double fplus[3], fminus[3];
     double xt[3] = {xi[0], xi[1], xi[2]};
+    int n_bond_plus = 0, n_bond_minus = 0;
+    bool have_bond = mollify && force->bond;
 
     xt[b] = xi[b] + eps;
-    partial_force(i, xt, fplus, jnum > 0 ? fj_plus.data() : nullptr, true);
+    partial_force(i, xt, fplus, jnum > 0 ? fj_plus.data() : nullptr, true,
+                  have_bond ? bond_tag_buf.data() : nullptr, have_bond ? bj_plus.data() : nullptr,
+                  have_bond ? &n_bond_plus : nullptr);
 
     xt[b] = xi[b] - eps;
-    partial_force(i, xt, fminus, jnum > 0 ? fj_minus.data() : nullptr, true);
+    partial_force(i, xt, fminus, jnum > 0 ? fj_minus.data() : nullptr, true,
+                  have_bond ? bond_tag_buf.data() : nullptr, have_bond ? bj_minus.data() : nullptr,
+                  have_bond ? &n_bond_minus : nullptr);
 
     for (int a = 0; a < 3; a++) H[a][b] = -(fplus[a] - fminus[a]) / (2.0 * eps);
 
@@ -1955,6 +2026,14 @@ void FixBAOABTether::refresh_one_atom(int i, const double *xi, bool instantaneou
       for (int a = 0; a < 3; a++)
         Hc[(size_t) k * 9 + 3 * a + b] =
             (fj_plus[(size_t) k * 3 + a] - fj_minus[(size_t) k * 3 + a]) / (2.0 * eps);
+
+    // n_bond_plus == n_bond_minus by construction (atom i's bond topology
+    // is fixed within this call); take either, last iteration wins.
+    n_bond = n_bond_plus;
+    for (int k = 0; k < n_bond; k++)
+      for (int a = 0; a < 3; a++)
+        Hc_bond[(size_t) k * 9 + 3 * a + b] =
+            (bj_plus[(size_t) k * 3 + a] - bj_minus[(size_t) k * 3 + a]) / (2.0 * eps);
   }
 
   double Hs[3][3];
@@ -2091,6 +2170,34 @@ void FixBAOABTether::refresh_one_atom(int i, const double *xi, bool instantaneou
     mat3_matmat(Hck, Si, Jblk[i][nk]);
     nk++;
   }
+
+  // Bonded-partner back-reaction slots: a bond partner (e.g. water's O-H)
+  // is typically EXCLUDED from the pairwise jlist above by special_bonds,
+  // so it would otherwise never receive a back-reaction block at all --
+  // yet it is usually the single most important neighbor for a stiff bond
+  // (O's response to its own bonded H's fast motion, and vice versa). Same
+  // eligibility test and S_i matvec as the pairwise loop above, just a
+  // different source for (tag, Hc). No dedup needed against the pairwise
+  // slots above: a partner that happened to appear in both (not expected
+  // here, given special_bonds exclusion) would just contribute two
+  // genuinely-additive partial force-response terms in two separate slots
+  // -- force_moll()'s back-reaction loop already sums over all nJ[i] slots
+  // regardless of repeated tags, which is exactly the physically correct
+  // total (dF_j/dx_i = pairwise + bonded contributions).
+  for (int k = 0; k < n_bond; k++) {
+    int j = atom->map(bond_tag_buf[k]);
+    if (j < 0) continue;
+    j = domain->closest_image(i, j);
+    if (neighbor_clamp_eligible(j)) continue;
+    if (nk >= JMAX)
+      error->one(FLERR, "Fix baoab/tether: atom exceeds JMAX ({}) combined pair+bond "
+                         "neighbors for the sparse response block -- raise JMAX and recompile",
+                 JMAX);
+    Jtag[i][nk] = bond_tag_buf[k];
+    mat3_matmat(&Hc_bond[(size_t) k * 9], Si, Jblk[i][nk]);
+    nk++;
+  }
+
   nJ[i] = nk;
 }
 
@@ -2733,7 +2840,21 @@ void FixBAOABTether::solve_center(int i, double mi, double kT, double *cnew)
   for (int m = 0; m < 3; m++) q[m] = msk[m] ? q_warm[m] : q_now[m];
 
   bool any_masked = msk[0] || msk[1] || msk[2];
-  double a_th = (om_top > 0.0) ? sqrt(kT) / om_top : 0.0;
+  // a_th_mass_scale (EXPERIMENTAL, default off): see its header doc comment
+  // and water_newton_guard_unit_scale_bug memory for the full derivation
+  // and why this is opt-in rather than an unconditional fix. Off (default)
+  // reproduces the file's original formula byte-for-byte, the
+  // dimensionally-wrong-but-H/Pd-road-tested `sqrt(kT)/om_top` (kT already
+  // divided by force->mvv2e, no division by the atom's own mass mi). On:
+  // the dimensionally-correct thermal amplitude of the stiffest masked
+  // mode, a_th = sqrt(force->boltz*t_target/mi)/om_top (standard 1D-
+  // harmonic-oscillator equipartition <x^2> = kB*T/k_spring, with
+  // k_spring = om_top^2*mi since om_top is om[i][m] as stored -- not yet
+  // the sqrt(force->ftm2v)-converted real angular frequency), expressed
+  // via the existing kT as sqrt(kT*force->mvv2e/mi)/om_top.
+  double a_th = (om_top > 0.0)
+      ? (a_th_mass_scale ? sqrt(kT * force->mvv2e / mi) : sqrt(kT)) / om_top
+      : 0.0;
   double tol = solve_tol_rel * a_th;
   double damp = newton_damp;
   double res = 0.0;
@@ -2807,10 +2928,24 @@ void FixBAOABTether::solve_center(int i, double mi, double kT, double *cnew)
         for (int m = 0; m < 3; m++) {
           if (!msk[m]) continue;
           double om_safe = MAX(om[i][m], 1.0e-8);
-          double cap = 8.0 * sqrt(kT) / om_safe;
+          // Same a_th_mass_scale scale issue as a_th/eharm above (found in
+          // a systematic sweep of every kT/om-combining formula in this
+          // file after those two) -- this per-iteration Newton step cap is
+          // a position-space amplitude bound, structurally identical to
+          // a_th (sqrt(kT)/om, no /mi). Gated by the same flag for the
+          // same reason: untested whether tightening it for metal units
+          // is safe for H/Pd without its own multi-seed regression.
+          // newton_cap_rel exposes the multiplier (default 8.0, the old
+          // hardcoded literal) as a keyword -- negative disables the cap
+          // entirely (no finite "neutral" value exists for a clamp).
           double d = scale * raw[m];
-          if (d > cap) d = cap;
-          if (d < -cap) d = -cap;
+          if (newton_cap_rel >= 0.0) {
+            double cap = (a_th_mass_scale ? newton_cap_rel * sqrt(kT * force->mvv2e / mi)
+                                           : newton_cap_rel * sqrt(kT)) /
+                om_safe;
+            if (d > cap) d = cap;
+            if (d < -cap) d = -cap;
+          }
           q_try[m] = q[m] + d;
         }
 
@@ -2886,36 +3021,47 @@ void FixBAOABTether::solve_center(int i, double mi, double kT, double *cnew)
   // "& self.adapt" gate -- D.11.2's own safety argument is that a demoted
   // stiff mode meets Verlet at omega*dt ~ 2.2 in fixed-dt mode and
   // destabilizes instantly, so this guard's action is unsafe without the
-  // adaptive controller. newton_tol_rel/flip_rel are the reference's own
-  // hardcoded guard-scale constants (lj_longstep_prototype.py
-  // self.newton_tol_rel=0.25, self.flip_rel=14.0) -- DISTINCT from
-  // solve_tol_rel (self.solve_tol_rel=0.005), which only sets the Newton
-  // EXIT criterion. Reusing solve_tol_rel for the guard threshold here
-  // previously under-scaled the newton/flip guards by ~50x/28x relative
-  // to the reference.
+  // adaptive controller. newton_tol_rel/flip_rel/energy_guard_rel are now
+  // user-settable keywords (see fix_baoab_tether.h and the "Parameterize
+  // solve_center()'s guard-threshold constants" plan) expressing each
+  // threshold directly as its effective multiple of a_th (or of kT for
+  // energy_guard_rel) -- default values (5.0/14.0/25.0) reproduce the
+  // original hardcoded formulas exactly (newton_tol_rel's default collapses
+  // the old reference-ported "20.0*0.25" indirection into one number;
+  // flip_rel/energy_guard_rel were already that scale, just unexposed).
+  // Negative disables the corresponding guard (no finite "neutral" value
+  // exists for an inequality threshold, see a_th_mass_scale's analogous
+  // negative-sentinel precedent at newton_cap_rel above).
   if (any_masked) {
-    const double newton_tol_rel = 0.25;
-    const double flip_rel = 14.0;
-    bool g_n = newton_diverged || (res > 20.0 * newton_tol_rel * a_th);
+    bool g_n = newton_diverged || ((newton_tol_rel >= 0.0) && (res > newton_tol_rel * a_th));
     if (g_n) n_guard_newton++;
 
     double flip = 0.0;
     for (int m = 0; m < 3; m++)
       if (msk[m]) flip += (q[m] - q_warm[m]) * (q[m] - q_warm[m]);
     flip = sqrt(flip);
-    bool g_f = (a_th > 0.0) && (flip > flip_rel * a_th);
+    bool g_f = (flip_rel >= 0.0) && (a_th > 0.0) && (flip > flip_rel * a_th);
     if (g_f) n_guard_flip++;
 
     double eharm = 0.0;
     for (int m = 0; m < 3; m++)
       if (msk[m]) eharm += 0.5 * mi * om[i][m] * om[i][m] * q[m] * q[m];
-    bool g_e = eharm > 25.0 * kT;
+    // a_th_mass_scale (see a_th's doc comment above): eharm =
+    // 0.5*mi*om_native^2*q^2 is a RAW native-energy quantity (no leftover
+    // mvv2e factor), so comparing it against energy_guard_rel*kT (kT
+    // already divided by force->mvv2e off a_th_mass_scale) has the
+    // identical scale mismatch as a_th's -- gated by the SAME flag since
+    // it's the same underlying bug, so a system either gets both
+    // corrections or neither.
+    bool g_e = (energy_guard_rel >= 0.0) &&
+        (eharm > energy_guard_rel * kT * (a_th_mass_scale ? force->mvv2e : 1.0));
     if (g_e) n_guard_energy++;
 
     if (dbg)
       fprintf(stderr, "  FINAL: res=%.6g g_n=%d(diverged=%d) g_f=%d(flip-rel=%.4g) "
                        "g_e=%d(eharm/kT=%.4g)\n",
-              res, g_n, newton_diverged, g_f, (a_th > 0.0) ? flip / a_th : -1.0, g_e, eharm / kT);
+              res, g_n, newton_diverged, g_f, (a_th > 0.0) ? flip / a_th : -1.0, g_e,
+              eharm / (kT * (a_th_mass_scale ? force->mvv2e : 1.0)));
 
     // demotion action (adapt=yes only): exponential backoff capped at 2000
     // steps, direct port of the reference's
@@ -3055,9 +3201,11 @@ bool FixBAOABTether::trial_in_range(int i, const double *xtrial) const
 }
 
 bool FixBAOABTether::partial_force(int i, const double *xtrial, double *fout, double *fneigh,
-                                    bool live_neighbor_positions)
+                                    bool live_neighbor_positions, tagint *bond_tag,
+                                    double *bond_fneigh, int *bond_jnum_out)
 {
   fout[0] = fout[1] = fout[2] = 0.0;
+  if (bond_jnum_out) *bond_jnum_out = 0;
   if (!list) return false;
 
   double **x = atom->x;
@@ -3074,7 +3222,12 @@ bool FixBAOABTether::partial_force(int i, const double *xtrial, double *fout, do
   // doc comment and force_eval_full's doc comment in the header. Note this
   // silently drops the live_neighbor_positions c[j]-substitution behavior
   // (full_system_force() always uses real positions, a documented scope
-  // limitation of this validation mode).
+  // limitation of this validation mode). fout is already bond/angle-complete
+  // here (full_system_force() -> recompute_forces_local() calls force->bond/
+  // force->angle unconditionally) but bond_tag/bond_fneigh are left empty --
+  // no per-partner breakdown is available from a whole-system recompute, so
+  // the bonded back-reaction is silently absent under force_eval_full, the
+  // same documented scope limitation as the c[j] substitution above.
   if (force_eval_full) return full_system_force(i, xtrial, fout, fneigh, jnum, jlist);
 
   if (use_local_partial_force) {
@@ -3172,6 +3325,8 @@ bool FixBAOABTether::partial_force(int i, const double *xtrial, double *fout, do
       double fout_restore_dummy[3];
       full_system_force(i, xreal_now, fout_restore_dummy, nullptr, 0, nullptr);
     }
+    partial_force_add_bonded(i, xtrial, fout, live_neighbor_positions, bond_tag, bond_fneigh,
+                              bond_jnum_out);
     return ok;
   }
 
@@ -3214,7 +3369,171 @@ bool FixBAOABTether::partial_force(int i, const double *xtrial, double *fout, do
       fneigh[3 * jj + 2] = -delz * fpair;
     }
   }
+  partial_force_add_bonded(i, xtrial, fout, live_neighbor_positions, bond_tag, bond_fneigh,
+                            bond_jnum_out);
   return true;
+}
+
+/* ----------------------------------------------------------------------
+   Bonded (bond/angle-style) contribution to partial_force()'s per-atom
+   local force kernel: a stiff bond's partner (e.g. water's O-H) is
+   typically EXCLUDED from the pairwise neighbor list by special_bonds, so
+   it is invisible to the pairwise logic above -- yet it is often the
+   dominant stiff mode partial_force()/solve_center()'s Newton solve needs
+   to see (design doc: O-H stretch ~3700 cm^-1, the stiffest mode in
+   water). The H-O-H bend (~1600 cm^-1) is softer but NOT negligible for
+   the Newton solve specifically: omitting it leaves solve_center()
+   searching for a force balance against an incomplete force law (bond
+   only), while the real per-step force (recompute_forces_local(), via
+   force_moll()) is bond+angle complete -- confirmed empirically on this
+   project's water workload: bond-only produced a large, persistent
+   Newton-guard rate (n_guard_newton/n_guard_flip climbing continuously),
+   which is the expected symptom of chasing a root that doesn't exist for
+   the (incomplete) force law being solved. A no-op (fout unchanged, no
+   slots written) whenever force->bond AND force->angle are both unset, so
+   this has zero effect on the existing EAM/MACE pair-only systems.
+
+   Uses the SAME tag->local-index resolution LAMMPS's own topology-list
+   builders use (ntopo_bond_all.cpp: atom->map() then
+   domain->closest_image()) rather than neighbor->bondlist/anglelist,
+   which are deduplicated, non-atom-indexed flat lists -- the wrong tool
+   for "given atom i, find its bonded partners now". This requires every
+   bond/angle to be stored symmetrically on ALL its member atoms, i.e.
+   newton_bond off (checked in init(); see water_bonded_kspace_scoping
+   memory).
+
+   Applies the identical clamped-center substitution as the pairwise loop
+   above (neighbor_clamp_eligible()) so a bonded partner that is itself
+   currently flagged stiff doesn't inject its own fast oscillation phase
+   into atom i's Newton solve -- the same resonant-coupling concern that
+   substitution exists to suppress for ordinary pairwise neighbors.
+
+   Angle support is AngleHarmonic-only (Angle::single_force() returns
+   false, silently skipped, for any other angle style) -- a known, scoped
+   limitation, not a general angle-style framework.
+
+   bond_tag/bond_fneigh/bond_jnum_out are optional (nullptr skips writing
+   them, matching fneigh's existing convention): fout always gets the
+   bond/angle contribution added regardless, but only refresh_one_atom()
+   (which needs each partner's own force response for the Jtag/Jblk
+   back-reaction) passes non-null buffers; solve_center() just wants the
+   correct net fout.
+------------------------------------------------------------------------- */
+
+void FixBAOABTether::partial_force_add_bonded(int i, const double *xtrial, double *fout,
+                                               bool live_neighbor_positions, tagint *bond_tag,
+                                               double *bond_fneigh, int *bond_jnum_out) const
+{
+  if (!force->bond && !force->angle) return;
+
+  double **x = atom->x;
+  int nk = 0;
+
+  auto clamped = [&](int j) -> const double * {
+    return (!live_neighbor_positions && neighbor_clamp_eligible(j)) ? c[j] : x[j];
+  };
+
+  if (force->bond) {
+    int nb = atom->num_bond[i];
+    for (int k = 0; k < nb; k++) {
+      if (nk >= BOND_JMAX)
+        error->one(FLERR, "Fix baoab/tether: atom exceeds BOND_JMAX ({}) bonded local-force "
+                           "partner slots -- raise BOND_JMAX and recompile", BOND_JMAX);
+      int j = atom->map(atom->bond_atom[i][k]);
+      if (j < 0) continue;    // lost bond partner -- fails safe, same convention as n_ghost_miss
+      j = domain->closest_image(i, j);
+
+      const double *xj = clamped(j);
+
+      double delx = xtrial[0] - xj[0];
+      double dely = xtrial[1] - xj[1];
+      double delz = xtrial[2] - xj[2];
+      double rsq = delx * delx + dely * dely + delz * delz;
+
+      double fforce = 0.0;
+      force->bond->single(atom->bond_type[i][k], rsq, i, j, fforce);
+      fout[0] += delx * fforce;
+      fout[1] += dely * fforce;
+      fout[2] += delz * fforce;
+
+      if (bond_tag && bond_fneigh) {
+        bond_tag[nk] = atom->tag[j];
+        bond_fneigh[3 * nk + 0] = -delx * fforce;
+        bond_fneigh[3 * nk + 1] = -dely * fforce;
+        bond_fneigh[3 * nk + 2] = -delz * fforce;
+        nk++;
+      }
+    }
+  }
+
+  if (force->angle) {
+    int na = atom->num_angle[i];
+    tagint my_tag = atom->tag[i];
+    for (int k = 0; k < na; k++) {
+      tagint t1 = atom->angle_atom1[i][k];
+      tagint t2 = atom->angle_atom2[i][k];
+      tagint t3 = atom->angle_atom3[i][k];
+      int role = (t1 == my_tag) ? 1 : (t2 == my_tag) ? 2 : 3;
+
+      int j1 = (role == 1) ? i : atom->map(t1);
+      int j2 = (role == 2) ? i : atom->map(t2);
+      int j3 = (role == 3) ? i : atom->map(t3);
+      if (j1 < 0 || j2 < 0 || j3 < 0) continue;
+      if (role != 1) j1 = domain->closest_image(i, j1);
+      if (role != 2) j2 = domain->closest_image(i, j2);
+      if (role != 3) j3 = domain->closest_image(i, j3);
+
+      const double *x1 = (role == 1) ? xtrial : clamped(j1);
+      const double *x2 = (role == 2) ? xtrial : clamped(j2);
+      const double *x3 = (role == 3) ? xtrial : clamped(j3);
+
+      double f1[3], f3[3];
+      if (!force->angle->single_force(atom->angle_type[i][k], x1, x2, x3, f1, f3)) continue;
+      double f2[3] = {-(f1[0] + f3[0]), -(f1[1] + f3[1]), -(f1[2] + f3[2])};
+
+      const double *fi = (role == 1) ? f1 : (role == 2) ? f2 : f3;
+      fout[0] += fi[0];
+      fout[1] += fi[1];
+      fout[2] += fi[2];
+
+      if (bond_tag && bond_fneigh) {
+        if (role != 1) {
+          if (nk >= BOND_JMAX)
+            error->one(FLERR, "Fix baoab/tether: atom exceeds BOND_JMAX ({}) bonded "
+                               "local-force partner slots -- raise BOND_JMAX and recompile",
+                       BOND_JMAX);
+          bond_tag[nk] = atom->tag[j1];
+          bond_fneigh[3 * nk + 0] = f1[0];
+          bond_fneigh[3 * nk + 1] = f1[1];
+          bond_fneigh[3 * nk + 2] = f1[2];
+          nk++;
+        }
+        if (role != 2) {
+          if (nk >= BOND_JMAX)
+            error->one(FLERR, "Fix baoab/tether: atom exceeds BOND_JMAX ({}) bonded "
+                               "local-force partner slots -- raise BOND_JMAX and recompile",
+                       BOND_JMAX);
+          bond_tag[nk] = atom->tag[j2];
+          bond_fneigh[3 * nk + 0] = f2[0];
+          bond_fneigh[3 * nk + 1] = f2[1];
+          bond_fneigh[3 * nk + 2] = f2[2];
+          nk++;
+        }
+        if (role != 3) {
+          if (nk >= BOND_JMAX)
+            error->one(FLERR, "Fix baoab/tether: atom exceeds BOND_JMAX ({}) bonded "
+                               "local-force partner slots -- raise BOND_JMAX and recompile",
+                       BOND_JMAX);
+          bond_tag[nk] = atom->tag[j3];
+          bond_fneigh[3 * nk + 0] = f3[0];
+          bond_fneigh[3 * nk + 1] = f3[1];
+          bond_fneigh[3 * nk + 2] = f3[2];
+          nk++;
+        }
+      }
+    }
+  }
+  if (bond_jnum_out) *bond_jnum_out = nk;
 }
 
 /* ----------------------------------------------------------------------
