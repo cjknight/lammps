@@ -222,40 +222,25 @@ void MLIAPData::generate_neighdata(NeighList *list_in, int eflag_in, int vflag_i
 
 void MLIAPData::grow_neigharrays()
 {
-
-  // grow neighbor atom arrays if necessary
-  natomneigh = list->inum;
-  if (list->ghost == 1) natomneigh += list->gnum;
-  if (natomneigh_max < natomneigh) {
-    memory->grow(iatoms, natomneigh, "MLIAPData:iatoms");
-    memory->grow(ielems, natomneigh, "MLIAPData:ielems");
-    memory->grow(itypes, natomneigh, "MLIAPData:itypes");
-    memory->grow(numneighs, natomneigh, "MLIAPData:numneighs");
-    memory->grow(lmp_firstneigh, natomneigh, nneigh_max, "MLIAPData:lmp_firstneigh");
-    natomneigh_max = natomneigh;
-  }
-
-  // grow neighbor arrays if necessary
-
   int *ilist = list->ilist;
   int *numneigh = list->numneigh;
   int **firstneigh = list->firstneigh;
   double **x = atom->x;
   int *type = atom->type;
 
+  natomneigh = list->inum;
+  if (list->ghost == 1) natomneigh += list->gnum;
+
   int nneigh = 0;
   for (int ii = 0; ii < natomneigh; ii++) {
     const int i = ilist[ii];
-
     const double xtmp = x[i][0];
     const double ytmp = x[i][1];
     const double ztmp = x[i][2];
     const int itype = type[i];
     const int ielem = map[itype];
-
     int *jlist = firstneigh[i];
     const int jnum = numneigh[i];
-
     int ninside = 0;
     for (int jj = 0; jj < jnum; jj++) {
       int j = jlist[jj];
@@ -271,14 +256,30 @@ void MLIAPData::grow_neigharrays()
     nneigh += ninside;
   }
 
-  if (nneigh_max < nneigh) {
+  if (natomneigh > natomneigh_max || nneigh > nneigh_max) {
+    int grow1 = (natomneigh > natomneigh_max) ? natomneigh : natomneigh_max;
+    int grow2 = (nneigh > nneigh_max) ? nneigh : nneigh_max;
+    memory->grow(lmp_firstneigh, grow1, grow2, "MLIAPData:lmp_firstneigh");
+  }
+
+  if (natomneigh > natomneigh_max) {
+    memory->grow(iatoms, natomneigh, "MLIAPData:iatoms");
+    memory->grow(ielems, natomneigh, "MLIAPData:ielems");
+    memory->grow(itypes, natomneigh, "MLIAPData:itypes");
+    memory->grow(numneighs, natomneigh, "MLIAPData:numneighs");
+    natomneigh_max = natomneigh;
+  }
+
+  if (nneigh > nneigh_max) {
+    int grow_rows = (natomneigh > natomneigh_max) ? natomneigh : natomneigh_max;
+    int grow_cols = (nneigh > nneigh_max) ? nneigh : nneigh_max;
+    memory->grow(lmp_firstneigh, grow_rows, grow_cols, "MLIAPData:lmp_firstneigh");
     memory->grow(pair_i, nneigh, "MLIAPData:pair_i");
     memory->grow(jatoms, nneigh, "MLIAPData:jatoms");
-    memory->grow(lmp_firstneigh, natomneigh_max, nneigh, "MLIAPData:lmp_firstneigh");
     memory->grow(jelems, nneigh, "MLIAPData:jelems");
     memory->grow(rij, nneigh, 3, "MLIAPData:rij");
     if (gradgradflag == 0) memory->grow(graddesc, nneigh, ndescriptors, 3, "MLIAPData:graddesc");
-    nneigh_max = nneigh;
+    if (nneigh > nneigh_max) nneigh_max = nneigh;
   }
 }
 

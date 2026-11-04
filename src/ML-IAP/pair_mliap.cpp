@@ -43,6 +43,7 @@
 
 #include <cmath>
 #include <cstring>
+//#include <nvtx3/nvToolsExt.h>
 
 using namespace LAMMPS_NS;
 
@@ -108,15 +109,19 @@ void PairMLIAP::compute(int eflag, int vflag)
 
   // compute E_i and beta_i = dE_i/dB_i for all i in list
 
+  //nvtxRangePushA("MLIAP model compute gradients");
   model->compute_gradients(data);
+  //nvtxRangePop();
 
   // update charges for LES
   comm->forward_comm();
 
   // calculate force contributions beta_i*dB_i/dR_j
 
+  //nvtxRangePushA("MLIAP descriptor compute forces");
   descriptor->compute_forces(data);
   e_tally(data);
+  //nvtxRangePop();
 
   // calculate stress
 

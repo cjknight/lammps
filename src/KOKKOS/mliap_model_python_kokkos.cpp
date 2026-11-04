@@ -127,7 +127,8 @@ void MLIAPModelPythonKokkos<DeviceType>::connect_param_counts()
   }
   PyGILState_Release(gstate);
   model_loaded = 1;
-  utils::logmesg(MLIAPModelKokkos<DeviceType>::lmp, "Loading python model complete.\n");
+  if (MLIAPModelKokkos<DeviceType>::comm->me == 0)
+    utils::logmesg(MLIAPModelKokkos<DeviceType>::lmp, "Loading python model complete.\n");
 }
 
 /* ---------------------------------------------------------------------- */

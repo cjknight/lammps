@@ -272,6 +272,7 @@ void Verlet::run(int n)
     if (n_post_integrate) modify->post_integrate();
     timer->stamp(Timer::MODIFY);
 
+    // TODO: FENCE
     // regular communication vs neighbor list rebuild
 
     nflag = neighbor->decide();
@@ -310,6 +311,7 @@ void Verlet::run(int n)
         timer->stamp(Timer::MODIFY);
       }
     }
+    // TODO: FENCE
 
     // force computations
     // important for pair to come before bonded contributions
@@ -325,10 +327,12 @@ void Verlet::run(int n)
       timer->stamp(Timer::MODIFY);
     }
 
+    // TODO: FENCE
     if (pair_compute_flag) {
       force->pair->compute(eflag,vflag);
       timer->stamp(Timer::PAIR);
     }
+    // TODO: FENCE
 
     if (atom->molecular != Atom::ATOMIC) {
       if (force->bond) force->bond->compute(eflag,vflag);

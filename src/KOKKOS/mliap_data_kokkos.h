@@ -36,23 +36,24 @@
 namespace LAMMPS_NS {
 // clang-format off
 enum {
-  IATOMS_MASK      = 0x00000001,
-  IELEMS_MASK      = 0x00000002,
-  JATOMS_MASK      = 0x00000004,
-  JELEMS_MASK      = 0x00000008,
-  IJ_MASK          = 0x00000010,
-  BETAS_MASK       = 0x00000020,
-  DESCRIPTORS_MASK = 0x00000040,
-  EATOMS_MASK      = 0x00000080,
-  RIJ_MASK         = 0x00000100,
-  GRADFORCE_MASK   = 0x00000200,
-  GRADDESC_MASK    = 0x00000400,
-  NUMNEIGHS_MASK   = 0x00000800,
-  GAMMA_MASK_MASK  = 0x00001000,
-  GAMMA_ROW_MASK   = 0x00002000,
-  GAMMA_COL_MASK   = 0x00004000,
-  PAIR_I_MASK      = 0x00008000,
-  ELEMS_MASK       = 0x00010000,
+  IATOMS_MASK       = 0x00000001,
+  IELEMS_MASK       = 0x00000002,
+  JATOMS_MASK       = 0x00000004,
+  JELEMS_MASK       = 0x00000008,
+  IJ_MASK           = 0x00000010,
+  BETAS_MASK        = 0x00000020,
+  DESCRIPTORS_MASK  = 0x00000040,
+  EATOMS_MASK       = 0x00000080,
+  RIJ_MASK          = 0x00000100,
+  GRADFORCE_MASK    = 0x00000200,
+  GRADDESC_MASK     = 0x00000400,
+  NUMNEIGHS_MASK    = 0x00000800,
+  GAMMA_MASK_MASK   = 0x00001000,
+  GAMMA_ROW_MASK    = 0x00002000,
+  GAMMA_COL_MASK    = 0x00004000,
+  PAIR_I_MASK       = 0x00008000,
+  ELEMS_MASK        = 0x00010000,
+  CHARGE_BETAS_MASK = 0x00020000,
 };
 // clang-format on
 
@@ -70,6 +71,9 @@ template <class DeviceType> class MLIAPDataKokkos : public MLIAPData {
 
   void sync(ExecutionSpace space, uint64_t mask, bool ignore_auto_sync = false);
 
+  double *get_charges();
+  void update_charges();
+
   PairMLIAPKokkos<DeviceType> *k_pairmliap;
 
   DAT::tdual_int_1d k_iatoms;           // index of each atom
@@ -80,6 +84,7 @@ template <class DeviceType> class MLIAPDataKokkos : public MLIAPData {
   DAT::tdual_int_1d k_jelems;           // element of each neighbor
   DAT::tdual_int_1d k_ij;               // Start location for each particle
   DAT::tdual_double_2d_lr k_betas;          // betas for all atoms in list
+  DAT::tdual_double_2d_lr k_charge_betas;   // charge-response betas
   DAT::tdual_double_2d_lr k_descriptors;    // descriptors for all atoms in list
   DAT::tdual_double_1d k_eatoms;         // energies for all atoms in list
   DAT::tdual_double_2d_lr k_rij;            // distance vector of each neighbor
@@ -102,6 +107,7 @@ class MLIAPDataKokkosDevice {
 public:
 
   MLIAPDataKokkosDevice(MLIAPDataKokkos<LMPDeviceType> &base) :
+    base_data(&base),
     size_array_rows(base.size_array_rows),
     size_array_cols(base.size_array_cols),
     natoms(base.natoms),
@@ -113,9 +119,11 @@ public:
     f(base.f_device),
     gradforce(base.k_gradforce.view_device().data()),
     betas(base.k_betas.view_device().data()),
+    charge_betas(base.k_charge_betas.view_device().data()),
     descriptors(base.k_descriptors.view_device().data()),
     eatoms(base.k_eatoms.view_device().data()),
     energy(&base.energy),
+    charges(base.get_charges()),
     ndescriptors(base.ndescriptors),
     nparams(base.nparams),
     nelements(base.nelements),
@@ -142,12 +150,18 @@ public:
     eflag(base.eflag),
     vflag(base.vflag),
     pairmliap(dynamic_cast<PairMLIAPKokkos<LMPDeviceType> *>(base.pairmliap)),
+#if defined(KOKKOS_ENABLE_SYCL)
+    sycl_queue(&LMPDeviceType().sycl_queue()),
+#endif
 #if defined(KOKKOS_ENABLE_CUDA)
     dev(1)
 #else
     dev(0)
 #endif
     {  }
+
+  MLIAPDataKokkos<LMPDeviceType> *base_data;
+
   int size_array_rows;
   int size_array_cols;
   int natoms;
@@ -161,9 +175,11 @@ public:
   double *f;
   double *gradforce;
   double *betas;
+  double *charge_betas;
   double *descriptors;
   double *eatoms;
   double *energy;
+  double *charges;
 
   // sizing
   const int ndescriptors;
@@ -198,6 +214,9 @@ public:
 
   class PairMLIAPKokkos<LMPDeviceType> *pairmliap;    // access to pair tally functions
 
+  // queue reference for intel device
+  void *sycl_queue = nullptr;
+
   int dev;
 
   //forward_exchange writes into ghosts
@@ -212,6 +231,9 @@ public:
     pairmliap->reverse_comm(copy_from, copy_to, vec_len);
   }
 
+  void update_charges() {
+    base_data->update_charges();
+  }
 
 #ifdef LMP_KOKKOS_GPU
   MLIAPDataKokkosDevice(MLIAPDataKokkos<LMPHostType> &base) : ndescriptors(-1),nparams(-1),nelements(-1),ntotal(-1),nlistatoms(-1),nlocal(-1),natomneigh(-1),

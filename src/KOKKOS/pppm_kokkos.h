@@ -113,6 +113,8 @@ class PPPMKokkos : public PPPM, public KokkosBaseFFT {
   int timing_3d(int, double &) override;
   double memory_usage() override;
 
+  typename AT::t_double_1d get_phi() const { return d_phi; }
+
 // NOLINTNEXTLINE
   KOKKOS_INLINE_FUNCTION
   void operator()(TagPPPM_setup1, const int&) const;
