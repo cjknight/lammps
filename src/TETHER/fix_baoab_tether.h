@@ -150,6 +150,8 @@ class FixBAOABTether : public FixBAOAB {
   // thermal bond vibration). Never flip this on for an existing validated
   // metal-units config without re-running its own multi-seed regression.
   int a_th_mass_scale;
+  int newton_res_length;   // 1: solve_center residual in Newton-step length units (see newton_res_comp)
+  double newton_res_comp(double r, double mi, double om_m) const;
 
   // force_eval full (default off, byte-identical when unused): validation-
   // only mode that bypasses partial_force()'s local kernel entirely --

@@ -106,6 +106,7 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   use_local_partial_force = 0;
   force_eval_full = 0;
   a_th_mass_scale = 0;
+  newton_res_length = 0;
   newton_tol_rel = 5.0;
   flip_rel = 14.0;
   energy_guard_rel = 25.0;
@@ -259,6 +260,11 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
       if (iarg + 2 > narg)
         utils::missing_cmd_args(FLERR, "fix baoab/tether a_th_mass_scale", error);
       a_th_mass_scale = utils::logical(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "newton_res_length") == 0) {
+      if (iarg + 2 > narg)
+        utils::missing_cmd_args(FLERR, "fix baoab/tether newton_res_length", error);
+      newton_res_length = utils::logical(FLERR, arg[iarg + 1], false, lmp);
       iarg += 2;
     } else if (strcmp(arg[iarg], "newton_tol_rel") == 0) {
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether newton_tol_rel", error);
@@ -2798,6 +2804,21 @@ void FixBAOABTether::apply_new_dt(double dt_new)
    refresh).
 ------------------------------------------------------------------------- */
 
+/* squared contribution of one modal force residual r to solve_center()'s
+   convergence/guard residual. newton_res_length off (default): the raw force
+   (historical; compared against the LENGTH a_th -- a dimensional mismatch by
+   a factor k = mi*om^2, ~1.1 for H/Pd metal but ~800 for water real units).
+   On: the Newton step length r/(mi*om^2), matching the Python reference's
+   _solve_centers() (lj_longstep_prototype.py), so res, tol and a_th are all
+   lengths. See solve_center_force_vs_length_residual_bug memory. */
+double FixBAOABTether::newton_res_comp(double r, double mi, double om_m) const
+{
+  if (!newton_res_length) return r * r;
+  double o = MAX(om_m, 1.0e-8);
+  double st = r / (mi * o * o);
+  return st * st;
+}
+
 void FixBAOABTether::solve_center(int i, double mi, double kT, double *cnew)
 {
   double **x = atom->x;
@@ -2890,7 +2911,7 @@ void FixBAOABTether::solve_center(int i, double mi, double kT, double *cnew)
         for (int k = 0; k < 3; k++) r[m] += evecs[i][3 * m + k] * fout[k];
     res = 0.0;
     for (int m = 0; m < 3; m++)
-      if (msk[m]) res += r[m] * r[m];
+      if (msk[m]) res += newton_res_comp(r[m], mi, om[i][m]);
     res = sqrt(res);
 
     if (dbg)
@@ -2964,7 +2985,7 @@ void FixBAOABTether::solve_center(int i, double mi, double kT, double *cnew)
             for (int k = 0; k < 3; k++) r_try[m] += evecs[i][3 * m + k] * fout_try[k];
         res_try = 0.0;
         for (int m = 0; m < 3; m++)
-          if (msk[m]) res_try += r_try[m] * r_try[m];
+          if (msk[m]) res_try += newton_res_comp(r_try[m], mi, om[i][m]);
         res_try = sqrt(res_try);
 
         bool in_range_try = trial_in_range(i, trial_try);
@@ -3072,7 +3093,11 @@ void FixBAOABTether::solve_center(int i, double mi, double kT, double *cnew)
       int expo = MIN(demote_count[i], 6);
       bigint mult = ((bigint) 1) << expo;
       bigint backoff = MIN((bigint) refresh_every * 3 * mult, (bigint) 2000);
-      demote_atom(i, backoff, "solve_center");
+      demote_atom(i, backoff,
+                  g_e ? (g_n ? (g_f ? "solve_center_gn_gf_ge" : "solve_center_gn_ge")
+                             : (g_f ? "solve_center_gf_ge" : "solve_center_ge"))
+                      : (g_n ? (g_f ? "solve_center_gn_gf" : "solve_center_gn")
+                             : "solve_center_gf"));
       for (int k = 0; k < 3; k++) cnew[k] = x[i][k];
     }
   }
