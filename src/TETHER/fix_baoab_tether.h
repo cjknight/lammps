@@ -150,6 +150,13 @@ class FixBAOABTether : public FixBAOAB {
   // thermal bond vibration). Never flip this on for an existing validated
   // metal-units config without re-running its own multi-seed regression.
   int a_th_mass_scale;
+  // eligibility keyword: 0 = all_modes (default; an atom may be analytically clamped only
+  // if EVERY mode exceeds 0.6*om_split -- the validated H/Pd rattler rule), 1 = bonded
+  // (atoms with a bond skip the om_min test, so one stiff mode, e.g. an O-H stretch, can be
+  // clamped alone). APPROXIMATION valid only while bond topology is fixed (no reactions);
+  // not usable for MLIP/reactive systems. adapt=yes only.
+  int eligibility_bonded;
+  inline bool bonded_ok(int i) const { return eligibility_bonded && bonded[i]; }
   int newton_res_length;   // 1: solve_center residual in Newton-step length units (see newton_res_comp)
   double newton_res_comp(double r, double mi, double om_m) const;
 
@@ -189,6 +196,7 @@ class FixBAOABTether : public FixBAOAB {
   // FixBAOAB's own O-step, mirrors lj_longstep_prototype.py's "gamma_soft"
   // constructor parameter) to every unmasked, non-quench mode every step.
   double gamma_soft;
+  int gamma_soft_was_set;   // 0: gamma_soft defaults to gamma = 1/damp (one physical relaxation time)
 
   // gamma_quench auto (continuous, not a warm-up calibration): when set,
   // gamma_quench is overwritten every update_dt() call from the system's
@@ -422,6 +430,71 @@ class FixBAOABTether : public FixBAOAB {
   std::vector<std::string> teacher_coeff_args;      // from "teacher_coeff <n> <args...>"
   int teacher_every;            // 0 (default) = disabled; the D.14 outer ratio "m"
   bigint outer_cycle_start;     // ntimestep the current outer cycle began
+  // dt-limiter diagnostics (set by update_dt(), exposed via compute_vector 12-15): the
+  // highest still-unresolved (unmasked) mode frequency that sets dt_c = c_acc/om_unres, the
+  // LAMMPS type of the atom that owns it, the 99th-percentile unmasked frequency on this rank
+  // (max vs p99 separates one extreme atom from a whole population), and the highest masked
+  // (analytic) frequency. All in the run's own inverse-time unit (1/fs in real units).
+  int recoil;    // reduced-mass (partner recoil) correction to analytic mode frequencies
+  // molblock_diag (DIAGNOSTIC, default off): assemble each molecule's full mass-weighted Hessian
+  // (3N_mol x 3N_mol) from the own/cross blocks refresh_one_atom() already measures, diagonalize it
+  // and log internal vs rigid-body mode frequencies. Changes no dynamics. Step 2 of the
+  // molecule-block plan; serial / whole-molecule-on-one-rank only.
+  int molblock_diag;
+  // kspace_center (EXPERIMENTAL, default off): add each atom's k-space force, evaluated once per
+  // solve pass at the current configuration and held frozen, to the local force used by
+  // solve_center(), so the Newton center sees the same total force whose masked component
+  // force_moll() later removes.
+  int kspace_center;
+  std::vector<double> fks;
+  void kspace_snapshot();
+  bool mb_collect;
+  std::vector<double> mb_Hown;    // nlocal x 9: raw symmetrized own block H_ii
+  std::vector<double> mb_X;       // nlocal x MBMAX x 9: dF_partner/dx_i (row = partner force comp)
+  std::vector<tagint> mb_tag;     // nlocal x MBMAX: partner tags
+  std::vector<int> mb_n;          // nlocal: number of partners
+  void molblock_diagnostic();
+
+  // molblock (auto-RESPA, see mb_refresh()): Hessian-built fast force field for the bonds and
+  // angles of small stiff molecules, integrated with inner substeps
+  static constexpr int MBA = 5;           // max atoms per molecule (atom + 4 bond/angle partners)
+  static constexpr int MBN = 3 * MBA;     // max Cartesian dimension of a molecule
+  struct MBMol {
+    int n = 0;                            // atoms in the molecule
+    int nm = 0;                           // fast modes (= nic, or 0 if the molecule is not stiff)
+    bool valid = false;                   // all atoms local this step
+    tagint tag[MBA];
+    double m[MBA];
+    double xref[MBA][3];                  // geometry (rel. to COM) at refresh
+    double w[MBN];                        // GF angular frequencies of the fast set (1/time)
+    double Dref[MBN][MBN];                // mass-weighted Hessian at refresh
+    int nic = 0;                          // fast internal coordinates (bonds, angles)
+    int ic_type[MBN], ic_at[MBN][3];      // 0 = bond (a,b), 1 = angle (a,b,c) with vertex b
+    double Fic[MBN][MBN];                 // internal-coordinate force constants
+    double sig0[MBN];                     // reference internal coordinates (anchored once)
+    bool have_s0 = false;
+    double Fold[MBN][MBN];                // force constants still in use until the next step
+    bool pending = false;                 // Fold valid, switch to Fic at the next step start
+  };
+  int molblock, mb_verbose;
+  int mb_inner_user, mb_nin;              // user substeps (0 = auto), current substeps
+  double mb_wmax;                         // fastest refreshed frequency (1/time)
+  void mb_fast_force(const MBMol &, const double (*)[3], double (*)[3], bool = false) const;
+  void mb_ic_eval(const MBMol &, const double (*)[3], double *, double (*)[MBN]) const;
+  int mb_stiff_modes(const MBMol &, const double (*)[3]) const;
+  void mb_gf_forceconst(MBMol &, const double (*)[3], const double (*)[3]);
+  void mb_gf_freqs(MBMol &, const double (*)[3]);
+  bool mb_ready;
+  bigint mb_last_refresh;
+  std::vector<MBMol> mbmols;
+  std::vector<int> mb_member;
+  bool mb_locate(const MBMol &, int *, double (*)[3]) const;
+  void mb_refresh();
+  void mb_prepare();
+  void mb_initial_integrate();
+  void mb_final_integrate();
+  double diag_om_unres, diag_om_unres_p99, diag_om_analytic;
+  int diag_unres_type;
   bigint n_teacher_calls;       // diagnostic: teacher_pair->compute() calls (compute_vector())
 
   // carried half-kick impulse per flagged atom (nmax x 3): 0.5*teacher_every*dt*
@@ -524,6 +597,11 @@ class FixBAOABTether : public FixBAOAB {
   // stage-3 per-atom event-machinery state (harmless zero default when
   // adapt == 0; grown/exchanged like x0/c/om above)
   int *demote_count;        // chronic-failure counter, exponential backoff (nmax)
+  // eligibility bonded (opt-in, adapt=yes): per-atom 1 if atom has >=1 bond (set from
+  // atom->num_bond at each refresh_blocks()), forward-communicated with om[] so ghost
+  // neighbors can be tested too. Only meaningful for NON-REACTIVE topology (fixed
+  // bonds); see eligibility_bonded below.
+  int *bonded;
   bigint *last_demote;      // step of last demotion, for forgiveness (nmax)
   bigint *demote_cool;      // step until which this atom is Verlet-exiled (nmax)
   bigint *quench_exempt;    // step until which this atom skips the quench kick (nmax)
@@ -565,6 +643,7 @@ class FixBAOABTether : public FixBAOAB {
   bigint n_partial_force_calls, n_recompute_calls;
 
   void refresh_blocks();
+  void recoil_accumulate(int, const double *, double, double *) const;
   void refresh_one_atom(int i, const double *xi, bool instantaneous);
   double effective_skin(int i, double mi, double kT) const;
   void force_clear_local();
@@ -603,7 +682,7 @@ class FixBAOABTether : public FixBAOAB {
     if (demote_cool[i] > update->ntimestep) return false;
     double om_max = MAX(om[i][0], MAX(om[i][1], om[i][2]));
     double om_min = MIN(om[i][0], MIN(om[i][1], om[i][2]));
-    if (!((om_max > om_split) && (om_min > 0.6 * om_split))) return false;
+    if (!((om_max > om_split) && (bonded_ok(i) || (om_min > 0.6 * om_split)))) return false;
     return om[i][m] > om_split;
   }
   void compute_om_split();

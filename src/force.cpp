@@ -151,16 +151,7 @@ void Force::init()
                  pair_restart);
   }
 
-  if (kspace) {
-    if (pair) {
-      int itmp = 0;
-      auto *p_cutoff = (double *) pair->extract("cut_coul", itmp);
-      if (p_cutoff != nullptr) kspace->g_ewald = 0.7071067811865475;//*p_cutoff;
-      kspace->set_gewaldflag();
-      printf("Setting kspace g_ewald = %g\n", kspace->g_ewald);
-    }
-    kspace->init();
-  }    // kspace must come before pair
+  if (kspace) kspace->init();    // kspace must come before pair
   if (pair) pair->init();        // so g_ewald is defined
   if (bond) bond->init();
   if (angle) angle->init();

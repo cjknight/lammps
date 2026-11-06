@@ -26,6 +26,8 @@
 #include "integrate.h"
 #include "kspace.h"
 #include "math_eigen.h"
+#include "math_eigen_impl.h"
+#include "math_const.h"
 #include "memory.h"
 #include "modify.h"
 #include "neigh_list.h"
@@ -106,6 +108,8 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   use_local_partial_force = 0;
   force_eval_full = 0;
   a_th_mass_scale = 0;
+  eligibility_bonded = 0;
+  bonded = nullptr;
   newton_res_length = 0;
   newton_tol_rel = 5.0;
   flip_rel = 14.0;
@@ -119,6 +123,7 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   ke_rel = 12.0;
   gamma_quench = 20.0;
   gamma_soft = 0.0;
+  gamma_soft_was_set = 0;
   gamma_quench_auto = 0;
   gamma_quench_last_logged = -1.0;
   gamma_quench_calib = 0;
@@ -150,6 +155,17 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   refresh_skin_rel = 0.0;
   drift_response = 0;
   exile_substep = 0;
+  recoil = 1;
+  molblock_diag = 0;
+  molblock = 0;
+  mb_verbose = 0;
+  mb_inner_user = 0;
+  mb_nin = 1;
+  mb_wmax = 0.0;
+  mb_ready = false;
+  mb_last_refresh = -1;
+  kspace_center = 0;
+  mb_collect = false;
   preshrink_exile = 0;
   om_split = 0.0;
   om_split_set = 0;
@@ -165,6 +181,8 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   teacher_every = 0;
   outer_cycle_start = 0;
   n_teacher_calls = 0;
+  diag_om_unres = diag_om_unres_p99 = diag_om_analytic = 0.0;
+  diag_unres_type = 0;
 
   int iarg = 7;
   while (iarg < narg) {
@@ -261,6 +279,13 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
         utils::missing_cmd_args(FLERR, "fix baoab/tether a_th_mass_scale", error);
       a_th_mass_scale = utils::logical(FLERR, arg[iarg + 1], false, lmp);
       iarg += 2;
+    } else if (strcmp(arg[iarg], "eligibility") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether eligibility", error);
+      if (strcmp(arg[iarg + 1], "all_modes") == 0) eligibility_bonded = 0;
+      else if (strcmp(arg[iarg + 1], "bonded") == 0) eligibility_bonded = 1;
+      else error->all(FLERR, "Unknown fix baoab/tether eligibility style {}; expected all_modes or bonded",
+                      arg[iarg + 1]);
+      iarg += 2;
     } else if (strcmp(arg[iarg], "newton_res_length") == 0) {
       if (iarg + 2 > narg)
         utils::missing_cmd_args(FLERR, "fix baoab/tether newton_res_length", error);
@@ -344,6 +369,7 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
     } else if (strcmp(arg[iarg], "gamma_soft") == 0) {
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether gamma_soft", error);
       gamma_soft = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
+      gamma_soft_was_set = 1;
       iarg += 2;
     } else if (strcmp(arg[iarg], "gamma_quench_calib_gain") == 0) {
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether gamma_quench_calib_gain", error);
@@ -391,6 +417,31 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
         drift_response = 1;
       else
         error->all(FLERR, iarg + 1, "Fix baoab/tether drift_response must be retether or preshrink");
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "kspace_center") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether kspace_center", error);
+      kspace_center = utils::logical(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "molblock") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether molblock", error);
+      molblock = utils::logical(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "molblock_inner") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether molblock_inner", error);
+      mb_inner_user = utils::inumeric(FLERR, arg[iarg + 1], false, lmp);
+      if (mb_inner_user < 0) error->all(FLERR, "fix baoab/tether molblock_inner must be >= 0");
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "molblock_verbose") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether molblock_verbose", error);
+      mb_verbose = utils::logical(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "molblock_diag") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether molblock_diag", error);
+      molblock_diag = utils::logical(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "recoil") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether recoil", error);
+      recoil = utils::logical(FLERR, arg[iarg + 1], false, lmp);
       iarg += 2;
     } else if (strcmp(arg[iarg], "exile_substep") == 0) {
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether exile_substep", error);
@@ -464,6 +515,12 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   if (refresh_skin_rel < 0.0) error->all(FLERR, "Fix baoab/tether refresh_skin_rel must be >= 0");
   if (refresh_skin > 0.0 && refresh_skin_rel > 0.0)
     error->all(FLERR, "Fix baoab/tether refresh_skin and refresh_skin_rel are mutually exclusive");
+  if (molblock && !mollify)
+    error->all(FLERR, "Fix baoab/tether molblock requires mollify yes");
+  if (molblock && adapt)
+    error->all(FLERR, "Fix baoab/tether molblock cannot be combined with adapt yes");
+  if (molblock && (atom->molecular != Atom::MOLECULAR))
+    error->all(FLERR, "Fix baoab/tether molblock requires a molecular atom style with bonds");
   if (exile_substep && !adapt)
     error->all(FLERR, "Fix baoab/tether exile_substep requires adapt yes");
   if (preshrink_exile && !exile_substep)
@@ -559,7 +616,7 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   // stiff/rattler eligibility (om-based) instead of its group membership --
   // see that loop's comment for why group membership stopped being a valid
   // proxy once this fix started operating on a single whole-system group.
-  comm_forward = 6;
+  comm_forward = 7;
 
   // stage-4: pack_exchange()/unpack_exchange() write a per-atom payload far
   // larger (and variable-size, up to the JMAX cap) than the base Fix class's
@@ -571,7 +628,7 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   // + c(3) + evecs(9) + om(3) + Hacc(9) + n_hess_samples(1) + nJ-count(1) +
   // JMAX*(tag(1)+block(9)) + demote_count/last_demote/demote_cool/
   // quench_exempt(4) + last_ke(1).
-  maxexchange = 3 + 3 + 9 + 3 + 9 + 1 + 1 + JMAX * (1 + 9) + 4 + 1;
+  maxexchange = 3 + 3 + 9 + 3 + 9 + 1 + 1 + JMAX * (1 + 9) + 4 + 1 + 1;
 
   // diagnostic vector (plan Sec 6.1 event forensics / honest cost report):
   // [0..2] self-evaluation guard counts (Newton non-convergence, center
@@ -589,7 +646,7 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   // diagnostic (cached-vs-fresh mode-eligibility disagreement) -- see
   // n_mask_agree/n_mask_stale_soft/n_mask_stale_tight in the header.
   vector_flag = 1;
-  size_vector = 12;
+  size_vector = 16;
   extvector = 0;
 
   // per-atom persistent state (curvature-block eigenvectors/frequencies,
@@ -619,6 +676,7 @@ FixBAOABTether::~FixBAOABTether()
   memory->destroy(Jtag);
   memory->destroy(Jblk);
   memory->destroy(demote_count);
+  memory->destroy(bonded);
   memory->destroy(last_demote);
   memory->destroy(demote_cool);
   memory->destroy(quench_exempt);
@@ -675,6 +733,31 @@ void FixBAOABTether::init()
 {
   FixBAOAB::init();
 
+  // Thermostat sanity (units-independent): the friction must act on a timescale longer
+  // than one integrator step, i.e. gamma*dt <= 1, otherwise velocities are re-randomized
+  // every step and the dynamics are thermostat noise, not physics. damp (and gamma_soft)
+  // are in the run's own time units, so a value copied between unit systems (e.g. 0.1 in
+  // metal-units ps used in real-units fs) is off by orders of magnitude and silently
+  // produces a stable-looking but meaningless trajectory -- hence an error, not a warning.
+  // gamma_soft, when not given, defaults to gamma = 1/damp: one physical relaxation time
+  // governs the whole fix (an explicit gamma_soft 0 still disables the baseline soft-mode
+  // thermostat).
+  if (!gamma_soft_was_set) gamma_soft = gamma;
+  {
+    double dt_check = adapt ? dt_max : update->dt;
+    if (gamma * dt_check > 1.0)
+      error->all(FLERR, "Fix baoab/tether damp {} is shorter than one timestep ({}): the "
+                        "thermostat would re-randomize velocities every step. damp is in the "
+                        "run's time units; a typical choice is about 100 times the largest "
+                        "timestep, here {}", 1.0 / gamma, dt_check, 100.0 * dt_check);
+    if (gamma_soft * dt_check > 1.0)
+      error->all(FLERR, "Fix baoab/tether gamma_soft {} (1/time) exceeds 1 per timestep ({}): "
+                        "the soft-mode thermostat would re-randomize velocities every step. "
+                        "gamma_soft is in the run's inverse time units; a typical choice is "
+                        "1/(100 times the largest timestep), here {}",
+                 gamma_soft, dt_check, 1.0 / (100.0 * dt_check));
+  }
+
   // eps defaults to a small fraction of the neighbor skin (a system-
   // dependent length scale already known at this point) rather than a
   // hardcoded absolute distance; override with the "eps" keyword when the
@@ -706,6 +789,9 @@ void FixBAOABTether::init()
     // requirement exists for kspace: it is never evaluated by
     // partial_force() at all, only by the whole-system
     // recompute_forces_local() path, which doesn't need per-atom topology.
+    if (eligibility_bonded && !(adapt && atom->molecular == Atom::MOLECULAR && force->bond))
+      error->all(FLERR, "Fix baoab/tether eligibility bonded requires adapt yes, a molecular "
+                         "atom style, and a bond style (it assumes a fixed, non-reactive bond topology)");
     if (force->bond && force->newton_bond)
       error->all(FLERR, "Fix baoab/tether mollify yes with a bond style requires "
                          "newton_bond off (needed for symmetric per-atom bond storage)");
@@ -802,6 +888,11 @@ void FixBAOABTether::initial_integrate(int /*vflag*/)
 
   compute_target();
 
+  if (molblock) {
+    mb_initial_integrate();
+    return;
+  }
+
   // stage-4: need_refresh can be forced to 1 on this rank alone (e.g. a
   // local atom's demote_atom() call in solve_center()/the kinetic guard --
   // adapt=yes only, and which atoms demote is inherently rank-local under
@@ -828,6 +919,7 @@ void FixBAOABTether::initial_integrate(int /*vflag*/)
     // fully-converged values BEFORE any local atom's Newton solve below can
     // touch its own c[i] this step -- see pack_forward_comm() above.
     comm->forward_comm(this);
+    if (kspace_center) kspace_snapshot();
     for (int i = 0; i < nlocal; i++) {
       if (!(mask[i] & groupbit)) continue;
       double mi = rmass ? rmass[i] : mass[type[i]];
@@ -886,9 +978,31 @@ void FixBAOABTether::initial_integrate(int /*vflag*/)
     // update_dt()'s om_unres loop / the PRESHRINK drift-skin loop carry the
     // matching exclusion -- see there.
     if (exile_substep && demote_cool[i] > update->ntimestep) {
+      // Quench during exile (same condition the shared pipeline uses for quench_active):
+      // sub_step_free_atom() is plain velocity-Verlet with no friction and no noise, so without
+      // this a hot exiled atom (e.g. one released into a repulsive contact, ~3 eV) keeps that
+      // energy for its whole exile window and re-enters the shared pipeline still hot, then
+      // crosses >2 A in one full-dt step (found on H/Pd at energy_guard_rel 25 and on water).
+      // The pipeline's own cooling (strong friction gamma_quench at the target temperature) is
+      // applied here as a symmetric O(dt/2) - Verlet sub-steps - O(dt/2) split, with the same
+      // energy bookkeeping.
+      bool exile_quench = (quench_exempt[i] <= update->ntimestep) &&
+                          (last_demote[i] != update->ntimestep);
+      double ch = exp(-gamma_quench * 0.5 * update->dt);
+      double noise_h = sqrt(kT * invmass * (1.0 - ch * ch));
+      double ke_pre = 0.0;
+      if (exile_quench) {
+        ke_pre = v[i][0] * v[i][0] + v[i][1] * v[i][1] + v[i][2] * v[i][2];
+        for (int k = 0; k < 3; k++) v[i][k] = ch * v[i][k] + noise_h * random->gaussian();
+      }
       double x_mid[3] = {x[i][0], x[i][1], x[i][2]};
       double v_mid[3] = {v[i][0], v[i][1], v[i][2]};
       sub_step_free_atom(i, mi, x_mid, v_mid, update->dt, kT);
+      if (exile_quench) {
+        for (int k = 0; k < 3; k++) v[i][k] = ch * v[i][k] + noise_h * random->gaussian();
+        double ke_post = v[i][0] * v[i][0] + v[i][1] * v[i][1] + v[i][2] * v[i][2];
+        energy_onestep += 0.5 * force->mvv2e * mi * (ke_pre - ke_post);
+      }
       continue;
     }
 
@@ -1112,11 +1226,17 @@ void FixBAOABTether::final_integrate()
 
   if (igroup == atom->firstgroup) nlocal = atom->nfirst;
 
+  if (molblock) {
+    mb_final_integrate();
+    return;
+  }
+
   if (mollify) {
     double kT = force->boltz * t_target / force->mvv2e;
     // stage-4: see the matching comm->forward_comm(this) note in
     // initial_integrate() -- same reasoning applies here.
     comm->forward_comm(this);
+    if (kspace_center) kspace_snapshot();
     for (int i = 0; i < nlocal; i++) {
       if (!(mask[i] & groupbit)) continue;
       double mi = rmass ? rmass[i] : mass[type[i]];
@@ -1671,7 +1791,12 @@ void FixBAOABTether::sub_step_free_atom(int i, double mi, const double *x_mid,
   // om[] is in natural tau^-1 units, not real ps^-1 -- convert before using it
   // to size a real dt (see mode_is_stiff()'s doc comment in the header).
   double om_max_new = MAX(om[i][0], MAX(om[i][1], om[i][2])) * sqrt(force->ftm2v);
-  double dt_sub = (om_max_new > 0.0) ? MIN(dt_min, 2.2 / om_max_new) : dt_min;
+  // Plain velocity Verlet (the integrator used below) is unstable for omega*dt > 2, so the old
+  // cap of 2.2/omega could pick a single UNSTABLE sub-step whenever dt_min*omega landed in
+  // (2, 2.2] (found on water with dt_min pinned at 3 fs: stretch omega*dt = 2.06 -> blowup).
+  // 1.0/omega keeps the sub-step stable and ~accurate (<0.5% frequency error). It only binds
+  // when dt_min*omega > 1, which never happens for H/Pd (dt_min*omega ~ 0.02).
+  double dt_sub = (om_max_new > 0.0) ? MIN(dt_min, 1.0 / om_max_new) : dt_min;
   int n_sub = MAX(1, (int) ceil(remaining_dt / dt_sub));
   dt_sub = remaining_dt / n_sub;
 
@@ -1758,6 +1883,871 @@ void FixBAOABTether::modal_force_correction(int i, double mi, double *fcorr) con
 }
 
 /* ----------------------------------------------------------------------
+   molblock_diag (DIAGNOSTIC ONLY, changes no dynamics): for every molecule
+   (an atom plus its bond/angle partners, as recorded by refresh_one_atom()),
+   assemble the full mass-weighted Hessian from the own blocks H_ii and the
+   cross columns dF_j/dx_i that the curvature refresh already measured,
+   diagonalize it, split eigenvectors into internal vs rigid-body by their
+   overlap with the 6 rigid translation/rotation vectors at the current
+   geometry, and log mean +- sd frequencies over all molecules. Each
+   molecule is handled once, by its lowest-tag atom, and only if all of its
+   atoms are owned by this rank.
+------------------------------------------------------------------------- */
+
+void FixBAOABTether::molblock_diagnostic()
+{
+  const int MBMAX = 4;
+  int nlocal = atom->nlocal;
+  int *mask = atom->mask;
+  double *mass = atom->mass;
+  double *rmass = atom->rmass;
+  int *type = atom->type;
+  double **x = atom->x;
+  double conv = sqrt(force->ftm2v);
+  // angular frequency per run time unit -> wavenumber (cm^-1); 0 = not reported
+  double cm1 = 1.0;
+  if (strcmp(update->unit_style, "real") == 0)
+    cm1 = 1.0 / (2.0 * MathConst::MY_PI * 2.99792458e-5);
+  else if (strcmp(update->unit_style, "metal") == 0)
+    cm1 = 1.0 / (2.0 * MathConst::MY_PI * 2.99792458e-2);
+
+  int nmol = 0, nskip = 0, nsz = -1;
+  std::vector<double> s_int, s2_int, s_rig;
+  double purity_sum = 0.0, worst_purity = 1.0, asym_sum = 0.0;
+
+  for (int i = 0; i < nlocal; i++) {
+    if (!(mask[i] & groupbit)) continue;
+    int np = mb_n[i];
+    if (np <= 0) continue;
+    tagint tags[MBMAX + 1];
+    tags[0] = atom->tag[i];
+    bool owner = true;
+    for (int p = 0; p < np; p++) {
+      tags[p + 1] = mb_tag[(size_t) i * MBMAX + p];
+      if (tags[p + 1] < tags[0]) owner = false;
+    }
+    if (!owner) continue;
+    int n = np + 1, N = 3 * n;
+    int loc[MBMAX + 1];
+    bool ok = true;
+    for (int a = 0; a < n; a++) {
+      loc[a] = (a == 0) ? i : atom->map(tags[a]);
+      if ((loc[a] < 0) || (loc[a] >= nlocal) || (mb_n[loc[a]] != np)) ok = false;
+    }
+    if (!ok) {
+      nskip++;
+      continue;
+    }
+    if (nsz < 0) {
+      nsz = n;
+      s_int.assign(N, 0.0);
+      s2_int.assign(N, 0.0);
+      s_rig.assign(N, 0.0);
+    }
+    if (n != nsz) {
+      nskip++;
+      continue;
+    }
+
+    // raw Hessian H[(a,r),(b,s)] = -dF_{a,r}/dx_{b,s}; column b from atom b's own probes
+    std::vector<double> Hm((size_t) N * N, 0.0);
+    for (int b = 0; b < n; b++) {
+      int lb = loc[b];
+      for (int r = 0; r < 3; r++)
+        for (int s = 0; s < 3; s++)
+          Hm[(size_t) (3 * b + r) * N + 3 * b + s] = mb_Hown[(size_t) lb * 9 + 3 * r + s];
+      for (int p = 0; p < mb_n[lb]; p++) {
+        tagint ta = mb_tag[(size_t) lb * MBMAX + p];
+        int a = -1;
+        for (int q = 0; q < n; q++)
+          if (tags[q] == ta) a = q;
+        if ((a < 0) || (a == b)) continue;
+        const double *X = &mb_X[((size_t) lb * MBMAX + p) * 9];
+        for (int r = 0; r < 3; r++)
+          for (int s = 0; s < 3; s++) Hm[(size_t) (3 * a + r) * N + 3 * b + s] = -X[3 * r + s];
+      }
+    }
+    // asymmetry of the assembled matrix (two independent FD estimates of each cross block)
+    double asym = 0.0, nrm = 0.0;
+    for (int A = 0; A < N; A++)
+      for (int B = 0; B < N; B++) {
+        double d = Hm[(size_t) A * N + B] - Hm[(size_t) B * N + A];
+        asym += d * d;
+        nrm += Hm[(size_t) A * N + B] * Hm[(size_t) A * N + B];
+      }
+    asym_sum += (nrm > 0.0) ? sqrt(0.5 * asym / nrm) : 0.0;
+
+    double ms[MBMAX + 1];
+    for (int a = 0; a < n; a++) ms[a] = rmass ? rmass[loc[a]] : mass[type[loc[a]]];
+    double **D, **V, *ev;
+    memory->create(D, N, N, "baoab/tether:mbD");
+    memory->create(V, N, N, "baoab/tether:mbV");
+    memory->create(ev, N, "baoab/tether:mbev");
+    for (int A = 0; A < N; A++)
+      for (int B = 0; B < N; B++) {
+        double hs = 0.5 * (Hm[(size_t) A * N + B] + Hm[(size_t) B * N + A]);
+        D[A][B] = hs / sqrt(ms[A / 3] * ms[B / 3]);
+      }
+    MathEigen::Jacobi<double, double *, double **, double const *const *> ecalc(N);
+    ecalc.Diagonalize(D, ev, V);    // decreasing eigenvalues, eigenvectors in rows
+
+    // orthonormal rigid-body basis (mass-weighted), positions minimum-imaged to atom 0
+    double xr[MBMAX + 1][3], com[3] = {0.0, 0.0, 0.0}, mt = 0.0;
+    for (int a = 0; a < n; a++) {
+      double d[3] = {x[loc[a]][0] - x[i][0], x[loc[a]][1] - x[i][1], x[loc[a]][2] - x[i][2]};
+      domain->minimum_image(FLERR, d);
+      for (int k = 0; k < 3; k++) {
+        xr[a][k] = d[k];
+        com[k] += ms[a] * d[k];
+      }
+      mt += ms[a];
+    }
+    for (int k = 0; k < 3; k++) com[k] /= mt;
+    std::vector<std::vector<double>> R;
+    for (int k = 0; k < 6; k++) {
+      std::vector<double> u(N, 0.0);
+      for (int a = 0; a < n; a++) {
+        double sm = sqrt(ms[a]);
+        double rr[3] = {xr[a][0] - com[0], xr[a][1] - com[1], xr[a][2] - com[2]};
+        if (k < 3) {
+          u[3 * a + k] = sm;
+        } else {
+          double e[3] = {0.0, 0.0, 0.0};
+          e[k - 3] = 1.0;
+          u[3 * a + 0] = sm * (e[1] * rr[2] - e[2] * rr[1]);
+          u[3 * a + 1] = sm * (e[2] * rr[0] - e[0] * rr[2]);
+          u[3 * a + 2] = sm * (e[0] * rr[1] - e[1] * rr[0]);
+        }
+      }
+      for (auto &w : R) {
+        double dp = 0.0;
+        for (int A = 0; A < N; A++) dp += w[A] * u[A];
+        for (int A = 0; A < N; A++) u[A] -= dp * w[A];
+      }
+      double nn = 0.0;
+      for (int A = 0; A < N; A++) nn += u[A] * u[A];
+      if (nn > 1.0e-12) {
+        for (int A = 0; A < N; A++) u[A] /= sqrt(nn);
+        R.push_back(u);
+      }
+    }
+    std::vector<std::pair<double, int>> rf(N);
+    for (int m = 0; m < N; m++) {
+      double f = 0.0;
+      for (auto &w : R) {
+        double dp = 0.0;
+        for (int A = 0; A < N; A++) dp += w[A] * V[m][A];
+        f += dp * dp;
+      }
+      rf[m] = {f, m};
+    }
+    std::sort(rf.begin(), rf.end());
+    int nint = N - (int) R.size();
+    std::vector<double> wint, wrig;
+    for (int q = 0; q < N; q++) {
+      int m = rf[q].second;
+      double w = sqrt(MAX(ev[m], 0.0)) * conv;
+      if (q < nint) {
+        wint.push_back(w);
+        purity_sum += 1.0 - rf[q].first;
+        worst_purity = MIN(worst_purity, 1.0 - rf[q].first);
+      } else {
+        wrig.push_back(w);
+      }
+    }
+    std::sort(wint.rbegin(), wint.rend());
+    std::sort(wrig.rbegin(), wrig.rend());
+    for (int q = 0; q < (int) wint.size(); q++) {
+      s_int[q] += wint[q];
+      s2_int[q] += wint[q] * wint[q];
+    }
+    for (int q = 0; q < (int) wrig.size(); q++) s_rig[q] += wrig[q];
+    nmol++;
+    memory->destroy(D);
+    memory->destroy(V);
+    memory->destroy(ev);
+  }
+
+  if (comm->me != 0) return;
+  if (nmol == 0) {
+    utils::logmesg(lmp, "MOLBLOCK step {} no complete molecules (skipped {})\n", update->ntimestep,
+                   nskip);
+    return;
+  }
+  int N = 3 * nsz, nint = N - 6;
+  std::string line = fmt::format("MOLBLOCK step {} molecules {} skipped {} | internal:",
+                                 update->ntimestep, nmol, nskip);
+  for (int q = 0; q < nint; q++) {
+    double m = s_int[q] / nmol, sd = sqrt(MAX(s2_int[q] / nmol - m * m, 0.0));
+    line += fmt::format(" {:.0f}+-{:.0f}", m * cm1, sd * cm1);
+  }
+  line += " | rigid-body:";
+  for (int q = 0; q < 6; q++) line += fmt::format(" {:.0f}", s_rig[q] / nmol * cm1);
+  line += fmt::format(" | internal purity mean {:.3f} worst {:.3f} | cross-block asymmetry {:.3f}\n",
+                      purity_sum / (nmol * nint), worst_purity, asym_sum / nmol);
+  utils::logmesg(lmp, line);
+}
+
+/* ----------------------------------------------------------------------
+   molblock (auto-RESPA): impulse multiple time stepping for the stiff
+   internal motion of small bonded molecules, with the fast force field
+   built from the measured Hessian instead of from a force-field split.
+
+   A molecule is an atom plus its bond/angle partners (at most MBA atoms),
+   owned by its lowest-tag atom; all its atoms must be local (serial or
+   whole-molecule-per-rank). At each refresh (mb_refresh):
+   - assemble the molecular Hessian from the per-atom own/cross blocks
+     refresh_one_atom() measures (same collection as molblock_diag);
+   - if any internal mode (span of the molecule's bond/angle gradients) has
+     omega*dt > theta, all its bonds and angles form the fast set s;
+   - Wilson GF force constants F of s from that Hessian and the raw forces
+     (mb_gf_forceconst); the fastest GF frequency sets the substep count.
+   The fast potential is V_fast = 1/2 (s - s0)^T F (s - s0), with the
+   reference s0 anchored once at the molecule's first Newton center and kept
+   for the rest of the run. Each outer step (consistent splitting):
+     B_slow(dt/2) [ B_fast(h/2) A(h) B_fast(h/2) ]^n (O over dt mid-loop) B_slow(dt/2)
+   with slow force f - f_fast. When F is refreshed, the step in progress
+   keeps its old F through its closing kick and the new F takes over at the
+   start of the next step, so every outer step uses a single split.
+   Changes nothing unless "molblock yes" is given.
+------------------------------------------------------------------------- */
+
+// local indices of molecule M's atoms and their positions relative to its COM (minimum image)
+bool FixBAOABTether::mb_locate(const MBMol &M, int *loc, double (*xr)[3]) const
+{
+  double **x = atom->x;
+  int nlocal = atom->nlocal;
+  for (int a = 0; a < M.n; a++) {
+    loc[a] = atom->map(M.tag[a]);
+    if ((loc[a] < 0) || (loc[a] >= nlocal)) return false;
+  }
+  double com[3] = {0, 0, 0}, mt = 0.0;
+  for (int a = 0; a < M.n; a++) {
+    double d[3] = {x[loc[a]][0] - x[loc[0]][0], x[loc[a]][1] - x[loc[0]][1],
+                   x[loc[a]][2] - x[loc[0]][2]};
+    domain->minimum_image(FLERR, d);
+    for (int k = 0; k < 3; k++) {
+      xr[a][k] = d[k];
+      com[k] += M.m[a] * d[k];
+    }
+    mt += M.m[a];
+  }
+  for (int a = 0; a < M.n; a++)
+    for (int k = 0; k < 3; k++) xr[a][k] -= com[k] / mt;
+  return true;
+}
+
+void FixBAOABTether::mb_refresh()
+{
+  const int MBMAX = 4;
+  int nlocal = atom->nlocal;
+  int *mask = atom->mask;
+  double **x = atom->x;
+  double *mass = atom->mass;
+  double *rmass = atom->rmass;
+  int *type = atom->type;
+
+  mb_Hown.assign((size_t) nlocal * 9, 0.0);
+  mb_X.assign((size_t) nlocal * MBMAX * 9, 0.0);
+  mb_tag.assign((size_t) nlocal * MBMAX, 0);
+  mb_n.assign(nlocal, 0);
+  mb_collect = true;
+  for (int i = 0; i < nlocal; i++) {
+    if (!(mask[i] & groupbit)) continue;
+    double xi[3] = {x[i][0], x[i][1], x[i][2]};
+    refresh_one_atom(i, xi, false);
+  }
+  mb_collect = false;
+
+  std::vector<MBMol> mbold;
+  mbold.swap(mbmols);
+  double wmax_ref = 0.0;
+  mb_member.assign(nlocal, 0);
+  int nmasked = 0, nskip = 0;
+  for (int i = 0; i < nlocal; i++) {
+    if (!(mask[i] & groupbit)) continue;
+    int np = mb_n[i];
+    if (np <= 0) continue;
+    MBMol M;
+    M.n = np + 1;
+    M.tag[0] = atom->tag[i];
+    bool owner = true;
+    for (int p = 0; p < np; p++) {
+      M.tag[p + 1] = mb_tag[(size_t) i * MBMAX + p];
+      if (M.tag[p + 1] < M.tag[0]) owner = false;
+    }
+    if (!owner) continue;
+    int n = M.n, N = 3 * n;
+    int loc[MBMAX + 1];
+    bool ok = true;
+    for (int a = 0; a < n; a++) {
+      loc[a] = atom->map(M.tag[a]);
+      if ((loc[a] < 0) || (loc[a] >= nlocal) || (mb_n[loc[a]] != np) || !(mask[loc[a]] & groupbit))
+        ok = false;
+    }
+    if (!ok) {
+      nskip++;
+      continue;
+    }
+    for (int a = 0; a < n; a++) M.m[a] = rmass ? rmass[loc[a]] : mass[type[loc[a]]];
+
+    // raw Hessian, column b from atom b's own probes (see molblock_diagnostic())
+    double Hm[MBN][MBN];
+    for (int A = 0; A < N; A++)
+      for (int B = 0; B < N; B++) Hm[A][B] = 0.0;
+    for (int b = 0; b < n; b++) {
+      int lb = loc[b];
+      for (int r = 0; r < 3; r++)
+        for (int s = 0; s < 3; s++) Hm[3 * b + r][3 * b + s] = mb_Hown[(size_t) lb * 9 + 3 * r + s];
+      for (int p = 0; p < mb_n[lb]; p++) {
+        tagint ta = mb_tag[(size_t) lb * MBMAX + p];
+        int a = -1;
+        for (int q = 0; q < n; q++)
+          if (M.tag[q] == ta) a = q;
+        if ((a < 0) || (a == b)) continue;
+        const double *X = &mb_X[((size_t) lb * MBMAX + p) * 9];
+        for (int r = 0; r < 3; r++)
+          for (int s = 0; s < 3; s++) Hm[3 * a + r][3 * b + s] = -X[3 * r + s];
+      }
+    }
+
+    // reference geometry and mass-weighted Hessian
+    if (!mb_locate(M, loc, M.xref)) continue;
+    for (int A = 0; A < N; A++)
+      for (int B = 0; B < N; B++)
+        M.Dref[A][B] = 0.5 * (Hm[A][B] + Hm[B][A]) / sqrt(M.m[A / 3] * M.m[B / 3]);
+
+    // bonds and angles with all atoms inside this molecule (newton_bond off: every atom stores its own)
+    auto idx = [&](tagint t) {
+      for (int q = 0; q < n; q++)
+        if (M.tag[q] == t) return q;
+      return -1;
+    };
+    M.nic = 0;
+    for (int a = 0; a < n; a++) {
+      int la = loc[a];
+      for (int b = 0; b < atom->num_bond[la]; b++) {
+        int j = idx(atom->bond_atom[la][b]);
+        if ((j < 0) || (j <= a) || (M.nic >= MBN)) continue;
+        M.ic_type[M.nic] = 0;
+        M.ic_at[M.nic][0] = a;
+        M.ic_at[M.nic][1] = j;
+        M.nic++;
+      }
+      if (atom->num_angle)
+        for (int b = 0; b < atom->num_angle[la]; b++) {
+          int i1 = idx(atom->angle_atom1[la][b]), i2 = idx(atom->angle_atom2[la][b]),
+              i3 = idx(atom->angle_atom3[la][b]);
+          if ((i1 < 0) || (i2 < 0) || (i3 < 0) || (M.nic >= MBN)) continue;
+          bool dup = false;
+          for (int q = 0; q < M.nic; q++)
+            if ((M.ic_type[q] == 1) && (M.ic_at[q][1] == i2) &&
+                (((M.ic_at[q][0] == i1) && (M.ic_at[q][2] == i3)) ||
+                 ((M.ic_at[q][0] == i3) && (M.ic_at[q][2] == i1))))
+              dup = true;
+          if (dup) continue;
+          M.ic_type[M.nic] = 1;
+          M.ic_at[M.nic][0] = i1;
+          M.ic_at[M.nic][1] = i2;
+          M.ic_at[M.nic][2] = i3;
+          M.nic++;
+        }
+    }
+
+    // fast set: every bond and angle of a molecule with any stiff internal mode, else none
+    if (mb_stiff_modes(M, M.xref) == 0) M.nic = 0;
+    double fr[MBA][3];
+    for (int a = 0; a < n; a++)
+      for (int p = 0; p < 3; p++) fr[a][p] = atom->f[loc[a]][p];
+    mb_gf_forceconst(M, M.xref, fr);
+    mb_gf_freqs(M, M.xref);
+    for (int k = 0; k < M.nm; k++) wmax_ref = MAX(wmax_ref, M.w[k]);
+    if (mb_verbose && (comm->me == 0) && mbmols.empty() && (M.nic > 0)) {
+      std::string s = fmt::format("MOLBLOCK IC force constants (molecule of atom {}):", M.tag[0]);
+      for (int q = 0; q < M.nic; q++) s += fmt::format(" {:.2f}", M.Fic[q][q]);
+      s += " | off-diag:";
+      for (int q = 0; q < M.nic; q++)
+        for (int r = q + 1; r < M.nic; r++) s += fmt::format(" {:.2f}", M.Fic[q][r]);
+      utils::logmesg(lmp, s + "\n");
+    }
+
+    // same molecule as before the refresh: keep its reference s0 (re-anchoring it would change
+    // the fast/slow split mid-run); the step in progress keeps its old force constants through
+    // its closing kick, the new ones take over at the start of the next step
+    for (auto &O : mbold) {
+      if ((O.tag[0] != M.tag[0]) || (O.nic != M.nic)) continue;
+      bool same = true;
+      for (int q = 0; q < M.nic; q++)
+        if ((O.ic_type[q] != M.ic_type[q]) || (O.ic_at[q][0] != M.ic_at[q][0]) ||
+            (O.ic_at[q][1] != M.ic_at[q][1]))
+          same = false;
+      if (!same) break;
+      M.have_s0 = O.have_s0;
+      for (int q = 0; q < M.nic; q++) M.sig0[q] = O.sig0[q];
+      if (O.have_s0) {
+        M.pending = true;
+        for (int q = 0; q < M.nic; q++)
+          for (int r = 0; r < M.nic; r++) M.Fold[q][r] = O.pending ? O.Fold[q][r] : O.Fic[q][r];
+      }
+      break;
+    }
+    nmasked += M.nm;
+    for (int a = 0; a < n; a++) mb_member[loc[a]] = 1;
+    mbmols.push_back(M);
+  }
+  mb_last_refresh = update->ntimestep;
+  MPI_Allreduce(&wmax_ref, &mb_wmax, 1, MPI_DOUBLE, MPI_MAX, world);
+  mb_nin = mb_inner_user;
+  if (mb_nin == 0) {
+    mb_nin = (int) ceil(mb_wmax * update->dt / 0.3);
+    mb_nin = MAX(2, mb_nin + (mb_nin % 2));
+  }
+  if (mb_verbose && (comm->me == 0))
+    utils::logmesg(lmp, "MOLBLOCK refresh step {}: {} molecules, {} fast modes, {} skipped; fastest "
+                   "w*dt = {:.3f}, {} inner substeps\n", update->ntimestep, mbmols.size(), nmasked,
+                   nskip, mb_wmax * update->dt, mb_nin);
+}
+
+
+// small dense solve A x = b (Gaussian elimination, partial pivoting); b overwritten by x
+template <int W> static bool mb_solve(int n, double (*A)[W], double *b)
+{
+  for (int k = 0; k < n; k++) {
+    int p = k;
+    for (int i = k + 1; i < n; i++)
+      if (fabs(A[i][k]) > fabs(A[p][k])) p = i;
+    if (fabs(A[p][k]) < 1.0e-300) return false;
+    if (p != k) {
+      for (int j = 0; j < n; j++) std::swap(A[k][j], A[p][j]);
+      std::swap(b[k], b[p]);
+    }
+    for (int i = k + 1; i < n; i++) {
+      double f = A[i][k] / A[k][k];
+      for (int j = k; j < n; j++) A[i][j] -= f * A[k][j];
+      b[i] -= f * b[k];
+    }
+  }
+  for (int k = n - 1; k >= 0; k--) {
+    double s = b[k];
+    for (int j = k + 1; j < n; j++) s -= A[k][j] * b[j];
+    b[k] = s / A[k][k];
+  }
+  return true;
+}
+
+// internal coordinate values and Cartesian gradients (rows) of molecule M at geometry xr
+void FixBAOABTether::mb_ic_eval(const MBMol &M, const double (*xr)[3], double *sig,
+                                double (*Bc)[MBN]) const
+{
+  int N = 3 * M.n;
+  for (int q = 0; q < M.nic; q++) {
+    for (int A = 0; A < N; A++) Bc[q][A] = 0.0;
+    if (M.ic_type[q] == 0) {
+      int a = M.ic_at[q][0], b = M.ic_at[q][1];
+      double d[3] = {xr[a][0] - xr[b][0], xr[a][1] - xr[b][1], xr[a][2] - xr[b][2]};
+      double r = sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+      sig[q] = r;
+      for (int p = 0; p < 3; p++) {
+        Bc[q][3 * a + p] = d[p] / r;
+        Bc[q][3 * b + p] = -d[p] / r;
+      }
+    } else {
+      int a = M.ic_at[q][0], b = M.ic_at[q][1], cc = M.ic_at[q][2];
+      double e1[3], e2[3], r1 = 0.0, r2 = 0.0;
+      for (int p = 0; p < 3; p++) {
+        e1[p] = xr[a][p] - xr[b][p];
+        e2[p] = xr[cc][p] - xr[b][p];
+        r1 += e1[p] * e1[p];
+        r2 += e2[p] * e2[p];
+      }
+      r1 = sqrt(r1);
+      r2 = sqrt(r2);
+      double cth = 0.0;
+      for (int p = 0; p < 3; p++) {
+        e1[p] /= r1;
+        e2[p] /= r2;
+        cth += e1[p] * e2[p];
+      }
+      cth = MAX(-1.0, MIN(1.0, cth));
+      sig[q] = acos(cth);
+      double sth = sqrt(MAX(1.0 - cth * cth, 1.0e-12));
+      for (int p = 0; p < 3; p++) {
+        double ga = (cth * e1[p] - e2[p]) / (r1 * sth);
+        double gc = (cth * e2[p] - e1[p]) / (r2 * sth);
+        Bc[q][3 * a + p] = ga;
+        Bc[q][3 * cc + p] = gc;
+        Bc[q][3 * b + p] = -ga - gc;
+      }
+    }
+  }
+}
+
+
+// at refresh: internal-coordinate force constants from the measured Cartesian
+// Hessian H at geometry xr with raw forces fr (Wilson): B^T F B = H + sum_q phi_q d2sigma_q,
+// phi = G^-1 B M^-1 f; F = G^-1 B M^-1 (H + sum phi d2sigma) M^-1 B^T G^-1
+void FixBAOABTether::mb_gf_forceconst(MBMol &M, const double (*xr)[3], const double (*fr)[3])
+{
+  int n = M.n, N = 3 * n, nc = M.nic;
+  if (nc == 0) return;
+  double sg[MBN], Bc[MBN][MBN], G[MBN][MBN], phi[MBN];
+  mb_ic_eval(M, xr, sg, Bc);
+  for (int q = 0; q < nc; q++) {
+    double s = 0.0;
+    for (int a = 0; a < n; a++)
+      for (int p = 0; p < 3; p++) s += Bc[q][3 * a + p] * fr[a][p] / M.m[a];
+    phi[q] = s;
+    for (int r = 0; r < nc; r++) {
+      double t = 0.0;
+      for (int C = 0; C < N; C++) t += Bc[q][C] * Bc[r][C] / M.m[C / 3];
+      G[q][r] = t;
+    }
+  }
+  double Gs[MBN][MBN];
+  for (int q = 0; q < nc; q++)
+    for (int r = 0; r < nc; r++) Gs[q][r] = G[q][r];
+  mb_solve(nc, Gs, phi);
+  // Hc = H + sum_q phi_q d2sigma_q  (d2sigma by central differences of the analytic gradient)
+  double Hc[MBN][MBN];
+  for (int A = 0; A < N; A++)
+    for (int B = 0; B < N; B++) Hc[A][B] = M.Dref[A][B] * sqrt(M.m[A / 3] * M.m[B / 3]);
+  const double h = 1.0e-5;
+  for (int C = 0; C < N; C++) {
+    double xp[MBA][3], xm[MBA][3], sp[MBN], sm2[MBN], Bp[MBN][MBN], Bm[MBN][MBN];
+    for (int a = 0; a < n; a++)
+      for (int p = 0; p < 3; p++) xp[a][p] = xm[a][p] = xr[a][p];
+    xp[C / 3][C % 3] += h;
+    xm[C / 3][C % 3] -= h;
+    mb_ic_eval(M, xp, sp, Bp);
+    mb_ic_eval(M, xm, sm2, Bm);
+    for (int A = 0; A < N; A++) {
+      double s = 0.0;
+      for (int q = 0; q < nc; q++) s += phi[q] * (Bp[q][A] - Bm[q][A]) / (2.0 * h);
+      Hc[A][C] += s;
+    }
+  }
+  // W = G^-1 B M^-1  (nc x N);  F = W Hc W^T
+  double W[MBN][MBN];
+  for (int A = 0; A < N; A++) {
+    double col[MBN];
+    for (int q = 0; q < nc; q++) col[q] = Bc[q][A] / M.m[A / 3];
+    for (int q = 0; q < nc; q++)
+      for (int r = 0; r < nc; r++) Gs[q][r] = G[q][r];
+    mb_solve(nc, Gs, col);
+    for (int q = 0; q < nc; q++) W[q][A] = col[q];
+  }
+  for (int q = 0; q < nc; q++)
+    for (int r = 0; r < nc; r++) {
+      double s = 0.0;
+      for (int A = 0; A < N; A++)
+        for (int B = 0; B < N; B++) s += W[q][A] * 0.5 * (Hc[A][B] + Hc[B][A]) * W[r][B];
+      M.Fic[q][r] = s;
+    }
+  for (int q = 0; q < nc; q++)
+    for (int r = q + 1; r < nc; r++) M.Fic[q][r] = M.Fic[r][q] = 0.5 * (M.Fic[q][r] + M.Fic[r][q]);
+}
+
+// at refresh: GF normal-mode frequencies of the fast internal coordinates with force constants
+// Fic: eigenvalues of A = G^1/2 F G^1/2, G = B M^-1 B^T (sets M.nm = M.nic, M.w)
+void FixBAOABTether::mb_gf_freqs(MBMol &M, const double (*xr)[3])
+{
+  int n = M.n, N = 3 * n, nc = M.nic;
+  double conv = sqrt(force->ftm2v);
+  M.nm = 0;
+  if (nc == 0) return;
+  double sg[MBN], Bc[MBN][MBN];
+  mb_ic_eval(M, xr, sg, Bc);
+  double **G, **V, *ev;
+  memory->create(G, nc, nc, "baoab/tether:gfG");
+  memory->create(V, nc, nc, "baoab/tether:gfV");
+  memory->create(ev, nc, "baoab/tether:gfev");
+  for (int q = 0; q < nc; q++)
+    for (int r = 0; r < nc; r++) {
+      double t = 0.0;
+      for (int C = 0; C < N; C++) t += Bc[q][C] * Bc[r][C] / M.m[C / 3];
+      G[q][r] = t;
+    }
+  MathEigen::Jacobi<double, double *, double **, double const *const *> ecalc(nc);
+  ecalc.Diagonalize(G, ev, V);
+  // eigenvalues come sorted in decreasing order
+  if (ev[nc - 1] < 1.0e-10 * ev[0])
+    error->one(FLERR, "Fix baoab/tether molblock: the bonds and angles of the molecule with atom "
+               "ID {} are not independent (e.g. a linear or ring molecule)", M.tag[0]);
+  double Gh[MBN][MBN];
+  for (int q = 0; q < nc; q++)
+    for (int r = 0; r < nc; r++) {
+      double a = 0.0;
+      for (int e = 0; e < nc; e++) {
+        double le = MAX(ev[e], 1.0e-300);
+        a += V[e][q] * sqrt(le) * V[e][r];
+      }
+      Gh[q][r] = a;
+    }
+  for (int q = 0; q < nc; q++)
+    for (int r = 0; r < nc; r++) {
+      double s = 0.0;
+      for (int a = 0; a < nc; a++)
+        for (int b = 0; b < nc; b++) s += Gh[q][a] * M.Fic[a][b] * Gh[b][r];
+      G[q][r] = s;
+    }
+  for (int q = 0; q < nc; q++)
+    for (int r = q + 1; r < nc; r++) G[q][r] = G[r][q] = 0.5 * (G[q][r] + G[r][q]);
+  ecalc.Diagonalize(G, ev, V);
+  for (int k = 0; k < nc; k++) M.w[k] = sqrt(MAX(ev[k], 1.0e-6 * fabs(ev[0]) + 1.0e-300)) * conv;
+  M.nm = nc;
+  memory->destroy(G);
+  memory->destroy(V);
+  memory->destroy(ev);
+}
+
+
+// fast (harmonic internal-coordinate) force on the atoms of molecule M at geometry xr
+void FixBAOABTether::mb_fast_force(const MBMol &M, const double (*xr)[3], double (*ff)[3],
+                                   bool old) const
+{
+  int n = M.n, nc = M.nic;
+  for (int a = 0; a < n; a++) ff[a][0] = ff[a][1] = ff[a][2] = 0.0;
+  if ((nc == 0) || !M.have_s0) return;
+  double sg[MBN], Bc[MBN][MBN], g[MBN];
+  mb_ic_eval(M, xr, sg, Bc);
+  for (int q = 0; q < nc; q++) {
+    double s = 0.0;
+    for (int r = 0; r < nc; r++) s += (old ? M.Fold[q][r] : M.Fic[q][r]) * (sg[r] - M.sig0[r]);
+    g[q] = s;
+  }
+  for (int a = 0; a < n; a++)
+    for (int p = 0; p < 3; p++) {
+      double s = 0.0;
+      for (int q = 0; q < nc; q++) s += Bc[q][3 * a + p] * g[q];
+      ff[a][p] = -s;
+    }
+}
+
+// atom->f holds the raw force at x on entry, the slow force f - f_fast on exit
+void FixBAOABTether::mb_prepare()
+{
+  double **f = atom->f;
+  int nlocal = atom->nlocal;
+  if (mb_last_refresh < 0 || (update->ntimestep - mb_last_refresh) >= refresh_every) mb_refresh();
+  mb_member.assign(nlocal, 0);
+  for (auto &M : mbmols) {
+    int loc[MBA];
+    double xr[MBA][3];
+    if (!mb_locate(M, loc, xr)) {
+      M.valid = false;
+      continue;
+    }
+    M.valid = true;
+    for (int a = 0; a < M.n; a++) mb_member[loc[a]] = 1;
+    int nc = M.nic;
+    if (nc == 0) continue;
+    if (!M.have_s0) {
+      // anchor s0 at the center: s0 = s + F^-1 phi, phi = G^-1 B M^-1 f (raw force)
+      int N = 3 * M.n;
+      double sg[MBN], Bc[MBN][MBN], G[MBN][MBN], phi[MBN], Fm[MBN][MBN];
+      mb_ic_eval(M, xr, sg, Bc);
+      for (int q = 0; q < nc; q++) {
+        double s = 0.0;
+        for (int a = 0; a < M.n; a++)
+          for (int p = 0; p < 3; p++) s += Bc[q][3 * a + p] * f[loc[a]][p] / M.m[a];
+        phi[q] = s;
+        for (int r = 0; r < nc; r++) {
+          double t = 0.0;
+          for (int C = 0; C < N; C++) t += Bc[q][C] * Bc[r][C] / M.m[C / 3];
+          G[q][r] = t;
+          Fm[q][r] = M.Fic[q][r];
+        }
+      }
+      mb_solve(nc, G, phi);
+      mb_solve(nc, Fm, phi);
+      for (int q = 0; q < nc; q++) M.sig0[q] = sg[q] + phi[q];
+      M.have_s0 = true;
+    }
+    double ff[MBA][3];
+    mb_fast_force(M, xr, ff, M.pending);
+    for (int a = 0; a < M.n; a++)
+      for (int p = 0; p < 3; p++) f[loc[a]][p] -= ff[a][p];
+  }
+  mb_ready = true;
+}
+
+void FixBAOABTether::mb_initial_integrate()
+{
+  double **x = atom->x;
+  double **v = atom->v;
+  double **f = atom->f;
+  double *mass = atom->mass;
+  double *rmass = atom->rmass;
+  int *type = atom->type;
+  int *mask = atom->mask;
+  int nlocal = atom->nlocal;
+  double dt = update->dt;
+  double kT = force->boltz * t_target / force->mvv2e;
+  double c1s = exp(-gamma_soft * dt), s1s = sqrt(kT * (-std::expm1(-2.0 * gamma_soft * dt)));
+
+  if (!mb_ready) mb_prepare();    // first step: atom->f is the raw setup force
+
+  // switch molecules refreshed at the end of the last step to their new force constants:
+  // slow force at the same x changes by f_fast(old F) - f_fast(new F)
+  for (auto &M : mbmols) {
+    if (!M.valid || !M.pending) continue;
+    int loc[MBA];
+    double xr[MBA][3], fo[MBA][3], fn[MBA][3];
+    mb_locate(M, loc, xr);
+    mb_fast_force(M, xr, fo, true);
+    mb_fast_force(M, xr, fn, false);
+    for (int a = 0; a < M.n; a++)
+      for (int p = 0; p < 3; p++) f[loc[a]][p] += fo[a][p] - fn[a][p];
+    M.pending = false;
+  }
+
+  // B (slow, half outer step)
+  for (int i = 0; i < nlocal; i++) {
+    if (!(mask[i] & groupbit)) continue;
+    double mi = rmass ? rmass[i] : mass[type[i]];
+    for (int k = 0; k < 3; k++) v[i][k] += dtf * f[i][k] / mi;
+  }
+
+  int nin = MAX(1, mb_nin);
+  double h = dt / nin, hf = 0.5 * h * force->ftm2v;
+  int omid = nin / 2;
+  for (int s = 0; s < nin; s++) {
+    // molecules: velocity Verlet under the fast force
+    for (auto &M : mbmols) {
+      if (!M.valid) continue;
+      int loc[MBA];
+      double xr[MBA][3], ff[MBA][3];
+      mb_locate(M, loc, xr);
+      mb_fast_force(M, xr, ff);
+      for (int a = 0; a < M.n; a++)
+        for (int p = 0; p < 3; p++) {
+          v[loc[a]][p] += hf * ff[a][p] / M.m[a];
+          x[loc[a]][p] += h * v[loc[a]][p];
+          xr[a][p] += h * v[loc[a]][p];
+        }
+      mb_fast_force(M, xr, ff);
+      for (int a = 0; a < M.n; a++)
+        for (int p = 0; p < 3; p++) v[loc[a]][p] += hf * ff[a][p] / M.m[a];
+    }
+    // everything else drifts
+    for (int i = 0; i < nlocal; i++) {
+      if (!(mask[i] & groupbit) || mb_member[i]) continue;
+      for (int k = 0; k < 3; k++) x[i][k] += h * v[i][k];
+    }
+    // O (whole outer step) in the middle of the inner loop
+    if ((s == omid - 1) || (nin == 1)) {
+      for (int i = 0; i < nlocal; i++) {
+        if (!(mask[i] & groupbit)) continue;
+        double mi = rmass ? rmass[i] : mass[type[i]];
+        double sv = s1s / sqrt(mi);
+        for (int k = 0; k < 3; k++) v[i][k] = c1s * v[i][k] + sv * random->gaussian();
+      }
+    }
+  }
+}
+
+// number of stiff internal modes of molecule M at its refresh geometry xr: the refresh Hessian
+// (M.Dref) diagonalized within the span of the mass-weighted bond/angle gradients (orthonormalized);
+// a mode is stiff if omega*dt > theta
+int FixBAOABTether::mb_stiff_modes(const MBMol &M, const double (*xr)[3]) const
+{
+  int n = M.n, N = 3 * n;
+  double conv = sqrt(force->ftm2v);
+  double E[MBN][MBN];
+  int ne = 0;
+  for (int q = 0; q < M.nic; q++) {
+    double g[MBN];
+    for (int A = 0; A < N; A++) g[A] = 0.0;
+    if (M.ic_type[q] == 0) {
+      int a = M.ic_at[q][0], b = M.ic_at[q][1];
+      double d[3] = {xr[a][0] - xr[b][0], xr[a][1] - xr[b][1], xr[a][2] - xr[b][2]};
+      double r = sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+      for (int p = 0; p < 3; p++) {
+        g[3 * a + p] = d[p] / r;
+        g[3 * b + p] = -d[p] / r;
+      }
+    } else {
+      int a = M.ic_at[q][0], b = M.ic_at[q][1], cc = M.ic_at[q][2];
+      double e1[3], e2[3], r1 = 0.0, r2 = 0.0;
+      for (int p = 0; p < 3; p++) {
+        e1[p] = xr[a][p] - xr[b][p];
+        e2[p] = xr[cc][p] - xr[b][p];
+        r1 += e1[p] * e1[p];
+        r2 += e2[p] * e2[p];
+      }
+      r1 = sqrt(r1);
+      r2 = sqrt(r2);
+      double cth = 0.0;
+      for (int p = 0; p < 3; p++) {
+        e1[p] /= r1;
+        e2[p] /= r2;
+        cth += e1[p] * e2[p];
+      }
+      double sth = sqrt(MAX(1.0 - cth * cth, 1.0e-12));
+      for (int p = 0; p < 3; p++) {
+        double ga = (cth * e1[p] - e2[p]) / (r1 * sth);
+        double gc = (cth * e2[p] - e1[p]) / (r2 * sth);
+        g[3 * a + p] = ga;
+        g[3 * cc + p] = gc;
+        g[3 * b + p] = -ga - gc;
+      }
+    }
+    for (int A = 0; A < N; A++) g[A] /= sqrt(M.m[A / 3]);
+    for (int e = 0; e < ne; e++) {
+      double dp = 0.0;
+      for (int A = 0; A < N; A++) dp += E[e][A] * g[A];
+      for (int A = 0; A < N; A++) g[A] -= dp * E[e][A];
+    }
+    double nn = 0.0;
+    for (int A = 0; A < N; A++) nn += g[A] * g[A];
+    if (nn < 1.0e-12) continue;
+    for (int A = 0; A < N; A++) E[ne][A] = g[A] / sqrt(nn);
+    ne++;
+  }
+  if (ne == 0) return 0;
+  double **K, **V, *ev;
+  memory->create(K, ne, ne, "baoab/tether:mbK");
+  memory->create(V, ne, ne, "baoab/tether:mbKV");
+  memory->create(ev, ne, "baoab/tether:mbKev");
+  for (int e = 0; e < ne; e++)
+    for (int f2 = 0; f2 < ne; f2++) {
+      double s = 0.0;
+      for (int A = 0; A < N; A++)
+        for (int B = 0; B < N; B++) s += E[e][A] * M.Dref[A][B] * E[f2][B];
+      K[e][f2] = s;
+    }
+  for (int e = 0; e < ne; e++)
+    for (int f2 = e + 1; f2 < ne; f2++) K[e][f2] = K[f2][e] = 0.5 * (K[e][f2] + K[f2][e]);
+  MathEigen::Jacobi<double, double *, double **, double const *const *> ecalc(ne);
+  ecalc.Diagonalize(K, ev, V);
+  int nstiff = 0;
+  for (int m = 0; m < ne; m++)
+    if ((ev[m] > 0.0) && (sqrt(ev[m]) * conv * update->dt > theta)) nstiff++;
+  memory->destroy(K);
+  memory->destroy(V);
+  memory->destroy(ev);
+  return nstiff;
+}
+
+void FixBAOABTether::mb_final_integrate()
+{
+  double **v = atom->v;
+  double **f = atom->f;
+  double *mass = atom->mass;
+  double *rmass = atom->rmass;
+  int *type = atom->type;
+  int *mask = atom->mask;
+  int nlocal = atom->nlocal;
+
+  mb_prepare();    // atom->f: raw -> slow force at the new x
+  for (int i = 0; i < nlocal; i++) {
+    if (!(mask[i] & groupbit)) continue;
+    double mi = rmass ? rmass[i] : mass[type[i]];
+    for (int k = 0; k < 3; k++) v[i][k] += dtf * f[i][k] / mi;
+  }
+}
+
+/* ----------------------------------------------------------------------
    finite-difference curvature-block acquisition (group atoms only):
    for each atom, 3 central-difference force probes (+-eps along x/y/z)
    give a 3x3 on-diagonal block; symmetrize, mass-weight, diagonalize via
@@ -1785,6 +2775,13 @@ void FixBAOABTether::refresh_blocks()
   double *rmass = atom->rmass;
   int *type = atom->type;
   int nlocal = atom->nlocal;
+
+  // eligibility bonded: refresh each owned atom's "has a bond" flag from the
+  // (symmetric, newton_bond off) per-atom bond count. Ghosts receive it via
+  // the same forward comm as om[] (see pack_forward_comm()).
+  if (eligibility_bonded && atom->num_bond) {
+    for (int i = 0; i < nlocal; i++) bonded[i] = (atom->num_bond[i] > 0) ? 1 : 0;
+  }
 
   // stage-4: both FD-probe loops below now go entirely through the local,
   // no-comm partial_force() kernel -- they read/write only local scratch
@@ -1866,10 +2863,21 @@ void FixBAOABTether::refresh_blocks()
     compute_om_split();
   }
 
+  if (molblock_diag) {
+    mb_Hown.assign((size_t) nlocal * 9, 0.0);
+    mb_X.assign((size_t) nlocal * 4 * 9, 0.0);
+    mb_tag.assign((size_t) nlocal * 4, 0);
+    mb_n.assign(nlocal, 0);
+    mb_collect = true;
+  }
   for (int i = 0; i < nlocal; i++) {
     if (!(mask[i] & groupbit)) continue;
     double xi[3] = {x[i][0], x[i][1], x[i][2]};
     refresh_one_atom(i, xi, false);
+  }
+  if (molblock_diag) {
+    mb_collect = false;
+    molblock_diagnostic();
   }
 
   // forgiveness (D.11.1): an atom that has gone a while without tripping a
@@ -1915,6 +2923,19 @@ void FixBAOABTether::refresh_blocks()
    diagonalizes; heff_samples>0 only re-diagonalizes at the first and last
    sample of the averaging window (see the inline comment below).
 ------------------------------------------------------------------------- */
+
+void FixBAOABTether::recoil_accumulate(int i, const double *Hck, double mj, double *dom2) const
+{
+  if (!recoil || mj <= 0.0) return;
+  for (int m = 0; m < 3; m++) {
+    if (!mode_is_stiff(i, m)) continue;
+    const double *e = &evecs[i][3 * m];
+    double q = 0.0;
+    for (int a = 0; a < 3; a++)
+      for (int b = 0; b < 3; b++) q += e[a] * Hck[3 * a + b] * e[b];
+    if (q > 0.0) dom2[m] += q / mj;
+  }
+}
 
 void FixBAOABTether::refresh_one_atom(int i, const double *xi, bool instantaneous)
 {
@@ -2046,6 +3067,39 @@ void FixBAOABTether::refresh_one_atom(int i, const double *xi, bool instantaneou
   for (int a = 0; a < 3; a++)
     for (int b = 0; b < 3; b++) Hs[a][b] = 0.5 * (H[a][b] + H[b][a]) / mi;
 
+  if (mb_collect && i < (int) mb_n.size()) {
+    const int MBMAX = 4;
+    for (int a = 0; a < 3; a++)
+      for (int b = 0; b < 3; b++) mb_Hown[(size_t) i * 9 + 3 * a + b] = 0.5 * (H[a][b] + H[b][a]);
+    int np = 0;
+    double *X = &mb_X[(size_t) i * MBMAX * 9];
+    tagint *T = &mb_tag[(size_t) i * MBMAX];
+    for (int s = 0; s < MBMAX * 9; s++) X[s] = 0.0;
+    // molecule partners = bonded/angle partners (their bonded columns), plus any pairwise column
+    // for the same tag (intramolecular non-bonded part, e.g. the excluded-pair Coulomb correction).
+    for (int k = 0; k < n_bond; k++) {
+      tagint t = bond_tag_buf[k];
+      int p = -1;
+      for (int q = 0; q < np; q++)
+        if (T[q] == t) p = q;
+      if (p < 0) {
+        if (np >= MBMAX) continue;
+        T[np] = t;
+        p = np++;
+      }
+      for (int s = 0; s < 9; s++) X[p * 9 + s] += Hc_bond[(size_t) k * 9 + s];
+    }
+    for (int k = 0; k < jnum; k++) {
+      tagint t = atom->tag[jlist[k] & NEIGHMASK];
+      int p = -1;
+      for (int q = 0; q < np; q++)
+        if (T[q] == t) p = q;
+      if (p < 0) continue;
+      for (int s = 0; s < 9; s++) X[p * 9 + s] += Hc[(size_t) k * 9 + s];
+    }
+    mb_n[i] = np;
+  }
+
   // thermally-averaged effective curvature (CLAUDE.md convention #3):
   // heff_samples==0 keeps the legacy instantaneous-every-refresh write
   // below unchanged. heff_samples>0 maintains a continuously-updating
@@ -2157,6 +3211,7 @@ void FixBAOABTether::refresh_one_atom(int i, const double *xi, bool instantaneou
   // demote_cool[] forward-communicated too and isn't) -- om[] now IS
   // forward-communicated to ghosts (see pack_forward_comm()) specifically
   // so this works for a possibly-ghost neighbor j.
+  double dom2[3] = {0.0, 0.0, 0.0};    // recoil: sum_j max(0, e_m^T Hc_j e_m)/m_j per mode
   int nk = 0;
   for (int k = 0; k < jnum; k++) {
     int j = jlist[k] & NEIGHMASK;
@@ -2164,13 +3219,14 @@ void FixBAOABTether::refresh_one_atom(int i, const double *xi, bool instantaneou
     bool j_eligible;
     if (adapt) {
       double om_min_j = MIN(om[j][0], MIN(om[j][1], om[j][2]));
-      j_eligible = (om_max_j > om_split) && (om_min_j > 0.6 * om_split);
+      j_eligible = (om_max_j > om_split) && (bonded_ok(j) || (om_min_j > 0.6 * om_split));
     } else {
       j_eligible = (om_max_j * sqrt(force->ftm2v) * update->dt) > theta;
     }
     if (j_eligible) continue;
     Jtag[i][nk] = atom->tag[j];
     const double *Hck = &Hc[(size_t) k * 9];
+    recoil_accumulate(i, Hck, rmass ? rmass[j] : mass[type[j]], dom2);
     // Jblk_k = Hc_k . S_i, so that the back-reaction is a plain matvec
     // at force_moll() time: f[j] += Jblk_k * g[i] (see force_moll()).
     mat3_matmat(Hck, Si, Jblk[i][nk]);
@@ -2199,9 +3255,24 @@ void FixBAOABTether::refresh_one_atom(int i, const double *xi, bool instantaneou
       error->one(FLERR, "Fix baoab/tether: atom exceeds JMAX ({}) combined pair+bond "
                          "neighbors for the sparse response block -- raise JMAX and recompile",
                  JMAX);
+    recoil_accumulate(i, &Hc_bond[(size_t) k * 9], rmass ? rmass[j] : mass[type[j]], dom2);
     Jtag[i][nk] = bond_tag_buf[k];
     mat3_matmat(&Hc_bond[(size_t) k * 9], Si, Jblk[i][nk]);
     nk++;
+  }
+
+  // Partner-recoil (reduced-mass) correction to the analytic mode frequencies. The stiff mode
+  // above was extracted from atom i's OWN curvature block with every neighbor held fixed, i.e.
+  // omega^2 = k/m_i; a free partner j sharing that coupling recoils and the mode actually runs at
+  // k/m_i + k/m_j (diatomic: reduced mass). Hc_j = dF_j/dx_i is exactly that coupling, so add
+  // e_m^T Hc_j e_m / m_j for every non-clamped neighbor. Negligible for a light atom in a heavy
+  // cage (H/Pd: ~mH/mPd), ~3% in omega for a water O-H stretch (m_H/m_O). Applied to om[] after
+  // the compliance Si above (the static response of the neighbors keeps the local stiffness).
+  if (recoil) {
+    for (int m = 0; m < 3; m++) {
+      if (dom2[m] > 0.0 && mode_is_stiff(i, m) && om[i][m] > 0.0)
+        om[i][m] = sqrt(om[i][m] * om[i][m] + dom2[m]);
+    }
   }
 
   nJ[i] = nk;
@@ -2271,7 +3342,7 @@ void FixBAOABTether::diag_check_staleness(int i, double mi, const bool *msk_cach
   } else {
     double om_max = MAX(om_fresh[0], MAX(om_fresh[1], om_fresh[2]));
     double om_min = MIN(om_fresh[0], MIN(om_fresh[1], om_fresh[2]));
-    bool eligible = (om_max > om_split) && (om_min > 0.6 * om_split);
+    bool eligible = (om_max > om_split) && (bonded_ok(i) || (om_min > 0.6 * om_split));
     for (int m = 0; m < 3; m++) msk_fresh[m] = eligible && (om_fresh[m] > om_split);
   }
 
@@ -2491,6 +3562,8 @@ void FixBAOABTether::update_dt(bool fresh_sample)
 
   double om_unres = 0.0;
   double om_analytic_max = 0.0;
+  int unres_type = 0;
+  std::vector<double> unres_all;
   for (int i = 0; i < nlocal; i++) {
     if (!(mask[i] & groupbit)) continue;
     // exile_substep: this atom is already safely self-integrating via
@@ -2510,9 +3583,24 @@ void FixBAOABTether::update_dt(bool fresh_sample)
     for (int m = 0; m < 3; m++) {
       if (mode_is_stiff(i, m))
         om_analytic_max = MAX(om_analytic_max, om[i][m] * om2real);
-      else
-        om_unres = MAX(om_unres, om[i][m] * om2real);
+      else {
+        double w = om[i][m] * om2real;
+        unres_all.push_back(w);
+        if (w > om_unres) {
+          om_unres = w;
+          unres_type = atom->type[i];
+        }
+      }
     }
+  }
+  diag_om_unres = om_unres;
+  diag_unres_type = unres_type;
+  diag_om_analytic = om_analytic_max;
+  diag_om_unres_p99 = 0.0;
+  if (!unres_all.empty()) {
+    size_t kq = (size_t) (0.99 * (double) (unres_all.size() - 1));
+    std::nth_element(unres_all.begin(), unres_all.begin() + kq, unres_all.end());
+    diag_om_unres_p99 = unres_all[kq];
   }
 
   if (comm->nprocs > 1) {
@@ -2727,7 +3815,12 @@ void FixBAOABTether::update_dt(bool fresh_sample)
       dt_lvl = MAX(dt_lvl + 1, (int) ceil(log(dt_max / dt_c) / log(2.0)));
       if (fresh_sample) settle_streak = 0;
     } else {
-      bool margin_ok = (dt_c > 1.25 * rung_dt);
+      // Relax up only if dt_c would ALSO survive the shrink test at the next (2x) rung, which
+      // fires below 0.85*(2*rung_dt) = 1.7*rung_dt. The old flat 1.25*rung_dt margin sat inside
+      // that band, so any dt_c in (1.25, 1.7)*rung_dt flipped the step between two rungs on
+      // every refresh (found on water: dt alternated 1.0/2.0 fs at every refresh). 1.87 =
+      // 1.7 plus a 10% margin; dt_c is clamped to dt_max, so the top rung stays reachable.
+      bool margin_ok = (dt_c > 1.87 * rung_dt);
 
       // settle_confirm (default 0 = disabled, exactly today's fixed-
       // duration lockout): while a dt_floor_until lockout from
@@ -2905,6 +3998,8 @@ void FixBAOABTether::solve_center(int i, double mi, double kT, double *cnew)
     double fout[3];
     partial_force(i, trial, fout);   // dispatches to full_system_force() internally when force_eval_full
     n_partial_force_calls++;
+    if (kspace_center && (i < (int) fks.size() / 3))
+      for (int k = 0; k < 3; k++) fout[k] += fks[3 * i + k];
     double r[3] = {0, 0, 0};
     for (int m = 0; m < 3; m++)
       if (msk[m])
@@ -2979,6 +4074,8 @@ void FixBAOABTether::solve_center(int i, double mi, double kT, double *cnew)
         else
           partial_force(i, trial_try, fout_try);
         n_partial_force_calls++;
+        if (kspace_center && (i < (int) fks.size() / 3))
+          for (int k = 0; k < 3; k++) fout_try[k] += fks[3 * i + k];
         r_try[0] = r_try[1] = r_try[2] = 0.0;
         for (int m = 0; m < 3; m++)
           if (msk[m])
@@ -3064,9 +4161,20 @@ void FixBAOABTether::solve_center(int i, double mi, double kT, double *cnew)
     bool g_f = (flip_rel >= 0.0) && (a_th > 0.0) && (flip > flip_rel * a_th);
     if (g_f) n_guard_flip++;
 
+    // Over-excitation energy: harmonic energy of the ATOM's displacement from its clamped
+    // center (q_now - q in the masked modes), exactly lj_longstep_prototype.py's
+    // harmE = 0.5*om_eff^2*|to_modal(xw - c)|^2. This used to be 0.5*mi*om^2*q^2 with q the
+    // CENTER's offset from the refresh position x0: that measures how far the clamped
+    // equilibrium has drifted since the last refresh, which is ~0 for a caged rattler (H/Pd)
+    // but grows ballistically for any atom whose cage moves with it (a water molecule
+    // translating/rotating carries its O-H axis along), tripping the guard on ordinary motion
+    // (water O-H: eharm/kT 0.1 -> 25+ within 10 steps, ~165 spurious demotions per 1500 steps).
     double eharm = 0.0;
     for (int m = 0; m < 3; m++)
-      if (msk[m]) eharm += 0.5 * mi * om[i][m] * om[i][m] * q[m] * q[m];
+      if (msk[m]) {
+        double dq_osc = q_now[m] - q[m];
+        eharm += 0.5 * mi * om[i][m] * om[i][m] * dq_osc * dq_osc;
+      }
     // a_th_mass_scale (see a_th's doc comment above): eharm =
     // 0.5*mi*om_native^2*q^2 is a RAW native-energy quantity (no leftover
     // mvv2e factor), so comparing it against energy_guard_rel*kT (kT
@@ -3184,7 +4292,7 @@ bool FixBAOABTether::neighbor_clamp_eligible(int j) const
   double om_max_j = MAX(om[j][0], MAX(om[j][1], om[j][2]));
   if (adapt) {
     double om_min_j = MIN(om[j][0], MIN(om[j][1], om[j][2]));
-    return (om_max_j > om_split) && (om_min_j > 0.6 * om_split);
+    return (om_max_j > om_split) && (bonded_ok(j) || (om_min_j > 0.6 * om_split));
   }
   return (om_max_j * sqrt(force->ftm2v) * update->dt) > theta;
 }
@@ -3306,9 +4414,13 @@ bool FixBAOABTether::partial_force(int i, const double *xtrial, double *fout, do
       double xreal_now[3] = {x[i][0], x[i][1], x[i][2]};
       double fout_full[3];
       full_system_force(i, xtrial, fout_full, nullptr, 0, nullptr);
-      double dmag = sqrt((fout[0]-fout_full[0])*(fout[0]-fout_full[0]) +
-                          (fout[1]-fout_full[1])*(fout[1]-fout_full[1]) +
-                          (fout[2]-fout_full[2])*(fout[2]-fout_full[2]));
+      // bonded terms are added to fout only AFTER this block (below), so compare the
+      // pair-only local force PLUS the bonded kernel against the complete full force
+      double fout_tot[3] = {fout[0], fout[1], fout[2]};
+      partial_force_add_bonded(i, xtrial, fout_tot, live_neighbor_positions, nullptr, nullptr, nullptr);
+      double dmag = sqrt((fout_tot[0]-fout_full[0])*(fout_tot[0]-fout_full[0]) +
+                          (fout_tot[1]-fout_full[1])*(fout_tot[1]-fout_full[1]) +
+                          (fout_tot[2]-fout_full[2])*(fout_tot[2]-fout_full[2]));
       double fmag = sqrt(fout_full[0]*fout_full[0] + fout_full[1]*fout_full[1] +
                           fout_full[2]*fout_full[2]);
       double disp = sqrt((xtrial[0]-xreal_now[0])*(xtrial[0]-xreal_now[0]) +
@@ -3344,7 +4456,7 @@ bool FixBAOABTether::partial_force(int i, const double *xtrial, double *fout, do
                      "|delta|={:.6g} |full|={:.6g} rel={:.6g}\n",
                      update->ntimestep, pforce_debug_tag, live_neighbor_positions, jnum, disp,
                      n_eligible_in_range, min_eligible_r,
-                     fout[0], fout[1], fout[2], fout_full[0], fout_full[1], fout_full[2],
+                     fout_tot[0], fout_tot[1], fout_tot[2], fout_full[0], fout_full[1], fout_full[2],
                      dmag, fmag, fmag > 0.0 ? dmag / fmag : 0.0);
 
       double fout_restore_dummy[3];
@@ -3383,8 +4495,17 @@ bool FixBAOABTether::partial_force(int i, const double *xtrial, double *fout, do
       continue;
     }
 
+    // Honor the special-bond bits the neighbor list carries on jlist[jj]: with a kspace style
+    // LAMMPS keeps excluded (bonded 1-2/1-3/1-4) pairs in the list so the pair style can apply
+    // its excluded-pair correction (factor 0 => subtract the reciprocal-space part). Hard-coding
+    // factors of 1.0 here evaluated those pairs as full Coulomb, a spurious ~100 kcal/mol/A
+    // force on a water O-H pair in the Newton solve and FD curvature probe (found 2026-11-05;
+    // force_eval full, which calls the real pair->compute(), was stable). For pair styles
+    // without special neighbors the bits are 0 => factors 1.0, identical to before.
+    int sb = (jlist[jj] >> SBBITS) & 3;
     double fpair = 0.0;
-    force->pair->single(i, j, itype, jtype, rsq, 1.0, 1.0, fpair);
+    force->pair->single(i, j, itype, jtype, rsq, force->special_coul[sb], force->special_lj[sb],
+                        fpair);
     fout[0] += delx * fpair;
     fout[1] += dely * fpair;
     fout[2] += delz * fpair;
@@ -3954,6 +5075,26 @@ void FixBAOABTether::teacher_outer_kick()
   }
 }
 
+/* ----------------------------------------------------------------------
+   kspace_center: per-atom k-space force at the current configuration
+------------------------------------------------------------------------- */
+
+void FixBAOABTether::kspace_snapshot()
+{
+  int nlocal = atom->nlocal;
+  fks.assign((size_t) 3 * nlocal, 0.0);
+  if (!force->kspace) return;
+  double **f = atom->f;
+  int ntotal = nlocal + atom->nghost;
+  std::vector<double> fsave(3 * ntotal);
+  if (ntotal) memcpy(fsave.data(), &f[0][0], 3 * ntotal * sizeof(double));
+  force_clear_local();
+  force->kspace->compute(0, 0);
+  for (int i = 0; i < nlocal; i++)
+    for (int k = 0; k < 3; k++) fks[3 * i + k] = f[i][k];
+  if (ntotal) memcpy(&f[0][0], fsave.data(), 3 * ntotal * sizeof(double));
+}
+
 /* ---------------------------------------------------------------------- */
 
 void FixBAOABTether::force_clear_local()
@@ -4025,6 +5166,10 @@ double FixBAOABTether::compute_vector(int n)
     case 9: return (double) n_mask_stale_soft;
     case 10: return (double) n_mask_stale_tight;
     case 11: return (double) n_teacher_calls;
+    case 12: return diag_om_unres;
+    case 13: return (double) diag_unres_type;
+    case 14: return diag_om_unres_p99;
+    case 15: return diag_om_analytic;
     default: return 0.0;
   }
 }
@@ -4044,6 +5189,7 @@ void FixBAOABTether::grow_arrays(int nmax)
   memory->grow(Jblk, nmax, JMAX, 9, "baoab/tether:Jblk");
 
   memory->grow(demote_count, nmax, "baoab/tether:demote_count");
+  memory->grow(bonded, nmax, "baoab/tether:bonded");
   memory->grow(last_demote, nmax, "baoab/tether:last_demote");
   memory->grow(demote_cool, nmax, "baoab/tether:demote_cool");
   memory->grow(quench_exempt, nmax, "baoab/tether:quench_exempt");
@@ -4067,6 +5213,7 @@ void FixBAOABTether::grow_arrays(int nmax)
   // undetected) out-of-bounds read/write, not a hypothetical one.
   for (int i = 0; i < nmax; i++) {
     demote_count[i] = 0;
+    bonded[i] = 0;
     last_demote[i] = 0;
     demote_cool[i] = 0;
     quench_exempt[i] = 0;
@@ -4096,6 +5243,7 @@ void FixBAOABTether::copy_arrays(int i, int j, int /*delflag*/)
   }
 
   demote_count[j] = demote_count[i];
+  bonded[j] = bonded[i];
   last_demote[j] = last_demote[i];
   demote_cool[j] = demote_cool[i];
   quench_exempt[j] = quench_exempt[i];
@@ -4122,6 +5270,7 @@ int FixBAOABTether::pack_exchange(int i, double *buf)
   }
 
   buf[m++] = ubuf(demote_count[i]).d;
+  buf[m++] = ubuf(bonded[i]).d;
   buf[m++] = ubuf(last_demote[i]).d;
   buf[m++] = ubuf(demote_cool[i]).d;
   buf[m++] = ubuf(quench_exempt[i]).d;
@@ -4149,6 +5298,7 @@ int FixBAOABTether::unpack_exchange(int nlocal, double *buf)
   }
 
   demote_count[nlocal] = (int) ubuf(buf[m++]).i;
+  bonded[nlocal] = (int) ubuf(buf[m++]).i;
   last_demote[nlocal] = (bigint) ubuf(buf[m++]).i;
   demote_cool[nlocal] = (bigint) ubuf(buf[m++]).i;
   quench_exempt[nlocal] = (bigint) ubuf(buf[m++]).i;
@@ -4186,6 +5336,7 @@ int FixBAOABTether::pack_forward_comm(int n, int *list, double *buf, int pbc_fla
       buf[m++] = om[j][0];
       buf[m++] = om[j][1];
       buf[m++] = om[j][2];
+      buf[m++] = (double) bonded[j];
     }
   } else {
     double dx, dy, dz;
@@ -4207,6 +5358,7 @@ int FixBAOABTether::pack_forward_comm(int n, int *list, double *buf, int pbc_fla
       buf[m++] = om[j][0];
       buf[m++] = om[j][1];
       buf[m++] = om[j][2];
+      buf[m++] = (double) bonded[j];
     }
   }
   return m;
@@ -4225,5 +5377,6 @@ void FixBAOABTether::unpack_forward_comm(int n, int first, double *buf)
     om[i][0] = buf[m++];
     om[i][1] = buf[m++];
     om[i][2] = buf[m++];
+    bonded[i] = (int) buf[m++];
   }
 }

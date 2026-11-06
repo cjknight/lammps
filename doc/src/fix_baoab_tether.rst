@@ -16,7 +16,7 @@ Syntax
 * damp = damping parameter (time units)
 * seed = random number seed (positive integer)
 * two or more keyword/value pairs must be appended
-* keyword = *theta* or *refresh* or *heff_samples* or *promote_every* or *settle_confirm* or *eps* or *mollify* or *newton_iters* or *newton_damp* or *solve_tol_rel* or *force_eval* or *adapt* or *c_acc* or *dt_min* or *dt_max* or *ke_rel* or *ke_rel_refresh* or *ke_rel_margin_blocks* or *gamma_quench* or *gamma_quench_calib_gain* or *gamma_quench_calib_max_step* or *gamma_quench_calib_confirm* or *gamma_quench_calib_deadband* or *gamma_quench_calib_ceiling* or *gamma_quench_calib_refresh* or *refresh_skin* or *refresh_skin_rel* or *drift_response* or *exile_substep* or *preshrink_exile* or *event_log*
+* keyword = *theta* or *refresh* or *heff_samples* or *promote_every* or *settle_confirm* or *eps* or *mollify* or *newton_iters* or *newton_damp* or *solve_tol_rel* or *force_eval* or *adapt* or *c_acc* or *dt_min* or *dt_max* or *ke_rel* or *ke_rel_refresh* or *ke_rel_margin_blocks* or *gamma_quench* or *gamma_quench_calib_gain* or *gamma_quench_calib_max_step* or *gamma_quench_calib_confirm* or *gamma_quench_calib_deadband* or *gamma_quench_calib_ceiling* or *gamma_quench_calib_refresh* or *refresh_skin* or *refresh_skin_rel* or *drift_response* or *exile_substep* or *preshrink_exile* or *gamma_soft* or *eligibility* or *newton_res_length* or *recoil* or *molblock* or *molblock_inner* or *molblock_verbose* or *molblock_diag* or *event_log*
 
   .. parsed-literal::
 
@@ -130,10 +130,25 @@ Syntax
          *refresh_skin_rel* is > 0)
        *exile_substep* value = *yes* or *no* (optional; default *no*;
          only used if *adapt* is *yes*)
+       *recoil* value = *yes* or *no* (optional; default *yes*)
        *preshrink_exile* value = *yes* or *no* (optional; default *no*;
          requires *exile_substep yes*; only used if *drift_response* is
          *preshrink*). Not currently recommended for production use; see
          the Description below.
+       *gamma_soft* value = friction rate in 1/time for modes that are not
+         clamped analytically (optional; default 1/*damp*)
+       *eligibility* value = *all_modes* or *bonded* (optional; default
+         *all_modes*; only used if *adapt* is *yes*; *bonded* requires a
+         molecular atom style with a bond style)
+       *newton_res_length* value = *yes* or *no* (optional; default *no*)
+       *molblock* value = *yes* or *no* (optional; default *no*; requires
+         *mollify yes*, *adapt no*, and a molecular atom style)
+       *molblock_inner* value = number of inner substeps per timestep,
+         must be >= 0 (optional; default 0, which selects the number
+         automatically; only used if *molblock* is *yes*)
+       *molblock_verbose* value = *yes* or *no* (optional; default *no*;
+         only used if *molblock* is *yes*)
+       *molblock_diag* value = *yes* or *no* (optional; default *no*)
        *event_log* value = filename for a per-atom/per-event diagnostic
          log (optional; default none, which disables this log entirely)
 
@@ -165,6 +180,8 @@ Examples
          mollify yes adapt yes c_acc 0.25 dt_min 0.0002 dt_max 0.01 &
          ke_rel 25.0 gamma_quench auto calib 2000 2000 &
          refresh_skin 0.1 drift_response preshrink event_log tether.log
+   fix 1 all baoab/tether 300.0 300.0 1000.0 12345 theta 0.2 refresh 10 &
+         mollify yes molblock yes gamma_soft 0.001
 
 .. versionadded:: TBD
 
@@ -755,6 +772,113 @@ cross-*group* limitation this does not address.
 
 ----------
 
+The *damp* argument and the *gamma_soft* keyword set the strength of the
+Langevin thermostat in the run's own time units (*damp* is a relaxation
+time, *gamma_soft* a rate). *gamma_soft* applies a baseline thermostat to
+the modes that are not clamped analytically; if it is not given it defaults
+to 1/*damp*, so a single physical relaxation time governs the whole fix.
+Giving *gamma_soft 0* explicitly turns that baseline thermostat off. Because
+these values are in time units, a number copied from one unit style to
+another (for example 0.1 in metal units, i.e. picoseconds, used in real
+units, i.e. femtoseconds) is wrong by orders of magnitude and would make the
+thermostat re-randomize every velocity on every step, producing a stable
+looking but physically meaningless trajectory. The fix therefore stops with
+an error if either rate multiplied by the largest timestep (*dt_max* with
+*adapt yes*, otherwise the current timestep) exceeds 1. A typical choice is
+a *damp* of about 100 times the largest timestep.
+
+The *eligibility* keyword selects which atoms may have a mode clamped
+analytically when *adapt* is *yes*. The default, *all_modes*, requires every
+one of an atom's three modes to exceed 0.6 times the spectral split, which
+suits cage-confined rattlers (for example hydrogen in a metal lattice) and
+deliberately excludes an atom that is stiff in only one direction, such as
+a transiently compressed pair mid-collision. With *eligibility bonded* an
+atom that has at least one bond skips that all-modes test, so a single
+stiff mode (for example an O-H stretch in flexible water) can be clamped
+while the atom's other modes remain unresolved. This is an approximation
+that is valid only while the bond topology is fixed: it must not be used
+for reactive systems or for models that have no bond topology. It requires
+*adapt yes*, a molecular atom style, and a bond style, and with *mollify
+yes* the usual *newton_bond off* requirement applies.
+
+The *newton_res_length* keyword selects the units of the residual that the
+damped-Newton center solve compares against its convergence tolerance and
+against the *newton_tol_rel* guard. With *no* (default) the residual is the
+projected force, which is compared against a thermal amplitude (a length);
+this mismatch is harmless when the effective spring constant is of order one
+(hydrogen in palladium, metal units) but is wrong by that spring constant in
+general. With *yes* the residual is the Newton step length, and the
+comparison is dimensionally consistent. Use *yes* for systems with stiff
+bonded modes, such as flexible water in real units.
+
+----------
+
+.. versionadded:: TBD
+
+The *molblock* keyword replaces the per-atom treatment described above with
+a multiple time step integrator for small, stiff, bonded molecules, such as
+flexible water.  A molecule here is an atom together with its bond and angle
+partners, at most 5 atoms in total.  At every curvature refresh the fix
+assembles the full second-derivative matrix of each molecule from the same
+finite-difference probes it uses for the per-atom blocks.  If any internal
+vibration of a molecule is faster than the *theta* threshold allows, every
+bond length and bond angle of that molecule is included in a "fast" harmonic
+model, :math:`V_{\rm fast} = \frac{1}{2}(s - s_0)^T F (s - s_0)`, where
+*s* holds the bond lengths and angles.  The force constants *F* are
+extracted from the measured second derivatives and forces (the Wilson GF
+method), so they follow whatever force field or machine-learned potential is
+in use, including the influence of neighboring molecules; no fast/slow split
+of the force field itself has to be specified.  The reference values
+:math:`s_0` are set once, at the molecule's equilibrium position in its
+environment at the first step, and are kept for the rest of the run.
+
+Each timestep then applies half a kick from the remaining ("slow") force,
+the full force minus the fast model force, followed by several short
+velocity-Verlet substeps that use only the fast model force, which needs no
+force evaluations, and ends with another slow half kick.  The Langevin
+thermostat, with rate *gamma_soft*, is applied once per timestep in the
+middle of the substeps.  Atoms that are not part of a stiff molecule simply
+drift during the substeps.  When the force constants are refreshed, the
+timestep in progress completes with the old constants and the new constants
+take effect at the start of the next timestep, so that every timestep is a
+consistent splitting of the same total force.  Only one force evaluation is
+needed per timestep, as in plain velocity Verlet, plus the curvature probes
+at each refresh.
+
+The *molblock_inner* keyword sets the number of substeps.  With the
+default of 0 the fix chooses, at every refresh, the smallest even number
+(at least 2) that keeps the fastest fast-model frequency times the substep
+length at or below 0.3.  For flexible SPC/Fw water in real units this gives
+6 substeps at a 2 fs timestep.  In tests on flexible SPC/Fw water at 300 K,
+timesteps of 2 to 4 fs reproduced the temperature, the stretch and bend
+peaks of the velocity spectrum, the radial distribution functions, and the
+diffusion coefficient of a 0.5 fs velocity-Verlet reference within
+statistical uncertainty; the librational band of the spectrum is about 10
+percent weaker relative to the stretch peak.  With the thermostat off, the
+total energy drift at 1 and 2 fs is comparable to that of :doc:`run_style
+respa <run_style>` with the bonded terms on the inner level, and somewhat
+larger at 4 fs.
+
+The *molblock_verbose* keyword prints, at every refresh, the number of
+molecules and fast coordinates, the fastest frequency times the timestep,
+and the number of substeps, together with the force constants of one
+molecule at the first refresh.
+
+The *molblock_diag* keyword is a diagnostic that changes no dynamics.  At
+every refresh it assembles each molecule's second-derivative matrix as
+above and prints a summary of its internal and rigid-body frequencies.
+
+*molblock* requires *mollify yes* (which provides the finite-difference
+probes and the *newton_bond off* bond and angle storage it relies on), a
+molecular atom style, and *adapt no*; the timestep stays fixed.  All atoms
+of a molecule must be owned by the same processor; a molecule that is not
+receives the full force once per timestep without a fast model, which is
+unstable for stiff bonds at long timesteps, so in practice *molblock* is
+currently limited to runs on a single processor.  The bonds and angles of a molecule
+must be independent of each other, which excludes linear molecules and
+molecules with rings; the fix stops with an error otherwise.
+
+
 Restart, fix_modify, output, run start/stop, minimize info
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
@@ -763,7 +887,32 @@ No information about this fix is written to :doc:`binary restart files
 
 .. versionchanged:: TBD
 
-This fix computes a global vector of length 8, which can be accessed by
+.. versionadded:: TBD
+
+The *recoil* keyword controls a reduced-mass correction to the frequency
+of every mode that is treated analytically.  Such a mode is extracted
+from one atom's own curvature block with all neighbors held fixed, which
+gives a frequency of sqrt(k/m) for that atom.  If the neighbor that
+supplies the restoring force is free to move, the mode actually runs at
+sqrt(k/m + k/M), where M is the neighbor's mass.  For each analytic mode
+the fix therefore adds the neighbors' coupling to that mode divided by
+the neighbor mass, using the response blocks it already measures.  The
+correction is negligible for a light atom in a cage of heavy atoms (a
+hydrogen atom in palladium) and about 3 percent in frequency for the
+O-H stretch of water, where it moves the stretch peak of the
+velocity spectrum from about 3500 to about 3610 inverse centimeters
+(reference: about 3690).  Setting *recoil no* restores the uncorrected
+frequencies.
+
+.. versionchanged:: TBD
+
+The adaptive timestep ladder now raises the timestep one rung only when the
+estimated stable step exceeds 1.87 times the current rung.  Previously the
+threshold was 1.25 times the rung, which lies inside the band where the
+step is lowered again at the next rung, so the timestep could alternate
+between two rungs at every refresh.
+
+This fix computes a global vector of length 16, which can be accessed by
 various :doc:`output commands <Howto_output>`. The values are, in order:
 the running count of Newton non-convergence guard trips, the running
 count of center "flip" guard trips, the running count of over-excited
@@ -785,6 +934,15 @@ block in play across enough steps for it to be exercised). The first
 three and the 6th/7th entries are diagnostic only except when *adapt* is
 *yes*, in which case the first three drive actual demotion events (see
 above). The vector values calculated by this fix are "extensive".
+
+The 9th through 12th entries are diagnostic counters for the stale-mask
+checks and the teacher force calls.  The 13th through 16th entries report,
+as of the most recent timestep selection, the highest frequency among
+modes that are not treated analytically (this sets the adaptive timestep),
+the LAMMPS atom type that owns it, the 99th percentile of the same
+frequencies on this processor, and the highest frequency among modes that
+are treated analytically.  Frequencies are in radians per unit of time
+of the active unit style.  They are 0 unless *adapt* is *yes*.
 
 This fix is not invoked during :doc:`energy minimization <minimize>`.
 
@@ -875,5 +1033,8 @@ defaults to 2.0. *gamma_quench_calib_confirm* defaults to 3.
 *refresh_skin* defaults to 0.0.
 *refresh_skin_rel* defaults to 0.0. *promote_every* defaults to 0.
 *settle_confirm* defaults to 0. *drift_response* defaults to *retether*.
-*exile_substep* defaults to *no*. *preshrink_exile* defaults to *no*.
+*exile_substep* defaults to *no*. *preshrink_exile* defaults to *no*. *recoil* defaults to *yes*.
+*gamma_soft* defaults to 1/*damp*. *eligibility* defaults to *all_modes*. *newton_res_length* defaults to *no*.
+*molblock* defaults to *no*. *molblock_inner* defaults to 0. *molblock_verbose* defaults to *no*.
+*molblock_diag* defaults to *no*.
 *event_log* defaults to unset (disabled).
