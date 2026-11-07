@@ -41,6 +41,7 @@
 #include <cmath>
 #include <cstring>
 #include <memory>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -635,12 +636,13 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   maxexchange = 3 + 3 + 9 + 3 + 9 + 1 + 1 + JMAX * (1 + 9) + 4 + 1 + 1;
 
   // molblock per-atom molecule state, sized for the largest set of bonds and angles any one atom
-  // takes part in (a molecule with more is rejected at its first refresh)
+  // takes part in, counting each angle twice (a near-linear angle becomes two bend coordinates; a
+  // molecule with more is rejected at its first refresh)
   if (molblock) {
     int nicmax = 0;
     for (int i = 0; i < atom->nlocal; i++) {
       int n = atom->num_bond ? atom->num_bond[i] : 0;
-      if (atom->num_angle) n += atom->num_angle[i];
+      if (atom->num_angle) n += 2 * atom->num_angle[i];
       nicmax = MAX(nicmax, n);
     }
     MPI_Allreduce(&nicmax, &mb_nicmax, 1, MPI_INT, MPI_MAX, world);
@@ -2243,19 +2245,33 @@ void FixBAOABTether::mb_unpack(MBMol &M, const double *buf) const
 void FixBAOABTether::mb_gather()
 {
   int nlocal = atom->nlocal;
+  tagint *tag = atom->tag;
   mbmols.clear();
   mb_aidx.clear();
-  std::unordered_set<tagint> seen;
+  // a ghost anchor's state is kept on its image nearest the molecule's lowest-ID owned atom (owned
+  // atoms of one molecule can sit in different periodic images, so "nearest an owned atom" alone is
+  // ambiguous); mb_refresh() uses the same rule
+  std::unordered_map<tagint, int> first;
+  std::vector<tagint> order;
   for (int i = 0; i < nlocal; i++) {
     tagint t = mb_anc[i];
-    if ((t == 0) || seen.count(t)) continue;
-    seen.insert(t);
+    if (t == 0) continue;
+    auto it = first.find(t);
+    if (it == first.end()) {
+      first[t] = i;
+      order.push_back(t);
+    } else if (tag[i] < tag[it->second]) {
+      it->second = i;
+    }
+  }
+  for (tagint t : order) {
+    int i = first[t];
     int j = atom->map(t);
     if (j >= nlocal) j = domain->closest_image(i, j);
     if ((j < 0) || (mb_state[j][0] == 0.0))
       error->one(FLERR, "Fix baoab/tether molblock: the molecule of atom ID {} is not fully within "
                  "this processor's ghost atoms; increase the communication cutoff (comm_modify cutoff)",
-                 atom->tag[i]);
+                 tag[i]);
     MBMol M;
     mb_unpack(M, mb_state[j]);
     mbmols.push_back(M);
@@ -2322,6 +2338,8 @@ template <int W> static bool mb_solve(int n, double (*A)[W], double *b)
   }
   return true;
 }
+
+static int mb_lin_axis(const double (*xr)[3], int a, int c, double *e);
 
 void FixBAOABTether::mb_refresh()
 {
@@ -2493,6 +2511,32 @@ void FixBAOABTether::mb_refresh()
         }
       }
     }
+    // angles above 150 degrees at the refresh geometry become linear bends (two coordinates)
+    for (int q = 0; q < M.nic; q++) {
+      if (M.ic_type[q] != 1) continue;
+      int a = M.ic_at[q][0], b = M.ic_at[q][1], cc = M.ic_at[q][2];
+      double e1[3], e2[3], r1 = 0.0, r2 = 0.0, d = 0.0;
+      for (int p = 0; p < 3; p++) {
+        e1[p] = M.xref[a][p] - M.xref[b][p];
+        e2[p] = M.xref[cc][p] - M.xref[b][p];
+        r1 += e1[p] * e1[p];
+        r2 += e2[p] * e2[p];
+        d += e1[p] * e2[p];
+      }
+      if (d / sqrt(r1 * r2) > cos(150.0 * MathConst::MY_PI / 180.0)) continue;
+      if (M.nic >= MBN) error->one(FLERR, "Fix baoab/tether molblock: molecule too large");
+      for (int r = M.nic; r > q + 1; r--) {
+        M.ic_type[r] = M.ic_type[r - 1];
+        for (int k = 0; k < 3; k++) M.ic_at[r][k] = M.ic_at[r - 1][k];
+      }
+      double e[3];
+      int ax = mb_lin_axis(M.xref, a, cc, e);
+      M.ic_type[q] = 2 + 2 * ax;
+      M.ic_type[q + 1] = 3 + 2 * ax;
+      for (int k = 0; k < 3; k++) M.ic_at[q + 1][k] = M.ic_at[q][k];
+      M.nic++;
+      q++;
+    }
     if (M.nic > mb_nicmax)
       error->one(FLERR, "Fix baoab/tether molblock: the molecule with atom ID {} has more bonds and "
                  "angles ({}) than any one of its atoms takes part in; this molecule shape is not "
@@ -2522,7 +2566,7 @@ void FixBAOABTether::mb_refresh()
       if ((O.tag[0] != M.tag[0]) || (O.nic != M.nic)) continue;
       bool same = true;
       for (int q = 0; q < M.nic; q++)
-        if ((O.ic_type[q] != M.ic_type[q]) || (O.ic_at[q][0] != M.ic_at[q][0]) ||
+        if ((MIN(O.ic_type[q], 2) != MIN(M.ic_type[q], 2)) || (O.ic_at[q][0] != M.ic_at[q][0]) ||
             (O.ic_at[q][1] != M.ic_at[q][1]))
           same = false;
       if (!same) break;
@@ -2570,6 +2614,73 @@ void FixBAOABTether::mb_refresh()
 
 
 
+/* linear bend of a near-linear triple (a,b,c): a single angle cannot describe the bend of a linear
+   molecule (two perpendicular directions; no defined direction of change at 180 degrees). It is
+   replaced by the two components of the displacement of the middle atom b from the line a-c,
+   d = P (x_b - x_a), P = 1 - e e^T, e = (x_c - x_a)/|x_c - x_a|, along two unit vectors u1, u2
+   perpendicular to e (u1 from the lab axis stored in the coordinate type, u2 = e x u1). The bend
+   block of the force constants is kept isotropic (k times the unit matrix) and uncoupled from the
+   other coordinates, and its reference is d = 0 (both exact by symmetry for a linear equilibrium),
+   so the fast energy 1/2 k |d|^2 and its force do not depend on the choice of u1, u2. */
+static void mb_lin_frame(const double *e, int ax, double u[2][3])
+{
+  double nn = 0.0;
+  for (int p = 0; p < 3; p++) {
+    u[0][p] = ((p == ax) ? 1.0 : 0.0) - e[ax] * e[p];
+    nn += u[0][p] * u[0][p];
+  }
+  nn = sqrt(nn);
+  for (int p = 0; p < 3; p++) u[0][p] /= nn;
+  u[1][0] = e[1] * u[0][2] - e[2] * u[0][1];
+  u[1][1] = e[2] * u[0][0] - e[0] * u[0][2];
+  u[1][2] = e[0] * u[0][1] - e[1] * u[0][0];
+}
+
+// unit vector from atom a to atom c and the lab axis least aligned with it
+static int mb_lin_axis(const double (*xr)[3], int a, int c, double *e)
+{
+  double nn = 0.0;
+  for (int p = 0; p < 3; p++) {
+    e[p] = xr[c][p] - xr[a][p];
+    nn += e[p] * e[p];
+  }
+  nn = sqrt(nn);
+  int ax = 0;
+  for (int p = 0; p < 3; p++) {
+    e[p] /= nn;
+    if (fabs(e[p]) < fabs(e[ax])) ax = p;
+  }
+  return ax;
+}
+
+// bend block of linear bends made isotropic and uncoupled (see mb_lin_frame) in matrix F
+void FixBAOABTether::mb_lin_sym(MBMol &M, double (*F)[MBN]) const
+{
+  for (int q = 0; q + 1 < M.nic; q++) {
+    if ((M.ic_type[q] < 2) || ((M.ic_type[q] - 2) % 2 != 0)) continue;
+    int q2 = q + 1;
+    double k = 0.5 * (F[q][q] + F[q2][q2]);
+    for (int r = 0; r < M.nic; r++) F[q][r] = F[r][q] = F[q2][r] = F[r][q2] = 0.0;
+    F[q][q] = F[q2][q2] = k;
+  }
+}
+
+// re-pick the frame axis of linear bends whose line has turned toward it (keeps u1 well defined);
+// the next step-to-step difference is skipped, its two ends would be in different frames
+void FixBAOABTether::mb_lin_reframe(MBMol &M, const double (*xr)[3]) const
+{
+  for (int q = 0; q + 1 < M.nic; q++) {
+    if ((M.ic_type[q] < 2) || ((M.ic_type[q] - 2) % 2 != 0)) continue;
+    double e[3];
+    int ax = mb_lin_axis(xr, M.ic_at[q][0], M.ic_at[q][2], e);
+    int cur = (M.ic_type[q] - 2) / 2;
+    if (fabs(e[cur]) < 0.8) continue;
+    M.ic_type[q] = 2 + 2 * ax;
+    M.ic_type[q + 1] = 3 + 2 * ax;
+    M.hprev = false;
+  }
+}
+
 // internal coordinate values and Cartesian gradients (rows) of molecule M at geometry xr
 void FixBAOABTether::mb_ic_eval(const MBMol &M, const double (*xr)[3], double *sig,
                                 double (*Bc)[MBN]) const
@@ -2577,7 +2688,30 @@ void FixBAOABTether::mb_ic_eval(const MBMol &M, const double (*xr)[3], double *s
   int N = 3 * M.n;
   for (int q = 0; q < M.nic; q++) {
     for (int A = 0; A < N; A++) Bc[q][A] = 0.0;
-    if (M.ic_type[q] == 0) {
+    if (M.ic_type[q] >= 2) {
+      // linear bend component: d_i = u_i . P (x_b - x_a); gradient rows u_i on b, -t u_i on c,
+      // -(1 - t) u_i on a, t = e . (x_b - x_a) / |x_c - x_a| (frame held fixed, see mb_lin_frame)
+      int a = M.ic_at[q][0], b = M.ic_at[q][1], cc = M.ic_at[q][2];
+      int comp = (M.ic_type[q] - 2) % 2, ax = (M.ic_type[q] - 2) / 2;
+      double e[3], u[2][3], r[3], L = 0.0, er = 0.0;
+      mb_lin_axis(xr, a, cc, e);
+      mb_lin_frame(e, ax, u);
+      for (int p = 0; p < 3; p++) {
+        r[p] = xr[b][p] - xr[a][p];
+        double lp = xr[cc][p] - xr[a][p];
+        L += lp * lp;
+        er += e[p] * r[p];
+      }
+      L = sqrt(L);
+      double t = er / L, s = 0.0;
+      for (int p = 0; p < 3; p++) s += u[comp][p] * (r[p] - er * e[p]);
+      sig[q] = s;
+      for (int p = 0; p < 3; p++) {
+        Bc[q][3 * b + p] = u[comp][p];
+        Bc[q][3 * cc + p] = -t * u[comp][p];
+        Bc[q][3 * a + p] = -(1.0 - t) * u[comp][p];
+      }
+    } else if (M.ic_type[q] == 0) {
       int a = M.ic_at[q][0], b = M.ic_at[q][1];
       double d[3] = {xr[a][0] - xr[b][0], xr[a][1] - xr[b][1], xr[a][2] - xr[b][2]};
       double r = sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
@@ -2680,6 +2814,7 @@ void FixBAOABTether::mb_gf_forceconst(MBMol &M, const double (*xr)[3], const dou
     }
   for (int q = 0; q < nc; q++)
     for (int r = q + 1; r < nc; r++) M.Fic[q][r] = M.Fic[r][q] = 0.5 * (M.Fic[q][r] + M.Fic[r][q]);
+  mb_lin_sym(M, M.Fic);
 }
 
 // at refresh: GF normal-mode frequencies of the fast internal coordinates with force constants
@@ -2835,6 +2970,7 @@ void FixBAOABTether::mb_reestimate()
       double L[MBN][MBN];
       for (int q = 0; q < nc; q++)
         for (int r = q; r < nc; r++) Fb[q][r] = Fb[r][q] = 0.5 * (Fb[q][r] + Fb[r][q]);
+      mb_lin_sym(M, Fb);
       for (int q = 0; (q < nc) && ok; q++)
         for (int r = 0; r <= q; r++) {
           double s = Fb[q][r];
@@ -2926,6 +3062,7 @@ void FixBAOABTether::mb_prepare()
       if (loc[a] < nlocal) mb_member[loc[a]] = 1;
     int nc = M.nic;
     if (nc == 0) continue;
+    mb_lin_reframe(M, xr);
     double sg[MBN], phi[MBN];
     mb_ic_force(M, xr, loc, sg, phi);
     // trajectory estimate of F: consecutive differences, dphi = -F ds (the slowly moving center
@@ -2955,7 +3092,7 @@ void FixBAOABTether::mb_prepare()
         for (int r = 0; r < nc; r++) Fm[q][r] = M.Fic[q][r];
       }
       mb_solve(nc, Fm, d);
-      for (int q = 0; q < nc; q++) M.sig0[q] = sg[q] + d[q];
+      for (int q = 0; q < nc; q++) M.sig0[q] = (M.ic_type[q] >= 2) ? 0.0 : sg[q] + d[q];
       M.have_s0 = true;
     }
     double ff[MBA][3];
@@ -3074,46 +3211,12 @@ int FixBAOABTether::mb_stiff_modes(const MBMol &M, const double (*xr)[3]) const
 {
   int n = M.n, N = 3 * n;
   double conv = sqrt(force->ftm2v);
-  double E[MBN][MBN];
+  double E[MBN][MBN], sg[MBN], Bc[MBN][MBN];
   int ne = 0;
+  mb_ic_eval(M, xr, sg, Bc);
   for (int q = 0; q < M.nic; q++) {
     double g[MBN];
-    for (int A = 0; A < N; A++) g[A] = 0.0;
-    if (M.ic_type[q] == 0) {
-      int a = M.ic_at[q][0], b = M.ic_at[q][1];
-      double d[3] = {xr[a][0] - xr[b][0], xr[a][1] - xr[b][1], xr[a][2] - xr[b][2]};
-      double r = sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
-      for (int p = 0; p < 3; p++) {
-        g[3 * a + p] = d[p] / r;
-        g[3 * b + p] = -d[p] / r;
-      }
-    } else {
-      int a = M.ic_at[q][0], b = M.ic_at[q][1], cc = M.ic_at[q][2];
-      double e1[3], e2[3], r1 = 0.0, r2 = 0.0;
-      for (int p = 0; p < 3; p++) {
-        e1[p] = xr[a][p] - xr[b][p];
-        e2[p] = xr[cc][p] - xr[b][p];
-        r1 += e1[p] * e1[p];
-        r2 += e2[p] * e2[p];
-      }
-      r1 = sqrt(r1);
-      r2 = sqrt(r2);
-      double cth = 0.0;
-      for (int p = 0; p < 3; p++) {
-        e1[p] /= r1;
-        e2[p] /= r2;
-        cth += e1[p] * e2[p];
-      }
-      double sth = sqrt(MAX(1.0 - cth * cth, 1.0e-12));
-      for (int p = 0; p < 3; p++) {
-        double ga = (cth * e1[p] - e2[p]) / (r1 * sth);
-        double gc = (cth * e2[p] - e1[p]) / (r2 * sth);
-        g[3 * a + p] = ga;
-        g[3 * cc + p] = gc;
-        g[3 * b + p] = -ga - gc;
-      }
-    }
-    for (int A = 0; A < N; A++) g[A] /= sqrt(M.m[A / 3]);
+    for (int A = 0; A < N; A++) g[A] = Bc[q][A] / sqrt(M.m[A / 3]);
     for (int e = 0; e < ne; e++) {
       double dp = 0.0;
       for (int A = 0; A < N; A++) dp += E[e][A] * g[A];

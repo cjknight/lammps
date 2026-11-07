@@ -475,7 +475,9 @@ class FixBAOABTether : public FixBAOAB {
     double w[MBN];                        // GF angular frequencies of the fast set (1/time)
     double Dref[MBN][MBN];                // mass-weighted Hessian at refresh
     int nic = 0;                          // fast internal coordinates (bonds, angles)
-    int ic_type[MBN], ic_at[MBN][3];      // 0 = bond (a,b), 1 = angle (a,b,c) with vertex b
+    // 0 = bond (a,b), 1 = angle (a,b,c) with vertex b, 2..7 = linear bend (a,b,c): component
+    // (type-2)%2 of b's displacement from line a-c, frame from lab axis (type-2)/2 (mb_lin_frame)
+    int ic_type[MBN], ic_at[MBN][3];
     double Fic[MBN][MBN];                 // internal-coordinate force constants
     double sig0[MBN];                     // reference internal coordinates (anchored once)
     bool have_s0 = false;
@@ -499,6 +501,8 @@ class FixBAOABTether : public FixBAOAB {
   void mb_gf_freqs(MBMol &, const double (*)[3]);
   void mb_ic_force(const MBMol &, const double (*)[3], const int *, double *, double *) const;
   void mb_reestimate();
+  void mb_lin_sym(MBMol &, double (*)[MBN]) const;
+  void mb_lin_reframe(MBMol &, const double (*)[3]) const;
   bigint mb_last_refresh;
   bigint mb_step;                         // step whose positions/forces mb_prepare() processes
   // parallel layout: every rank integrates its own copy of each molecule with an owned atom

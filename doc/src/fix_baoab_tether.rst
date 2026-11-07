@@ -832,6 +832,17 @@ of the force field itself has to be specified.  The reference values
 :math:`s_0` are set once, at the molecule's equilibrium position in its
 environment at the first step, and are kept for the rest of the run.
 
+A bond angle larger than 150 degrees at a probe refresh is treated as the
+bend of a linear group (for example carbon dioxide).  A single angle cannot
+describe such a bend, which can happen in two perpendicular directions and
+has no well-defined direction of change at 180 degrees, so it is replaced
+by the two components of the displacement of the middle atom from the line
+through the two outer atoms.  These two coordinates share one force
+constant and are not coupled to the bond lengths, and their reference
+value is zero (all exact by symmetry for a linear equilibrium structure),
+so the fast energy does not depend on how the two perpendicular directions
+are chosen.
+
 Each timestep then applies half a kick from the remaining ("slow") force,
 the full force minus the fast model force, followed by several short
 velocity-Verlet substeps that use only the fast model force, which needs no
@@ -884,7 +895,12 @@ are still reproduced, but the temperature reads about 5 K low and the
 diffusion coefficient is about 12 percent low.  With the thermostat off, the
 total energy drift at 1 and 2 fs is comparable to that of :doc:`run_style
 respa <run_style>` with the bonded terms on the inner level, and somewhat
-larger at 4 fs.
+larger at 4 fs.  For flexible carbon dioxide (liquid, 250 K) and nitrogen
+(liquid, 77 K), timesteps of 2, 3 and 4 fs reproduced the temperature, all
+vibrational peaks (for carbon dioxide including the bend), the radial
+distribution functions and the diffusion coefficient of a 0.5 fs
+velocity-Verlet reference within the statistical uncertainty of 20 ps runs
+with three random seeds.
 
 The *molblock_verbose* keyword prints, at every refresh, the number of
 molecules and fast coordinates (or, with *heff_samples* > 0, the number
@@ -905,9 +921,10 @@ be able to report their atoms to this fix; with a machine-learned potential
 that supplies all forces, use *bond_style harmonic* and *angle_style
 harmonic* with zero force constants rather than the *zero* styles.  Every
 atom of a molecule must be linked to every other one by a bond or an angle
-(water, diatomics, ammonia-like molecules), and the bonds and angles of a
-molecule must be independent of each other, which excludes linear molecules
-and molecules with rings; the fix stops with an error otherwise.
+(water, diatomics, linear triatomics such as carbon dioxide, ammonia-like
+molecules), and the bonds and angles of a molecule must be independent of
+each other, which excludes molecules with rings; the fix stops with an error
+otherwise.
 
 *molblock* runs in parallel without any communication during the
 substeps.  Each processor integrates its own copy of every molecule that
