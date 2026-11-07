@@ -61,6 +61,8 @@ class FixBAOABTether : public FixBAOAB {
   int unpack_exchange(int, double *) override;
   int pack_forward_comm(int, int *, double *, int, int *) override;
   void unpack_forward_comm(int, int, double *) override;
+  int pack_border(int, int *, double *) override;
+  int unpack_border(int, int, double *) override;
 
  private:
   double theta;          // dimensionless omega*dt stiff/soft threshold
@@ -449,10 +451,14 @@ class FixBAOABTether : public FixBAOAB {
   std::vector<double> fks;
   void kspace_snapshot();
   bool mb_collect;
-  std::vector<double> mb_Hown;    // nlocal x 9: raw symmetrized own block H_ii
-  std::vector<double> mb_X;       // nlocal x MBMAX x 9: dF_partner/dx_i (row = partner force comp)
-  std::vector<tagint> mb_tag;     // nlocal x MBMAX: partner tags
-  std::vector<int> mb_n;          // nlocal: number of partners
+  // probe data per atom (owned atoms measured, ghosts filled by forward comm at a refresh)
+  std::vector<double> mb_Hown;    // nall x 9: raw symmetrized own block H_ii
+  std::vector<double> mb_X;       // nall x MBMAX x 9: dF_partner/dx_i (row = partner force comp)
+  std::vector<tagint> mb_tag;     // nall x MBMAX: partner tags
+  std::vector<int> mb_n;          // nall: number of partners
+  std::vector<tagint> mb_btop;    // nall x mb_bpa: bond partner tags (own bond list)
+  std::vector<tagint> mb_atop;    // nall x 3 mb_apa: angle atom tags (own angle list)
+  std::vector<int> mb_nbt, mb_nat;    // nall: number of bonds / angles listed
   void molblock_diagnostic();
 
   // molblock (auto-RESPA, see mb_refresh()): Hessian-built fast force field for the bonds and
@@ -475,6 +481,13 @@ class FixBAOABTether : public FixBAOAB {
     bool have_s0 = false;
     double Fold[MBN][MBN];                // force constants still in use until the next step
     bool pending = false;                 // Fold valid, switch to Fic at the next step start
+    // trajectory estimate of F: sums of ds ds^T and dphi ds^T over consecutive steps since the
+    // last update (phi = raw internal-coordinate force), and the previous step's s and phi
+    int nd = 0;
+    bool hprev = false;
+    double sprev[MBN], pprev[MBN], dss[MBN][MBN], dps[MBN][MBN];
+    bool has_mom = false;                 // averaged moments (finite-difference F as prior)
+    double Sss[MBN][MBN], Sps[MBN][MBN];
   };
   int molblock, mb_verbose;
   int mb_inner_user, mb_nin;              // user substeps (0 = auto), current substeps
@@ -484,11 +497,27 @@ class FixBAOABTether : public FixBAOAB {
   int mb_stiff_modes(const MBMol &, const double (*)[3]) const;
   void mb_gf_forceconst(MBMol &, const double (*)[3], const double (*)[3]);
   void mb_gf_freqs(MBMol &, const double (*)[3]);
-  bool mb_ready;
+  void mb_ic_force(const MBMol &, const double (*)[3], const int *, double *, double *) const;
+  void mb_reestimate();
   bigint mb_last_refresh;
-  std::vector<MBMol> mbmols;
+  bigint mb_step;                         // step whose positions/forces mb_prepare() processes
+  // parallel layout: every rank integrates its own copy of each molecule with an owned atom
+  // (ghosts for the rest), so the inner loop needs no communication. A molecule's persistent
+  // state lives on its anchor (lowest-ID) atom, travels with it (exchange) and to ghost copies
+  // (borders); between reneighborings each copy evolves it identically.
+  std::vector<MBMol> mbmols;              // this rank's molecule copies (rebuilt each call)
+  std::vector<int> mb_aidx;               // local or ghost index of each copy's anchor atom
   std::vector<int> mb_member;
+  int mb_nicmax, mb_ss, mb_bpa, mb_apa, mb_commflag, mb_probe_size, mb_nmax;
+  double **mb_state;                      // per atom: [0] = 1 if anchor holding state, then MBMol
+  tagint *mb_anc;                         // per atom: anchor tag of its molecule (0 = none)
   bool mb_locate(const MBMol &, int *, double (*)[3]) const;
+  void mb_rel(const MBMol &, const double (*)[3], double (*)[3]) const;
+  int mb_pack(const MBMol &, double *) const;
+  void mb_unpack(MBMol &, const double *) const;
+  void mb_gather();
+  void mb_scatter();
+  double mb_gauss(tagint, int) const;
   void mb_refresh();
   void mb_prepare();
   void mb_initial_integrate();

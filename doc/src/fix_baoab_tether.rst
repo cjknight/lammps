@@ -181,7 +181,7 @@ Examples
          ke_rel 25.0 gamma_quench auto calib 2000 2000 &
          refresh_skin 0.1 drift_response preshrink event_log tether.log
    fix 1 all baoab/tether 300.0 300.0 1000.0 12345 theta 0.2 refresh 10 &
-         mollify yes molblock yes gamma_soft 0.001
+         mollify yes molblock yes heff_samples 12 gamma_soft 0.001
 
 .. versionadded:: TBD
 
@@ -845,24 +845,53 @@ consistent splitting of the same total force.  Only one force evaluation is
 needed per timestep, as in plain velocity Verlet, plus the curvature probes
 at each refresh.
 
+How the force constants are updated after the first step depends on
+*heff_samples*.  With *heff_samples 0* (the default), they are measured
+again from finite-difference probes every *refresh* steps, which gives
+the instantaneous curvature at that moment but costs roughly as much as
+15 to 20 ordinary timesteps per refresh.  With *heff_samples* N > 0, the
+probes are used only at the first step.  Afterwards the force constants
+are estimated from the trajectory itself, at no extra cost: from one
+timestep to the next, the change in the force on the bond lengths and
+angles is very nearly the force constants times the change in those
+coordinates, because the vibration dominates both changes while the
+slow drift of the molecule's surroundings largely cancels.  These
+step-to-step changes are accumulated over each block of *refresh*
+steps, blended into a running average in which each new block has
+weight 1/N (with the probed values as the starting point), and the
+resulting force constants are used from the next timestep on.  This is
+a thermally averaged effective curvature, in the same spirit as
+*heff_samples* for the per-atom treatment.  An estimate that is not
+physically sensible (not positive definite) is discarded and the
+previous force constants are kept.  For flexible SPC/Fw water, *refresh
+10* with *heff_samples 12* gave force constants matching the probed
+values to within their thermal fluctuation (about 1.5 percent), the
+same accuracy in all checks listed below as probing every 10 steps, and
+about twice the speed; a shorter memory (*heff_samples 4*) was stable
+but conserved energy slightly less well.
+
 The *molblock_inner* keyword sets the number of substeps.  With the
 default of 0 the fix chooses, at every refresh, the smallest even number
 (at least 2) that keeps the fastest fast-model frequency times the substep
 length at or below 0.3.  For flexible SPC/Fw water in real units this gives
 6 substeps at a 2 fs timestep.  In tests on flexible SPC/Fw water at 300 K,
-timesteps of 2 to 4 fs reproduced the temperature, the stretch and bend
-peaks of the velocity spectrum, the radial distribution functions, and the
-diffusion coefficient of a 0.5 fs velocity-Verlet reference within
-statistical uncertainty; the librational band of the spectrum is about 10
-percent weaker relative to the stretch peak.  With the thermostat off, the
+a 2 fs timestep reproduced the temperature, the stretch and bend peaks of
+the velocity spectrum, the radial distribution functions, and the diffusion
+coefficient of a 0.5 fs velocity-Verlet reference within statistical
+uncertainty; the librational band of the spectrum is about 10 percent
+weaker relative to the stretch peak.  At 4 fs the peaks and the structure
+are still reproduced, but the temperature reads about 5 K low and the
+diffusion coefficient is about 12 percent low.  With the thermostat off, the
 total energy drift at 1 and 2 fs is comparable to that of :doc:`run_style
 respa <run_style>` with the bonded terms on the inner level, and somewhat
 larger at 4 fs.
 
 The *molblock_verbose* keyword prints, at every refresh, the number of
-molecules and fast coordinates, the fastest frequency times the timestep,
-and the number of substeps, together with the force constants of one
-molecule at the first refresh.
+molecules and fast coordinates (or, with *heff_samples* > 0, the number
+of molecules whose force constants were updated or kept), the fastest
+frequency times the timestep, and the number of substeps, together with
+the force constants of one molecule at the first refresh and, with
+*heff_samples* > 0, the average diagonal force constants.
 
 The *molblock_diag* keyword is a diagnostic that changes no dynamics.  At
 every refresh it assembles each molecule's second-derivative matrix as
@@ -870,13 +899,28 @@ above and prints a summary of its internal and rigid-body frequencies.
 
 *molblock* requires *mollify yes* (which provides the finite-difference
 probes and the *newton_bond off* bond and angle storage it relies on), a
-molecular atom style, and *adapt no*; the timestep stays fixed.  All atoms
-of a molecule must be owned by the same processor; a molecule that is not
-receives the full force once per timestep without a fast model, which is
-unstable for stiff bonds at long timesteps, so in practice *molblock* is
-currently limited to runs on a single processor.  The bonds and angles of a molecule
-must be independent of each other, which excludes linear molecules and
-molecules with rings; the fix stops with an error otherwise.
+molecular atom style, and *adapt no*; the timestep stays fixed.  Molecules
+are found from the bond and angle lists, so the bond and angle styles must
+be able to report their atoms to this fix; with a machine-learned potential
+that supplies all forces, use *bond_style harmonic* and *angle_style
+harmonic* with zero force constants rather than the *zero* styles.  Every
+atom of a molecule must be linked to every other one by a bond or an angle
+(water, diatomics, ammonia-like molecules), and the bonds and angles of a
+molecule must be independent of each other, which excludes linear molecules
+and molecules with rings; the fix stops with an error otherwise.
+
+*molblock* runs in parallel without any communication during the
+substeps.  Each processor integrates its own copy of every molecule that
+has at least one atom it owns, using ghost atoms for the other atoms of the
+molecule, and keeps the result only for its owned atoms; velocities and
+forces of ghost atoms are communicated once per timestep, before the
+substeps.  The thermostat noise of each atom is generated from the random
+seed, the atom ID and the timestep, so all copies of a molecule draw the
+same numbers and results do not depend on the number of processors, apart
+from round-off.  Each molecule's force constants and averages are stored
+with its lowest-ID atom and move with it between processors.  All atoms of
+a molecule must be within the ghost-atom cutoff of each other, which holds
+automatically for small molecules with the usual pair-style cutoffs.
 
 
 Restart, fix_modify, output, run start/stop, minimize info
