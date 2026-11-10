@@ -34,6 +34,7 @@
 #include "neighbor.h"
 #include "output.h"
 #include "pair.h"
+#include "platform.h"
 #include "random_mars.h"
 #include "update.h"
 
@@ -186,6 +187,9 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   teacher_every = 0;
   outer_cycle_start = 0;
   n_teacher_calls = 0;
+  t_teacher_total = t_teacher_pair = 0.0;
+  t_run_start = t_teacher_total_run0 = t_teacher_pair_run0 = 0.0;
+  n_teacher_calls_run0 = 0;
   diag_om_unres = diag_om_unres_p99 = diag_om_analytic = 0.0;
   diag_unres_type = 0;
 
@@ -673,7 +677,7 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   // diagnostic (cached-vs-fresh mode-eligibility disagreement) -- see
   // n_mask_agree/n_mask_stale_soft/n_mask_stale_tight in the header.
   vector_flag = 1;
-  size_vector = 16;
+  size_vector = 18;
   extvector = 0;
 
   // per-atom persistent state (curvature-block eigenvectors/frequencies,
@@ -799,6 +803,18 @@ void FixBAOABTether::init()
 
   if (mollify) {
     if (!force->pair) error->all(FLERR, "Fix baoab/tether mollify yes requires a pair style");
+    // the per-atom force kernels (local_partial_force()/single()) read the
+    // host-side per-atom state of the pair style (e.g. PairEAM's rho[]/fp[]),
+    // which KOKKOS pair styles keep on the device instead; only
+    // symmetrix/mace/kk implements its own device-aware kernel. Under -sf kk,
+    // the student pair style must therefore be defined after "suffix off";
+    // the teacher_style may be a KOKKOS style (see compute_force_delta()).
+    if (force->pair->kokkosable && !utils::strmatch(force->pair_style, "^symmetrix/mace"))
+      error->all(FLERR,
+                 "Fix baoab/tether cannot use the KOKKOS pair style {} for its per-atom forces; "
+                 "define the pair style after a 'suffix off' command (a KOKKOS teacher_style "
+                 "is supported)",
+                 force->pair_style);
     use_local_partial_force = force->pair->has_local_partial_force;
     if (!use_local_partial_force && !force->pair->single_enable)
       error->all(FLERR, "Fix baoab/tether mollify yes requires a pair style that supports "
@@ -853,9 +869,12 @@ void FixBAOABTether::init()
     if (teacher_coeff_args.empty())
       error->all(FLERR, "Fix baoab/tether teacher_every requires teacher_coeff");
 
+    // the teacher takes the active suffix like any pair_style command, so
+    // "-sf kk" (or an explicit symmetrix/mace/kk) runs it on the GPU while
+    // the student and this fix stay on the host
     if (!teacher_pair) {
       int sflag;
-      teacher_pair = force->new_pair(teacher_style_name, 0, sflag);
+      teacher_pair = force->new_pair(teacher_style_name, lmp->suffix_enable, sflag);
 
       std::vector<char *> settings_argv;
       for (auto &s : teacher_settings_args) settings_argv.push_back(const_cast<char *>(s.c_str()));
@@ -864,6 +883,13 @@ void FixBAOABTether::init()
       std::vector<char *> coeff_argv;
       for (auto &s : teacher_coeff_args) coeff_argv.push_back(const_cast<char *>(s.c_str()));
       teacher_pair->coeff((int) coeff_argv.size(), coeff_argv.data());
+
+      if (comm->me == 0) {
+        std::string tname = teacher_style_name;
+        if (sflag) tname += fmt::format("/{}", (sflag == 1) ? lmp->suffix : lmp->suffix2);
+        utils::logmesg(lmp, "Fix baoab/tether teacher pair style: {} ({})\n", tname,
+                       teacher_pair->kokkosable ? "KOKKOS" : "not KOKKOS, runs on the host");
+      }
     }
     teacher_pair->init();
   }
@@ -5517,6 +5543,24 @@ void FixBAOABTether::force_moll()
 
 void FixBAOABTether::compute_force_delta()
 {
+  const double t_start = platform::walltime();
+
+#ifdef LMP_KOKKOS
+  // KOKKOS (-k on): this fix works on the host arrays, while a KOKKOS
+  // teacher_pair (and device-side communication) reads the device copies.
+  // Every host write below that a device consumer must see is therefore
+  // claimed with modified(Host, ...) before that consumer runs. Anything
+  // claimed on the device is copied straight back to the host because
+  // auto_sync is on -- ModifyKokkos already sets it around this
+  // (non-KOKKOS) fix's callbacks; it is set here too so this function does
+  // not depend on its caller -- and the sync(Host, ...) calls below make
+  // that explicit. Without the claims the device would silently keep the
+  // unclamped positions and a stale force array.
+  AtomKokkos *atomKK = lmp->kokkos ? dynamic_cast<AtomKokkos *>(atom) : nullptr;
+  const int prev_auto_sync = lmp->kokkos ? lmp->kokkos->auto_sync : 0;
+  if (lmp->kokkos) lmp->kokkos->auto_sync = 1;
+#endif
+
   double **x = atom->x;
   double **f = atom->f;
   int *mask = atom->mask;
@@ -5541,6 +5585,9 @@ void FixBAOABTether::compute_force_delta()
     x[i][1] = c[i][1];
     x[i][2] = c[i][2];
   }
+#ifdef LMP_KOKKOS
+  if (atomKK) atomKK->modified(Host, X_MASK);
+#endif
   comm->forward_comm();
 
   // raw teacher force at the clamped geometry -- a genuine whole-system
@@ -5548,8 +5595,29 @@ void FixBAOABTether::compute_force_delta()
   // outer cycle, teacher_every steps) and O(N) per call, see teacher_pair's
   // header doc comment for why this is the chosen design.
   force_clear_local();
+  const double t_pair_start = platform::walltime();
+#ifdef LMP_KOKKOS
+  // same bracketing as VerletKokkos::run() uses for force->pair: the zeroed
+  // host forces (and the clamped x, if forward_comm() ran on the host) go
+  // to the teacher's execution space; its forces are claimed there and
+  // auto_sync brings them back to the host
+  if (atomKK) {
+    atomKK->modified(Host, F_MASK);
+    atomKK->sync(teacher_pair->execution_space, teacher_pair->datamask_read);
+  }
   teacher_pair->compute(0, 0);
+  if (atomKK) {
+    atomKK->modified(teacher_pair->execution_space, teacher_pair->datamask_modify);
+    atomKK->sync(Host, F_MASK);
+  }
+#else
+  teacher_pair->compute(0, 0);
+#endif
+  t_teacher_pair += platform::walltime() - t_pair_start;
   if (force->newton) comm->reverse_comm();
+#ifdef LMP_KOKKOS
+  if (atomKK) atomKK->sync(Host, X_MASK | F_MASK);
+#endif
   n_teacher_calls++;
 
   apply_modal_filter_and_backreaction();
@@ -5572,9 +5640,21 @@ void FixBAOABTether::compute_force_delta()
     x[i][1] = xsave[3 * k + 1];
     x[i][2] = xsave[3 * k + 2];
   }
+#ifdef LMP_KOKKOS
+  if (atomKK) atomKK->modified(Host, X_MASK);
+#endif
   comm->forward_comm();
 
   if (ntotal) memcpy(&f[0][0], fsave.data(), 3 * ntotal * sizeof(double));
+
+#ifdef LMP_KOKKOS
+  if (atomKK) {
+    atomKK->sync(Host, X_MASK);
+    atomKK->modified(Host, X_MASK | F_MASK);
+  }
+  if (lmp->kokkos) lmp->kokkos->auto_sync = prev_auto_sync;
+#endif
+  t_teacher_total += platform::walltime() - t_start;
 }
 
 /* ----------------------------------------------------------------------
@@ -5711,7 +5791,52 @@ double FixBAOABTether::compute_vector(int n)
     case 13: return (double) diag_unres_type;
     case 14: return diag_om_unres_p99;
     case 15: return diag_om_analytic;
+    case 16: return t_teacher_total;
+    case 17: return t_teacher_pair;
     default: return 0.0;
+  }
+}
+
+/* ----------------------------------------------------------------------
+   mark the start of a run for the teacher timing summary in post_run()
+------------------------------------------------------------------------- */
+
+void FixBAOABTether::setup(int /*vflag*/)
+{
+  t_run_start = platform::walltime();
+  t_teacher_total_run0 = t_teacher_total;
+  t_teacher_pair_run0 = t_teacher_pair;
+  n_teacher_calls_run0 = n_teacher_calls;
+}
+
+/* ----------------------------------------------------------------------
+   teacher/student runs: report how the run's wall time splits between the
+   teacher calls and everything else (the inner steps, output, ...). The
+   slowest rank's teacher time is reported, since the call is collective.
+------------------------------------------------------------------------- */
+
+void FixBAOABTether::post_run()
+{
+  if ((teacher_every <= 0) || !teacher_pair) return;
+
+  double tloc[2] = {t_teacher_total - t_teacher_total_run0, t_teacher_pair - t_teacher_pair_run0};
+  double tmax[2];
+  MPI_Allreduce(tloc, tmax, 2, MPI_DOUBLE, MPI_MAX, world);
+  const double trun = platform::walltime() - t_run_start;
+  const bigint ncalls = n_teacher_calls - n_teacher_calls_run0;
+  const bigint nsteps = update->nsteps;
+
+  if ((comm->me == 0) && (ncalls > 0)) {
+    const double trest = trun - tmax[0];
+    utils::logmesg(lmp,
+                   "Fix baoab/tether teacher timing: {} calls in {} steps, run wall time {:.4g} s\n"
+                   "  teacher calls   {:.4g} s ({:.1f}%), {:.4g} ms per call, of which the "
+                   "teacher pair style {:.4g} ms\n"
+                   "  everything else {:.4g} s ({:.1f}%), {:.4g} ms per step\n",
+                   ncalls, nsteps, trun, tmax[0], (trun > 0.0) ? 100.0 * tmax[0] / trun : 0.0,
+                   1000.0 * tmax[0] / ncalls, 1000.0 * tmax[1] / ncalls, trest,
+                   (trun > 0.0) ? 100.0 * trest / trun : 0.0,
+                   (nsteps > 0) ? 1000.0 * trest / nsteps : 0.0);
   }
 }
 

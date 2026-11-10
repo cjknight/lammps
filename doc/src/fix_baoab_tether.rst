@@ -973,7 +973,7 @@ threshold was 1.25 times the rung, which lies inside the band where the
 step is lowered again at the next rung, so the timestep could alternate
 between two rungs at every refresh.
 
-This fix computes a global vector of length 16, which can be accessed by
+This fix computes a global vector of length 18, which can be accessed by
 various :doc:`output commands <Howto_output>`. The values are, in order:
 the running count of Newton non-convergence guard trips, the running
 count of center "flip" guard trips, the running count of over-excited
@@ -1004,6 +1004,15 @@ the LAMMPS atom type that owns it, the 99th percentile of the same
 frequencies on this processor, and the highest frequency among modes that
 are treated analytically.  Frequencies are in radians per unit of time
 of the active unit style.  They are 0 unless *adapt* is *yes*.
+
+.. versionadded:: TBD
+
+The 17th and 18th entries are the wall-clock time in seconds spent in
+the teacher force corrections since the fix was defined, and the part of
+that time spent in the teacher pair style itself (including any copies
+between host and GPU).  Both are 0 unless *teacher_every* is set.  At the
+end of each run with a teacher, the fix also prints how the run's wall
+time divides between the teacher calls and everything else.
 
 This fix is not invoked during :doc:`energy minimization <minimize>`.
 
@@ -1065,6 +1074,28 @@ This fix cannot be combined with :doc:`fix shake <fix_shake>` or
 
 Do not combine this fix with :doc:`fix nve <fix_nve>` or any other
 time-integration fix on the same group of atoms.
+
+.. versionadded:: TBD
+
+This fix runs on the host (CPU).  With the :doc:`KOKKOS package
+<Speed_kokkos>`, its main pair style must not be a KOKKOS style (except
+*symmetrix/mace/kk*), because the fix's per-atom force evaluations read
+data that KOKKOS pair styles keep on the GPU.  When using the "-sf kk"
+command-line switch, define that pair style after a :doc:`suffix off
+<suffix>` command.  The *teacher_style* may be a KOKKOS style: it takes
+the active suffix like any :doc:`pair_style <pair_style>` command, so
+with "-sf kk" a teacher style of *symmetrix/mace* becomes
+*symmetrix/mace/kk* and runs on the GPU, with the positions sent to the
+GPU and the forces copied back at every teacher call.  For example:
+
+.. code-block:: LAMMPS
+
+   suffix off
+   pair_style eam/fs
+   pair_coeff * * PdH.eam.fs H Pd
+   suffix kk
+   fix 1 all baoab/tether ... teacher_style 2 symmetrix/mace no_mpi_message_passing &
+       teacher_coeff 5 * * model.json H Pd teacher_every 20
 
 Related commands
 """""""""""""""""

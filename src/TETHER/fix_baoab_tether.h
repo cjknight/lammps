@@ -48,6 +48,8 @@ class FixBAOABTether : public FixBAOAB {
 
   void init() override;
   void init_list(int, class NeighList *) override;
+  void setup(int) override;
+  void post_run() override;
   int setmask() override;
   void initial_integrate(int) override;
   void final_integrate() override;
@@ -529,6 +531,13 @@ class FixBAOABTether : public FixBAOAB {
   double diag_om_unres, diag_om_unres_p99, diag_om_analytic;
   int diag_unres_type;
   bigint n_teacher_calls;       // diagnostic: teacher_pair->compute() calls (compute_vector())
+  // wall-clock cost of the teacher (compute_vector() 16/17, summary in post_run()):
+  // whole compute_force_delta() calls, and the teacher_pair->compute() part of them
+  // (including the KOKKOS host<->device transfers it triggers). Cumulative over runs;
+  // the *_run0 copies are the values at the start of the current run (setup()).
+  double t_teacher_total, t_teacher_pair;
+  double t_run_start, t_teacher_total_run0, t_teacher_pair_run0;
+  bigint n_teacher_calls_run0;
 
   // carried half-kick impulse per flagged atom (nmax x 3): 0.5*teacher_every*dt*
   // F_delta/m, already modal-filtered + back-reaction-applied by

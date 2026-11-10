@@ -143,6 +143,8 @@ void NPairTrimKokkos<DeviceType>::trim_to_cpu(NeighList *list)
   listcopy_kk->k_ilist.sync_host();
 
   double** x = atom->x;
+  int *type = atom->type;
+  double **cutneighsq = neighbor->cutneighsq;
 
   int inum = listcopy->inum;
   int gnum = listcopy->gnum;
@@ -189,7 +191,12 @@ void NPairTrimKokkos<DeviceType>::trim_to_cpu(NeighList *list)
       const double delz = ztmp - x[j][2];
       const double rsq = delx*delx + dely*dely + delz*delz;
 
-      if (rsq > cutsq_custom) continue;
+      // same fallback to the pairwise neighbour cutoff as trim_to_kokkos()
+      // and NPairTrim::build(): without it a trim list with no custom
+      // cutoff (cutsq_custom == 0) came out empty
+      const double cutsq_trim = (cutsq_custom > 0.0) ? cutsq_custom :
+        cutneighsq[type[i]][type[j]];
+      if (rsq > cutsq_trim) continue;
 
       neighptr[n++] = joriginal;
     }
