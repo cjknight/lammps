@@ -103,6 +103,7 @@ PPPMKokkos<DeviceType>::PPPMKokkos(LAMMPS *lmp) : PPPM(lmp)
   gc = nullptr;
   fft1 = nullptr;
   fft2 = nullptr;
+  fft_phi = nullptr;
   remap = nullptr;
 
 #if defined (LMP_KOKKOS_GPU)
@@ -300,6 +301,14 @@ void PPPMKokkos<DeviceType>::init()
                        ngrid_max,nfft_both_max);
     utils::logmesg(lmp,mesg);
   }
+}
+
+template<class DeviceType>
+void PPPMKokkos<DeviceType>::qsum_qsq(int warning_flag)
+{
+  if (atomKK->k_q.need_sync_host())
+    atomKK->sync(Host, Q_MASK);
+  KSpace::qsum_qsq(warning_flag);
 }
 
 /* ----------------------------------------------------------------------
@@ -870,6 +879,10 @@ void PPPMKokkos<DeviceType>::allocate()
                          nxlo_fft,nxhi_fft,nylo_fft,nyhi_fft,nzlo_fft,nzhi_fft,
                          nxlo_in,nxhi_in,nylo_in,nyhi_in,nzlo_in,nzhi_in,
                          0,0,&tmp,collective_flag,nonblocking_flag,gpu_aware_flag);
+  fft_phi = new FFT3dKokkos<DeviceType>(lmp,world,nx_pppm,ny_pppm,nz_pppm,
+                         nxlo_fft,nxhi_fft,nylo_fft,nyhi_fft,nzlo_fft,nzhi_fft,
+                         nxlo_in,nxhi_in,nylo_in,nyhi_in,nzlo_in,nzhi_in,
+                         0,0,&tmp,collective_flag,nonblocking_flag,gpu_aware_flag);
   remap = new RemapKokkos<DeviceType>(lmp,world,
                           nxlo_in,nxhi_in,nylo_in,nyhi_in,nzlo_in,nzhi_in,
                           nxlo_fft,nxhi_fft,nylo_fft,nyhi_fft,nzlo_fft,nzhi_fft,
@@ -897,7 +910,9 @@ void PPPMKokkos<DeviceType>::deallocate()
   delete fft1;
   fft1 = nullptr;
   delete fft2;
-  fft1 = nullptr;
+  fft2 = nullptr;
+  delete fft_phi;
+  fft_phi = nullptr;
   delete remap;
   remap = nullptr;
 }
@@ -1521,7 +1536,8 @@ void PPPMKokkos<DeviceType>::poisson_ik()
   Kokkos::parallel_for(Kokkos::RangePolicy<DeviceType, TagPPPM_poisson_ik4>(0,nfft),*this);
   copymode = 0;
 
-  fft2->compute(d_work1,d_work3,FFT3dKokkos<DeviceType>::BACKWARD);
+  Kokkos::deep_copy(d_work3, d_work1);
+  fft_phi->compute(d_work3,d_work3,FFT3dKokkos<DeviceType>::BACKWARD);
 
   numz_inout = (nzhi_in-nzlo_out)-(nzlo_in-nzlo_out) + 1;
   numy_inout = (nyhi_in-nylo_out)-(nylo_in-nylo_out) + 1;

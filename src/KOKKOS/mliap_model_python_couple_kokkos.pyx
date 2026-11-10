@@ -109,6 +109,9 @@ cdef public int MLIAPPYKokkos_load_model(MLIAPModelPythonKokkosDevice * c_model,
 
             model.device = device
             model.model = model.model.to(device)
+            if mode == "intel" or mode == "nvidia":
+                model.device_arrays = True
+
         else:
             with open(str_fname,'rb') as pfile:
                 model = pickle.load(pfile)

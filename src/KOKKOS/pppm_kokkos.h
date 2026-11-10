@@ -451,7 +451,7 @@ class PPPMKokkos : public PPPM, public KokkosBaseFFT {
 
   // FFTs and grid communication
 
-  FFT3dKokkos<DeviceType> *fft1,*fft2;
+  FFT3dKokkos<DeviceType> *fft1,*fft2,*fft_phi;
   RemapKokkos<DeviceType> *remap;
   Grid3dKokkos<DeviceType> *gc;
 
@@ -473,6 +473,8 @@ class PPPMKokkos : public PPPM, public KokkosBaseFFT {
   double estimate_ik_error(double, double, bigint) override;
   void compute_gf_denom() override;
   void compute_gf_ik() override;
+
+  void qsum_qsq(int warning_flag = 1) override;
 
   void particle_map() override;
   void make_rho() override;
