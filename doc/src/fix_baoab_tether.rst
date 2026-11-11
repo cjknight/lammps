@@ -137,9 +137,9 @@ Syntax
          the Description below.
        *gamma_soft* value = friction rate in 1/time for modes that are not
          clamped analytically (optional; default 1/*damp*)
-       *eligibility* value = *all_modes* or *bonded* (optional; default
-         *all_modes*; only used if *adapt* is *yes*; *bonded* requires a
-         molecular atom style with a bond style)
+       *eligibility* value = *per_mode* or *all_modes* or *bonded*
+         (optional; default *per_mode*; only used if *adapt* is *yes*;
+         *bonded* requires a molecular atom style with a bond style)
        *newton_res_length* value = *yes* or *no* (optional; default *no*)
        *molblock* value = *yes* or *no* (optional; default *no*; requires
          *mollify yes*, *adapt no*, and a molecular atom style)
@@ -788,18 +788,25 @@ an error if either rate multiplied by the largest timestep (*dt_max* with
 a *damp* of about 100 times the largest timestep.
 
 The *eligibility* keyword selects which atoms may have a mode clamped
-analytically when *adapt* is *yes*. The default, *all_modes*, requires every
-one of an atom's three modes to exceed 0.6 times the spectral split, which
-suits cage-confined rattlers (for example hydrogen in a metal lattice) and
-deliberately excludes an atom that is stiff in only one direction, such as
-a transiently compressed pair mid-collision. With *eligibility bonded* an
-atom that has at least one bond skips that all-modes test, so a single
-stiff mode (for example an O-H stretch in flexible water) can be clamped
-while the atom's other modes remain unresolved. This is an approximation
-that is valid only while the bond topology is fixed: it must not be used
-for reactive systems or for models that have no bond topology. It requires
-*adapt yes*, a molecular atom style, and a bond style, and with *mollify
-yes* the usual *newton_bond off* requirement applies.
+analytically when *adapt* is *yes*. With the default, *per_mode*, every
+mode of every atom that exceeds the spectral split is clamped on its own,
+whatever the atom's other modes are. With *all_modes*, an atom is eligible
+only if all three of its modes exceed 0.6 times the spectral split. This
+leaves an atom that is stiff in only one or two directions (for example a
+hydrogen atom crossing between interstitial sites) entirely unresolved,
+and because all atoms share one timestep, such an atom limits the timestep
+for the whole system. In large systems some atom is almost always in that
+state, so *all_modes* can lose most of the timestep gain. With *per_mode*
+two further rules keep the timestep independent of system size: any mode
+too fast for the current timestep (above *c_acc* divided by 0.85 times the
+timestep) is also clamped, and the timestep is chosen from the 99th
+percentile of the frequencies of the modes that may be clamped instead of
+their maximum, which keeps growing with the number of atoms. Modes of
+atoms that cannot be clamped (for example after a demotion) still enter
+with their maximum. With
+*eligibility bonded* only atoms that have at least one bond skip the
+all-modes test. It requires a molecular atom style and a bond style, and
+with *mollify yes* the usual *newton_bond off* requirement applies.
 
 The *newton_res_length* keyword selects the units of the residual that the
 damped-Newton center solve compares against its convergence tolerance and
@@ -1126,7 +1133,7 @@ defaults to 2.0. *gamma_quench_calib_confirm* defaults to 3.
 *refresh_skin_rel* defaults to 0.0. *promote_every* defaults to 0.
 *settle_confirm* defaults to 0. *drift_response* defaults to *retether*.
 *exile_substep* defaults to *no*. *preshrink_exile* defaults to *no*. *recoil* defaults to *yes*.
-*gamma_soft* defaults to 1/*damp*. *eligibility* defaults to *all_modes*. *newton_res_length* defaults to *no*.
+*gamma_soft* defaults to 1/*damp*. *eligibility* defaults to *per_mode*. *newton_res_length* defaults to *no*.
 *molblock* defaults to *no*. *molblock_inner* defaults to 0. *molblock_verbose* defaults to *no*.
 *molblock_diag* defaults to *no*.
 *event_log* defaults to unset (disabled).

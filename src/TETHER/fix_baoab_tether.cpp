@@ -111,7 +111,8 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   use_local_partial_force = 0;
   force_eval_full = 0;
   a_th_mass_scale = 0;
-  eligibility_bonded = 0;
+  eligibility_bonded = 2;
+  om_mask_thr = 0.0;
   bonded = nullptr;
   newton_res_length = 0;
   newton_tol_rel = 5.0;
@@ -4171,6 +4172,17 @@ void FixBAOABTether::update_dt(bool fresh_sample)
   double om_analytic_max = 0.0;
   int unres_type = 0;
   std::vector<double> unres_all;
+  // per_mode percentile rule (see below): log-spaced histogram of maskable mode frequencies
+  // (1/ps, bins 1% wide from 0.1 to about 1e5), and the maximum over modes that cannot be masked
+  const bool per_mode_dt = (eligibility_bonded == 2);
+  constexpr int PM_NBINS = 1400;
+  constexpr double PM_LO = 0.1, PM_RATIO = 1.01;
+  std::vector<double> pm_hist(per_mode_dt ? PM_NBINS : 0, 0.0);
+  auto pm_bin = [&](double w) {
+    if (w <= PM_LO) return 0;
+    return MIN(PM_NBINS - 1, (int) (log(w / PM_LO) / log(PM_RATIO)));
+  };
+  double om_hard = 0.0;
   for (int i = 0; i < nlocal; i++) {
     if (!(mask[i] & groupbit)) continue;
     // exile_substep: this atom is already safely self-integrating via
@@ -4187,16 +4199,23 @@ void FixBAOABTether::update_dt(bool fresh_sample)
     // real-unit zero-fallback (c_acc/dt_max) below -- converting again at any
     // later point of use would double-convert that fallback.
     double om2real = sqrt(force->ftm2v);
+    bool cooling = (demote_cool[i] > update->ntimestep);
     for (int m = 0; m < 3; m++) {
+      double w = om[i][m] * om2real;
       if (mode_is_stiff(i, m))
-        om_analytic_max = MAX(om_analytic_max, om[i][m] * om2real);
+        om_analytic_max = MAX(om_analytic_max, w);
       else {
-        double w = om[i][m] * om2real;
         unres_all.push_back(w);
         if (w > om_unres) {
           om_unres = w;
           unres_type = atom->type[i];
         }
+      }
+      if (per_mode_dt) {
+        if (cooling)
+          om_hard = MAX(om_hard, w);
+        else if (om[i][m] <= om_split)
+          pm_hist[pm_bin(w)] += 1.0;
       }
     }
   }
@@ -4211,11 +4230,39 @@ void FixBAOABTether::update_dt(bool fresh_sample)
   }
 
   if (comm->nprocs > 1) {
-    double local[2] = {om_unres, om_analytic_max};
-    double global[2];
-    MPI_Allreduce(local, global, 2, MPI_DOUBLE, MPI_MAX, world);
+    double local[3] = {om_unres, om_analytic_max, om_hard};
+    double global[3];
+    MPI_Allreduce(local, global, 3, MPI_DOUBLE, MPI_MAX, world);
     om_unres = global[0];
     om_analytic_max = global[1];
+    om_hard = global[2];
+  }
+
+  // per_mode: dt from the 99th percentile of the maskable modes (not their maximum), plus
+  // the maximum over atoms that cannot be masked (demotion cooldown). Every maskable mode
+  // above c_acc/(0.85*dt) is masked (om_mask_thr below), so no unresolved mode violates the
+  // accuracy bound; the percentile only decides when dt must shrink because the bulk of
+  // the spectrum moved. The maximum of N modes keeps growing with N, a percentile does not,
+  // so dt no longer falls as the system grows (H/Pd: 5 fs at 7296 atoms, 2.8 fs at 24624
+  // with the maximum). At most 1% of the maskable modes are masked by this rule.
+  if (per_mode_dt) {
+    if (comm->nprocs > 1) MPI_Allreduce(MPI_IN_PLACE, pm_hist.data(), PM_NBINS, MPI_DOUBLE,
+                                        MPI_SUM, world);
+    double total = 0.0;
+    for (int b = 0; b < PM_NBINS; b++) total += pm_hist[b];
+    double om_q = 0.0;
+    if (total > 0.0) {
+      double target = 0.99 * total, cum = 0.0;
+      for (int b = 0; b < PM_NBINS; b++) {
+        cum += pm_hist[b];
+        if (cum >= target) {
+          om_q = PM_LO * pow(PM_RATIO, b + 1);   // upper bin edge (conservative)
+          break;
+        }
+      }
+    }
+    diag_om_unres_p99 = om_q;
+    om_unres = MAX(om_q, om_hard);
   }
 
   // gamma_quench auto (continuous, not a one-time warm-up calibration):
@@ -4482,6 +4529,9 @@ void FixBAOABTether::update_dt(bool fresh_sample)
 
 void FixBAOABTether::apply_new_dt(double dt_new)
 {
+  // per_mode: mask every mode that would fail update_dt()'s shrink test at this dt
+  // (om_mask_thr is in natural units, like om[] and om_split)
+  if (eligibility_bonded == 2) om_mask_thr = c_acc / (0.85 * dt_new) / sqrt(force->ftm2v);
   if (dt_new == update->dt) return;
   update->update_time();
   update->dt = dt_new;

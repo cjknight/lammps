@@ -154,13 +154,12 @@ class FixBAOABTether : public FixBAOAB {
   // thermal bond vibration). Never flip this on for an existing validated
   // metal-units config without re-running its own multi-seed regression.
   int a_th_mass_scale;
-  // eligibility keyword: 0 = all_modes (default; an atom may be analytically clamped only
-  // if EVERY mode exceeds 0.6*om_split -- the validated H/Pd rattler rule), 1 = bonded
-  // (atoms with a bond skip the om_min test, so one stiff mode, e.g. an O-H stretch, can be
-  // clamped alone). APPROXIMATION valid only while bond topology is fixed (no reactions);
-  // not usable for MLIP/reactive systems. adapt=yes only. 2 = per_mode (EXPERIMENTAL, size-
-  // scaling test 2026-11-11): every atom skips the om_min test, so any mode above om_split is
-  // clamped on its own, whatever the atom's other modes are.
+  // eligibility keyword (adapt=yes only): 2 = per_mode (default): every atom skips the om_min
+  // test, so any mode above om_split is clamped on its own, whatever the atom's other modes
+  // are. 0 = all_modes: an atom may be clamped only if EVERY mode exceeds 0.6*om_split; with
+  // many hydrogen atoms one H near a hop saddle (stiff in only 1-2 directions) is left fully
+  // unresolved and sets the global dt (H/Pd 7296 atoms: 1.3-3.7 fs instead of 5 fs). 1 = bonded:
+  // only atoms with a bond skip the om_min test (fixed bond topology only).
   int eligibility_bonded;
   inline bool bonded_ok(int i) const
   {
@@ -736,9 +735,15 @@ class FixBAOABTether : public FixBAOAB {
     if (demote_cool[i] > update->ntimestep) return false;
     double om_max = MAX(om[i][0], MAX(om[i][1], om[i][2]));
     double om_min = MIN(om[i][0], MIN(om[i][1], om[i][2]));
-    if (!((om_max > om_split) && (bonded_ok(i) || (om_min > 0.6 * om_split)))) return false;
-    return om[i][m] > om_split;
+    // per_mode: also mask any mode too fast for the current dt (om_mask_thr, set by
+    // update_dt()); see update_dt() for why this keeps dt independent of system size.
+    double split = ((eligibility_bonded == 2) && (om_mask_thr > 0.0)) ? MIN(om_split, om_mask_thr)
+                                                                       : om_split;
+    if (!((om_max > split) && (bonded_ok(i) || (om_min > 0.6 * om_split)))) return false;
+    return om[i][m] > split;
   }
+  // per_mode: modes above c_acc/(0.85*dt) (natural units) are masked; 0 = not set yet
+  double om_mask_thr;
   void compute_om_split();
   void compute_heavy_block();
 
