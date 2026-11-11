@@ -190,6 +190,10 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   t_teacher_total = t_teacher_pair = 0.0;
   t_run_start = t_teacher_total_run0 = t_teacher_pair_run0 = 0.0;
   n_teacher_calls_run0 = 0;
+  teacher_open_dt = -1.0;
+  teacher_open_half = teacher_cycle_time = 0.0;
+  teacher_dt_varied = 0;
+  n_teacher_dt_varied = n_teacher_dt_varied_run0 = 0;
   diag_om_unres = diag_om_unres_p99 = diag_om_analytic = 0.0;
   diag_unres_type = 0;
 
@@ -292,7 +296,8 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether eligibility", error);
       if (strcmp(arg[iarg + 1], "all_modes") == 0) eligibility_bonded = 0;
       else if (strcmp(arg[iarg + 1], "bonded") == 0) eligibility_bonded = 1;
-      else error->all(FLERR, "Unknown fix baoab/tether eligibility style {}; expected all_modes or bonded",
+      else if (strcmp(arg[iarg + 1], "per_mode") == 0) eligibility_bonded = 2;
+      else error->all(FLERR, "Unknown fix baoab/tether eligibility style {}; expected all_modes, bonded or per_mode",
                       arg[iarg + 1]);
       iarg += 2;
     } else if (strcmp(arg[iarg], "newton_res_length") == 0) {
@@ -836,7 +841,7 @@ void FixBAOABTether::init()
     // requirement exists for kspace: it is never evaluated by
     // partial_force() at all, only by the whole-system
     // recompute_forces_local() path, which doesn't need per-atom topology.
-    if (eligibility_bonded && !(adapt && atom->molecular == Atom::MOLECULAR && force->bond))
+    if ((eligibility_bonded == 1) && !(adapt && atom->molecular == Atom::MOLECULAR && force->bond))
       error->all(FLERR, "Fix baoab/tether eligibility bonded requires adapt yes, a molecular "
                          "atom style, and a bond style (it assumes a fixed, non-reactive bond topology)");
     if (force->bond && force->newton_bond)
@@ -850,7 +855,13 @@ void FixBAOABTether::init()
     // loop (solve_center()/partial_force()) needs every one of a flagged
     // atom's own pair-style neighbors, every step -- not the half-list
     // "i<j" restriction, and not just occasionally (plan doc SS5.1).
-    neighbor->add_request(this, NeighConst::REQ_FULL);
+    // molblock reads the list only in mb_refresh()'s curvature probes, so there it is
+    // occasional and built on demand (rebuilding it with every pair list cost about as
+    // much as the pair list itself)
+    if (molblock)
+      neighbor->add_request(this, NeighConst::REQ_FULL | NeighConst::REQ_OCCASIONAL);
+    else
+      neighbor->add_request(this, NeighConst::REQ_FULL);
   }
 
   // D.14 teacher/student composition (EXPERIMENTAL, see header comment by
@@ -989,9 +1000,16 @@ void FixBAOABTether::initial_integrate(int /*vflag*/)
     // f_delta impulse (computed at the close of the PREVIOUS cycle, or
     // left all-zero before the first one) before the ordinary B-kick below
     // consumes atom->f. See teacher_outer_kick()'s doc comment.
+    // The cycle's duration is not known yet: assume teacher_every*dt and
+    // record that, so final_integrate() can correct it at the close.
     if (teacher_every > 0 &&
-        (update->ntimestep - outer_cycle_start) % teacher_every == 0)
-      teacher_outer_kick();
+        (update->ntimestep - outer_cycle_start) % teacher_every == 0) {
+      teacher_open_dt = update->dt;
+      teacher_open_half = 0.5 * teacher_every * update->dt;
+      teacher_cycle_time = 0.0;
+      teacher_dt_varied = 0;
+      teacher_outer_kick(teacher_open_half);
+    }
   }
 
   double one_minus_c1sq = 1.0 - c1 * c1;
@@ -1308,10 +1326,31 @@ void FixBAOABTether::final_integrate()
     // SAME freshly-computed f_delta becomes the next cycle's opening
     // half-kick in the following initial_integrate() call (the leapfrog
     // reuse the Python reference's run_mf() relies on).
+    //
+    // The two half-kicks must together deliver f_delta over the cycle's
+    // ACTUAL duration (sum of its step sizes). The opening half-kick could
+    // only assume teacher_every*dt at the time it was applied; if adapt
+    // changed dt during the cycle, that assumption was wrong (by up to the
+    // whole dt ratio, e.g. 4x after two demotions), and leaving it
+    // uncorrected pumps energy into every cycle with a dt change -- which is
+    // most cycles in a large system. So: top up (or take back) the opening
+    // half-kick with the OLD f_delta, then apply the closing half-kick over
+    // the actual duration. A cycle with constant dt keeps the original
+    // teacher_every*dt formula exactly.
+    if (teacher_every > 0) {
+      teacher_cycle_time += update->dt;
+      if (update->dt != teacher_open_dt) teacher_dt_varied = 1;
+    }
     if (teacher_every > 0 &&
         (update->ntimestep - outer_cycle_start + 1) % teacher_every == 0) {
+      double half_time = 0.5 * teacher_every * update->dt;
+      if (teacher_dt_varied && (teacher_open_dt > 0.0)) {
+        half_time = 0.5 * teacher_cycle_time;
+        teacher_outer_kick(half_time - teacher_open_half);
+        n_teacher_dt_varied++;
+      }
       compute_force_delta();
-      teacher_outer_kick();
+      teacher_outer_kick(half_time);
       outer_cycle_start += teacher_every;
     }
   }
@@ -2387,6 +2426,7 @@ void FixBAOABTether::mb_refresh()
   mb_atop.assign((size_t) nall * 3 * mb_apa, 0);
   mb_nbt.assign(nall, 0);
   mb_nat.assign(nall, 0);
+  if (list) neighbor->build_one(list);    // occasional under molblock, see init()
   mb_collect = true;
   for (int i = 0; i < nlocal; i++) {
     if (!(mask[i] & groupbit)) continue;
@@ -3346,7 +3386,7 @@ void FixBAOABTether::refresh_blocks()
   // eligibility bonded: refresh each owned atom's "has a bond" flag from the
   // (symmetric, newton_bond off) per-atom bond count. Ghosts receive it via
   // the same forward comm as om[] (see pack_forward_comm()).
-  if (eligibility_bonded && atom->num_bond) {
+  if ((eligibility_bonded == 1) && atom->num_bond) {
     for (int i = 0; i < nlocal; i++) bonded[i] = (atom->num_bond[i] > 0) ? 1 : 0;
   }
 
@@ -5658,9 +5698,10 @@ void FixBAOABTether::compute_force_delta()
 }
 
 /* ----------------------------------------------------------------------
-   D.14 teacher/student composition (EXPERIMENTAL): the symmetric half-kick
-   impulse 0.5*teacher_every*dt*f_delta[i]/m_i bracketing the teacher_every
-   inner steps, applied directly to v[i] -- deliberately NOT folded into
+   D.14 teacher/student composition (EXPERIMENTAL): the half-kick impulse
+   half_m_dt*f_delta[i]/m_i bracketing the teacher_every inner steps
+   (half_m_dt = half the cycle's duration, 0.5*teacher_every*dt when dt is
+   constant; see final_integrate() for cycles in which adapt changed dt), applied directly to v[i] -- deliberately NOT folded into
    atom->f (which modal_force_correction()/force_moll() already manage for
    the student force), so this stays a clean, separate addition mirroring
    the Python reference's own "vw += 0.5*m*dt*gd" (lj_multifidelity_
@@ -5674,7 +5715,7 @@ void FixBAOABTether::compute_force_delta()
    sub_step_free_atom() and must not also receive this shared-pipeline kick.
 ------------------------------------------------------------------------- */
 
-void FixBAOABTether::teacher_outer_kick()
+void FixBAOABTether::teacher_outer_kick(double half_m_dt)
 {
   double **v = atom->v;
   double *mass = atom->mass;
@@ -5682,8 +5723,6 @@ void FixBAOABTether::teacher_outer_kick()
   int *type = atom->type;
   int *mask = atom->mask;
   int nlocal = atom->nlocal;
-
-  double half_m_dt = 0.5 * teacher_every * update->dt;
 
   for (int i = 0; i < nlocal; i++) {
     if (!(mask[i] & groupbit)) continue;
@@ -5807,6 +5846,7 @@ void FixBAOABTether::setup(int /*vflag*/)
   t_teacher_total_run0 = t_teacher_total;
   t_teacher_pair_run0 = t_teacher_pair;
   n_teacher_calls_run0 = n_teacher_calls;
+  n_teacher_dt_varied_run0 = n_teacher_dt_varied;
 }
 
 /* ----------------------------------------------------------------------
@@ -5837,6 +5877,9 @@ void FixBAOABTether::post_run()
                    1000.0 * tmax[0] / ncalls, 1000.0 * tmax[1] / ncalls, trest,
                    (trun > 0.0) ? 100.0 * trest / trun : 0.0,
                    (nsteps > 0) ? 1000.0 * trest / nsteps : 0.0);
+    if (n_teacher_dt_varied > n_teacher_dt_varied_run0)
+      utils::logmesg(lmp, "  {} outer cycles changed timestep; their teacher kicks used the actual cycle "
+                     "duration\n", n_teacher_dt_varied - n_teacher_dt_varied_run0);
   }
 }
 

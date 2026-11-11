@@ -158,9 +158,14 @@ class FixBAOABTether : public FixBAOAB {
   // if EVERY mode exceeds 0.6*om_split -- the validated H/Pd rattler rule), 1 = bonded
   // (atoms with a bond skip the om_min test, so one stiff mode, e.g. an O-H stretch, can be
   // clamped alone). APPROXIMATION valid only while bond topology is fixed (no reactions);
-  // not usable for MLIP/reactive systems. adapt=yes only.
+  // not usable for MLIP/reactive systems. adapt=yes only. 2 = per_mode (EXPERIMENTAL, size-
+  // scaling test 2026-11-11): every atom skips the om_min test, so any mode above om_split is
+  // clamped on its own, whatever the atom's other modes are.
   int eligibility_bonded;
-  inline bool bonded_ok(int i) const { return eligibility_bonded && bonded[i]; }
+  inline bool bonded_ok(int i) const
+  {
+    return (eligibility_bonded == 2) || (eligibility_bonded && bonded[i]);
+  }
   int newton_res_length;   // 1: solve_center residual in Newton-step length units (see newton_res_comp)
   double newton_res_comp(double r, double mi, double om_m) const;
 
@@ -538,6 +543,13 @@ class FixBAOABTether : public FixBAOAB {
   double t_teacher_total, t_teacher_pair;
   double t_run_start, t_teacher_total_run0, t_teacher_pair_run0;
   bigint n_teacher_calls_run0;
+  // actual duration of the current outer cycle (adapt can change dt inside it): the
+  // dt and half-kick time the opening half-kick assumed (open_dt < 0: no opening
+  // seen yet), the sum of the cycle's step sizes so far, whether any differed, and
+  // how many cycles needed the correction (reported in post_run())
+  double teacher_open_dt, teacher_open_half, teacher_cycle_time;
+  int teacher_dt_varied;
+  bigint n_teacher_dt_varied, n_teacher_dt_varied_run0;
 
   // carried half-kick impulse per flagged atom (nmax x 3): 0.5*teacher_every*dt*
   // F_delta/m, already modal-filtered + back-reaction-applied by
@@ -708,7 +720,7 @@ class FixBAOABTether : public FixBAOAB {
   void apply_modal_filter_and_backreaction();
 
   // D.14 additions
-  void teacher_outer_kick();
+  void teacher_outer_kick(double);   // argument: the time the f_delta impulse covers
   void compute_force_delta();
 
   // stage-3 additions
