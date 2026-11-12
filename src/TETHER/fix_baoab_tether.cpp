@@ -197,6 +197,7 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   teacher_open_half = teacher_cycle_time = 0.0;
   teacher_dt_varied = 0;
   n_teacher_dt_varied = n_teacher_dt_varied_run0 = 0;
+  n_teacher_kick_guard = n_teacher_kick_guard_run0 = 0;
   diag_om_unres = diag_om_unres_p99 = diag_om_analytic = 0.0;
   diag_unres_type = 0;
 
@@ -614,7 +615,6 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   n_demoted = n_kinetic_guard = 0;
   n_partial_force_calls = n_recompute_calls = 0;
   n_ghost_miss = 0;
-  n_mask_agree = n_mask_stale_soft = n_mask_stale_tight = 0;
 
   // request-a-real-reneighbor plumbing (Fix base class members): see
   // need_reneighbor's doc comment in the header. next_reneighbor starts at
@@ -681,11 +681,10 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   // from the kinetic over-excitation guard (subset of [5]); [7] stage-4
   // ghost-miss count (stored sparse-block neighbor drifted outside the
   // ghost cutoff before its back-reaction was applied, contribution
-  // dropped -- see n_ghost_miss in the header); [8..10] stage-20 read-only
-  // diagnostic (cached-vs-fresh mode-eligibility disagreement) -- see
-  // n_mask_agree/n_mask_stale_soft/n_mask_stale_tight in the header.
+  // dropped -- see n_ghost_miss in the header); [8..10] retired (always 0,
+  // formerly a per-step stale-mask diagnostic, removed 2026-11-12).
   vector_flag = 1;
-  size_vector = 18;
+  size_vector = 19;
   extvector = 0;
 
   // per-atom persistent state (curvature-block eigenvectors/frequencies,
@@ -1114,12 +1113,6 @@ void FixBAOABTether::initial_integrate(int /*vflag*/)
 
     bool msk[3];
     for (int m = 0; m < 3; m++) msk[m] = mode_is_stiff(i, m);
-
-    // stage-20 read-only diagnostic (long-run light-subsystem heating
-    // investigation): measure how often this cached mask disagrees with a
-    // fresh re-probe, BEFORE kinetic_guard_and_quench() below can mutate
-    // msk[] in place. No effect on dynamics -- see diag_check_staleness().
-    if (mollify) diag_check_staleness(i, mi, msk);
 
     // project displacement-from-center and velocity into the frozen
     // eigenbasis; unmasked modes carry this round-trip through free
@@ -3908,88 +3901,6 @@ void FixBAOABTether::refresh_one_atom(int i, const double *xi, bool instantaneou
 }
 
 /* ----------------------------------------------------------------------
-   Stage-20 read-only diagnostic (long-run light-subsystem heating
-   investigation): re-probes atom i's curvature at its CURRENT position
-   (same FD-Hessian + jacobi3 math as refresh_one_atom(), minus the
-   neighbor response-block bookkeeping, which this diagnostic does not
-   need) and re-applies mode_is_stiff()'s eligibility logic against the
-   fresh estimate, using the SAME frozen om_split threshold -- never
-   recomputed here. Writes nothing to om[]/evecs[]/c[]/x0[]/Jtag/Jblk/
-   Hacc/n_hess_samples -- purely additive, no effect on dynamics.
-
-   Comparison is by COUNT of masked modes per atom (0..3), not per mode
-   index: H-in-Pd's three curvature modes are nearly degenerate (see
-   effective_skin()'s doc comment, om~0.6 for every mode), so two
-   independent diagonalizations of nearly-equal eigenvalues can permute
-   which physical mode lands in jacobi3's slot 0/1/2 even when nothing
-   has gone stale -- an index-wise comparison was tried first and showed
-   ~100% spurious "disagreement" from this basis-labeling artifact alone,
-   with no sensitivity to actual staleness. The masked-mode COUNT is
-   permutation-invariant and reflects the only thing that actually
-   matters for mollify's tethering decision: how many of this atom's
-   modes get the analytic/quench treatment vs. free flight.
-------------------------------------------------------------------------- */
-
-void FixBAOABTether::diag_check_staleness(int i, double mi, const bool *msk_cached)
-{
-  double xi[3] = {atom->x[i][0], atom->x[i][1], atom->x[i][2]};
-  double H[3][3];
-
-  for (int b = 0; b < 3; b++) {
-    double fplus[3], fminus[3];
-    double xt[3] = {xi[0], xi[1], xi[2]};
-
-    xt[b] = xi[b] + eps;
-    partial_force(i, xt, fplus, nullptr, true);
-
-    xt[b] = xi[b] - eps;
-    partial_force(i, xt, fminus, nullptr, true);
-
-    for (int a = 0; a < 3; a++) H[a][b] = -(fplus[a] - fminus[a]) / (2.0 * eps);
-  }
-
-  double Hs[3][3];
-  for (int a = 0; a < 3; a++)
-    for (int b = 0; b < 3; b++) Hs[a][b] = 0.5 * (H[a][b] + H[b][a]) / mi;
-
-  double eval[3], evec[3][3];
-  MathEigen::jacobi3(Hs, eval, evec);
-  double om_fresh[3];
-  for (int m = 0; m < 3; m++) om_fresh[m] = sqrt(MAX(eval[m], 0.0));
-
-  // mode_is_stiff()'s eligibility test, evaluated against om_fresh instead
-  // of the cached om[i] -- deliberately duplicated rather than refactored
-  // out of mode_is_stiff(), so this diagnostic stays trivially removable.
-  bool msk_fresh[3];
-  if (!adapt) {
-    // same natural-tau -> real-ps conversion as mode_is_stiff() -- see its
-    // doc comment in fix_baoab_tether.h.
-    double om2real = sqrt(force->ftm2v);
-    for (int m = 0; m < 3; m++) msk_fresh[m] = (om_fresh[m] * om2real * update->dt) > theta;
-  } else if (demote_cool[i] > update->ntimestep) {
-    for (int m = 0; m < 3; m++) msk_fresh[m] = false;
-  } else {
-    double om_max = MAX(om_fresh[0], MAX(om_fresh[1], om_fresh[2]));
-    double om_min = MIN(om_fresh[0], MIN(om_fresh[1], om_fresh[2]));
-    bool eligible = (om_max > om_split) && (bonded_ok(i) || (om_min > 0.6 * om_split));
-    for (int m = 0; m < 3; m++) msk_fresh[m] = eligible && (om_fresh[m] > om_split);
-  }
-
-  int n_cached_masked = 0, n_fresh_masked = 0;
-  for (int m = 0; m < 3; m++) {
-    if (msk_cached[m]) n_cached_masked++;
-    if (msk_fresh[m]) n_fresh_masked++;
-  }
-  if (n_cached_masked == n_fresh_masked) {
-    n_mask_agree++;
-  } else if (n_fresh_masked > n_cached_masked) {
-    n_mask_stale_soft++;
-  } else {
-    n_mask_stale_tight++;
-  }
-}
-
-/* ----------------------------------------------------------------------
    Effective drift-guard skin for atom i: refresh_skin_rel > 0 scales to a
    fixed multiple of this atom's OWN thermal ballistic step at dt_max,
    sqrt(kT/m_i)*dt_max (RMS thermal speed times one full-size timestep),
@@ -5432,8 +5343,7 @@ void FixBAOABTether::partial_force_add_bonded(int i, const double *xtrial, doubl
    EVERY one of its callers here -- solve_center()'s Newton residual,
    refresh_blocks()/refresh_one_atom()'s FD-Hessian curvature probe (both
    the atom-i diagonal block and the Hc_j/Jblk cross-derivative columns),
-   sub_step_free_atom()'s exile sub-stepping, diag_check_staleness()'s
-   per-step diagnostic -- whenever force_eval_full is set (see
+   sub_step_free_atom()'s exile sub-stepping -- whenever force_eval_full is set (see
    partial_force()'s own dispatch at its top). Unlike partial_force(),
    this does NOT substitute a flagged neighbor's clamped center c[j] for
    its real position -- every other atom (rattler or not) is evaluated at
@@ -5666,7 +5576,7 @@ void FixBAOABTether::force_moll()
   // must be preserved exactly as computed above, but every OTHER caller
   // of local_partial_force() for the rest of this step (sub_step_free_atom(),
   // kinetic_guard_and_quench()'s instantaneous re-tether, exile handling,
-  // diag_check_staleness(), and refresh_one_atom() if called again later
+  // and refresh_one_atom() if called again later
   // via a mid-step forced refresh) would otherwise silently read this
   // stale clamped-state rho[j]/fp[j] until the step's own ordinary
   // pair->compute() eventually runs -- confirmed as a real, large (often
@@ -5810,6 +5720,54 @@ void FixBAOABTether::compute_force_delta()
     f_delta[i][2] = f[i][2] - fsave[3 * i + 2];
   }
 
+  // Oversized-correction guard. The correction is delivered as two half-kicks a cycle
+  // apart, which is only valid while it is a small, slowly varying nudge. If one cycle's
+  // correction would by itself give an atom more kinetic energy than the kinetic guard's
+  // "hot" threshold (ke_rel kT), teacher and student disagree about that atom's
+  // configuration far more than an impulse can fix -- typically a close encounter outside
+  // the student's fitted range, where a kick drives the atom further in and the next
+  // teacher call kicks harder (runaway, runs_pctl/teach_rep4_s2, 2026-11-12). Such an
+  // atom's correction is dropped (both half-kicks) and, under adapt, the atom is demoted:
+  // it continues on the student alone for the usual backoff, then rejoins.
+  {
+    double *mass = atom->mass;
+    double *rmass = atom->rmass;
+    int *type = atom->type;
+    const double kT = force->boltz * t_target / force->mvv2e;
+    const double ke_cap = ke_rel * kT * force->mvv2e;
+    const double tcyc = teacher_every * update->dt;
+    double kick_max = 0.0;
+    tagint kick_max_tag = -1;
+    int ntrip = 0;
+    for (size_t k = 0; k < flagged.size(); k++) {
+      int i = flagged[k];
+      double mi = rmass ? rmass[i] : mass[type[i]];
+      double fd2 = f_delta[i][0] * f_delta[i][0] + f_delta[i][1] * f_delta[i][1] +
+          f_delta[i][2] * f_delta[i][2];
+      double dv = tcyc * force->ftm2v / mi;    // velocity change per unit force over one cycle
+      double ke_kick = 0.5 * force->mvv2e * mi * dv * dv * fd2;
+      if (ke_kick > kick_max) {
+        kick_max = ke_kick;
+        kick_max_tag = atom->tag[i];
+      }
+      if (ke_kick <= ke_cap) continue;
+      ntrip++;
+      n_teacher_kick_guard++;
+      std::string detail;
+      if (event_log_fp)
+        detail = fmt::format(" kick_kT={:.4g} fdelta={:.4g}", ke_kick / (kT * force->mvv2e), sqrt(fd2));
+      f_delta[i][0] = f_delta[i][1] = f_delta[i][2] = 0.0;
+      if (adapt && (demote_cool[i] <= update->ntimestep))
+        demote_atom(i, 3 * (bigint) refresh_every, "teacher_kick", detail);
+      else if (event_log_fp)
+        log_event("KICK_GUARD", atom->tag[i], -1.0, -1.0, -1.0, -1.0, nullptr, update->dt,
+                  fmt::format("type={}{}", type[i], detail));
+    }
+    if (event_log_fp)
+      log_event("TEACHER", kick_max_tag, -1.0, -1.0, -1.0, -1.0, nullptr, update->dt,
+                fmt::format("max_kick_kT={:.4g} dropped={}", kick_max / (kT * force->mvv2e), ntrip));
+  }
+
   for (size_t k = 0; k < flagged.size(); k++) {
     int i = flagged[k];
     x[i][0] = xsave[3 * k + 0];
@@ -5938,10 +5896,11 @@ double FixBAOABTether::memory_usage()
    guard specifically (subset of [5]), [7] stage-4 ghost-miss count (a
    stored sparse-block neighbor could not be resolved via atom->map(),
    see n_ghost_miss in the header -- always 0 on a single rank with a
-   generous cutoff/skin). [8..10] stage-20 read-only diagnostic: cached-vs-
-   fresh mode-eligibility agreement/disagreement counts from
-   diag_check_staleness() -- see n_mask_agree/n_mask_stale_soft/
-   n_mask_stale_tight in the header. [11] D.14 (EXPERIMENTAL): teacher_pair
+   generous cutoff/skin). [8..10] retired, always 0 (formerly a per-step
+   stale-mask diagnostic that re-probed every atom's curvature each step;
+   removed 2026-11-12, the slots are kept so later indices do not move).
+   [18] per-atom teacher corrections dropped by the oversized-kick guard
+   (see compute_force_delta()). [11] D.14 (EXPERIMENTAL): teacher_pair
    ->compute() calls (n_teacher_calls) -- the MLIP-call-count headline
    metric for the teacher/student composition, always 0 when
    teacher_every == 0.
@@ -5949,7 +5908,7 @@ double FixBAOABTether::memory_usage()
 
 double FixBAOABTether::compute_vector(int n)
 {
-  if ((n < 0) || (n >= 18)) return 0.0;
+  if ((n < 0) || (n >= 19)) return 0.0;
   if (cvec_step != update->ntimestep) reduce_vector();
   return cvec[n];
 }
@@ -5959,15 +5918,16 @@ double FixBAOABTether::compute_vector(int n)
    ranks, the dt-limiter maxima (12, 15) are maxed, with the atom type (13) of
    the rank holding the largest unresolved frequency; the 99th percentile (14)
    is global under eligibility per_mode (update_dt()) and rank 0's otherwise.
-   The teacher timings (16, 17) are wall-clock values, taken from rank 0.
+   The teacher timings (16, 17) are wall-clock values, taken from rank 0. The
+   kick-guard count (18) is summed.
 ------------------------------------------------------------------------- */
 
 void FixBAOABTether::reduce_vector()
 {
   double cnt[12] = {(double) n_guard_newton, (double) n_guard_flip, (double) n_guard_energy,
                     (double) n_partial_force_calls, (double) n_recompute_calls, (double) n_demoted,
-                    (double) n_kinetic_guard, (double) n_ghost_miss, (double) n_mask_agree,
-                    (double) n_mask_stale_soft, (double) n_mask_stale_tight, (double) n_teacher_calls};
+                    (double) n_kinetic_guard, (double) n_ghost_miss, 0.0,
+                    0.0, 0.0, (double) n_teacher_calls};
   MPI_Allreduce(cnt, cvec, 12, MPI_DOUBLE, MPI_SUM, world);
   // the teacher is one collective call per outer step: every rank counts each call
   cvec[11] = (double) n_teacher_calls;
@@ -5988,6 +5948,8 @@ void FixBAOABTether::reduce_vector()
   cvec[15] = om_an;
   cvec[16] = t_teacher_total;
   cvec[17] = t_teacher_pair;
+  double nkick = (double) n_teacher_kick_guard;
+  MPI_Allreduce(&nkick, &cvec[18], 1, MPI_DOUBLE, MPI_SUM, world);
   cvec_step = update->ntimestep;
 }
 
@@ -6002,6 +5964,7 @@ void FixBAOABTether::setup(int /*vflag*/)
   t_teacher_pair_run0 = t_teacher_pair;
   n_teacher_calls_run0 = n_teacher_calls;
   n_teacher_dt_varied_run0 = n_teacher_dt_varied;
+  n_teacher_kick_guard_run0 = n_teacher_kick_guard;
 }
 
 /* ----------------------------------------------------------------------
@@ -6020,6 +5983,8 @@ void FixBAOABTether::post_run()
   const double trun = platform::walltime() - t_run_start;
   const bigint ncalls = n_teacher_calls - n_teacher_calls_run0;
   const bigint nsteps = update->nsteps;
+  bigint nkick_loc = n_teacher_kick_guard - n_teacher_kick_guard_run0, nkick = 0;
+  MPI_Allreduce(&nkick_loc, &nkick, 1, MPI_LMP_BIGINT, MPI_SUM, world);
 
   if ((comm->me == 0) && (ncalls > 0)) {
     const double trest = trun - tmax[0];
@@ -6035,6 +6000,9 @@ void FixBAOABTether::post_run()
     if (n_teacher_dt_varied > n_teacher_dt_varied_run0)
       utils::logmesg(lmp, "  {} outer cycles changed timestep; their teacher kicks used the actual cycle "
                      "duration\n", n_teacher_dt_varied - n_teacher_dt_varied_run0);
+    if (nkick > 0)
+      utils::logmesg(lmp, "  {} per-atom teacher corrections were too large to apply as a kick and "
+                     "were dropped\n", nkick);
   }
 }
 

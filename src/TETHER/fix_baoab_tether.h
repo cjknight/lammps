@@ -172,7 +172,7 @@ class FixBAOABTether : public FixBAOAB {
   // only mode that bypasses partial_force()'s local kernel entirely --
   // for EVERY caller (solve_center()'s Newton residual, refresh_blocks()/
   // refresh_one_atom()'s FD-Hessian curvature probe, sub_step_free_atom()'s
-  // exile sub-stepping, diag_check_staleness()'s per-step diagnostic) --
+  // exile sub-stepping) --
   // substituting a genuine whole-system recompute_forces_local() per trial
   // evaluation instead (see full_system_force()). O(N) per probe and
   // single-process only -- not a production option, see
@@ -180,8 +180,7 @@ class FixBAOABTether : public FixBAOAB {
   // to find out whether local_partial_force()'s neighbor-shell truncation
   // of the EAM embedding term explains a curvature discrepancy against a
   // full-system reference (e.g. lj_longstep_prototype.py's FD Hessian),
-  // not to be fast. diag_check_staleness() in particular runs this every
-  // step for every mollified atom -- keep debug runs short.
+  // not to be fast -- keep debug runs short.
   int force_eval_full;
 
   // stage-3 adaptive-dt + event machinery (all inert when adapt == 0)
@@ -537,7 +536,7 @@ class FixBAOABTether : public FixBAOAB {
   // compute_vector() values reduced over all ranks (counts summed, maxima maxed), computed
   // once per timestep: the per-rank counters alone made thermo print only rank 0's share
   bigint cvec_step;
-  double cvec[18];
+  double cvec[19];
   void reduce_vector();
   bigint n_teacher_calls;       // diagnostic: teacher_pair->compute() calls (compute_vector())
   // wall-clock cost of the teacher (compute_vector() 16/17, summary in post_run()):
@@ -554,6 +553,9 @@ class FixBAOABTether : public FixBAOAB {
   double teacher_open_dt, teacher_open_half, teacher_cycle_time;
   int teacher_dt_varied;
   bigint n_teacher_dt_varied, n_teacher_dt_varied_run0;
+  // teacher corrections dropped by the oversized-kick guard in compute_force_delta()
+  // (compute_vector() 19, summary in post_run())
+  bigint n_teacher_kick_guard, n_teacher_kick_guard_run0;
 
   // carried half-kick impulse per flagged atom (nmax x 3): 0.5*teacher_every*dt*
   // F_delta/m, already modal-filtered + back-reaction-applied by
@@ -681,20 +683,6 @@ class FixBAOABTether : public FixBAOAB {
   // on a single rank with a generous cutoff/skin.
   bigint n_ghost_miss;
 
-  // Stage-20 read-only diagnostic (long-run light-subsystem heating
-  // investigation): cached-vs-fresh mode-eligibility disagreement, measured
-  // by diag_check_staleness() immediately after mode_is_stiff() decides the
-  // cached mask and before kinetic_guard_and_quench() can mutate it. Pure
-  // counters, exposed via compute_vector() alongside the existing event
-  // counters above; writes nothing to om[]/evecs[]/c[]/x0[]/Jtag/Jblk.
-  // Per-atom-per-step counts of MASKED-MODE COUNT agreement (0..3 masked
-  // modes cached vs. freshly re-probed), not per-mode-index agreement --
-  // see diag_check_staleness()'s doc comment for why per-index comparison
-  // is invalid for H-in-Pd's near-degenerate modes.
-  bigint n_mask_agree;
-  bigint n_mask_stale_soft;  // fresh count > cached count (dangerous: fewer modes tethered than should be)
-  bigint n_mask_stale_tight; // fresh count < cached count (harmless: more modes tethered than needed)
-
   // halo-locality cost accounting (plan Sec 6.1 honest force-call cost):
   // partial_force() calls (Newton inner loop, mollify=yes) vs. full local
   // recompute_forces_local() calls -- exposed via compute_vector().
@@ -751,14 +739,6 @@ class FixBAOABTether : public FixBAOAB {
   double om_mask_thr;
   void compute_om_split();
   void compute_heavy_block();
-
-  // Stage-20 read-only diagnostic: re-probes atom i's curvature at its
-  // CURRENT position (FD Hessian + jacobi3, same math as refresh_one_atom())
-  // without writing om[]/evecs[]/c[]/x0[]/Jtag/Jblk, re-applies the
-  // mode_is_stiff() eligibility test against the fresh estimate, and
-  // accumulates n_mask_agree/n_mask_stale_soft/n_mask_stale_tight against
-  // msk_cached (the mask mode_is_stiff() just produced this step).
-  void diag_check_staleness(int i, double mi, const bool *msk_cached);
 
   // fresh_sample: true (default) from refresh_blocks()'s own scheduled
   // cadence (every flagged atom's om[]/evecs[] just freshly reprobed

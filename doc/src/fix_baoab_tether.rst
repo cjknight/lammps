@@ -997,7 +997,7 @@ threshold was 1.25 times the rung, which lies inside the band where the
 step is lowered again at the next rung, so the timestep could alternate
 between two rungs at every refresh.
 
-This fix computes a global vector of length 18, which can be accessed by
+This fix computes a global vector of length 19, which can be accessed by
 various :doc:`output commands <Howto_output>`. The values are, in order:
 the running count of Newton non-convergence guard trips, the running
 count of center "flip" guard trips, the running count of over-excited
@@ -1021,8 +1021,17 @@ three and the 6th/7th entries are diagnostic only except when *adapt* is
 *yes*, in which case the first three drive actual demotion events (see
 above). The vector values calculated by this fix are "extensive".
 
-The 9th through 12th entries are diagnostic counters for the stale-mask
-checks and the teacher force calls.  The 13th through 16th entries report,
+The 9th through 11th entries are always 0.
+
+.. versionchanged:: TBD
+
+   They used to count a per-step check that re-measured the curvature of
+   every atom at every step.  That check was purely diagnostic, had no
+   effect on the trajectory, and took most of the time this fix spends,
+   so it was removed; the entries are kept so that the later ones keep
+   their positions.
+
+The 12th entry counts the teacher force calls.  The 13th through 16th entries report,
 as of the most recent timestep selection, the highest frequency among
 modes that are not treated analytically (this sets the adaptive timestep),
 the LAMMPS atom type that owns it, the 99th percentile of the same
@@ -1038,6 +1047,22 @@ that time spent in the teacher pair style itself (including any copies
 between host and GPU).  Both are 0 unless *teacher_every* is set.  At the
 end of each run with a teacher, the fix also prints how the run's wall
 time divides between the teacher calls and everything else.
+
+.. versionadded:: TBD
+
+The 19th entry counts teacher corrections that were too large to apply.
+The teacher correction is delivered as two velocity kicks, one at each
+end of an interval of *teacher_every* steps, which is only valid while it
+is a small and slowly varying nudge.  If one interval's correction would
+by itself give an atom more kinetic energy than *ke_rel* times
+:math:`k_B T` (the same threshold the kinetic guard uses), the teacher and
+the student disagree about that atom's surroundings far more than a kick
+can fix, typically during a close encounter outside the range the student
+was fitted to.  Such a correction is dropped for that atom, and with
+*adapt yes* the atom is demoted, so it continues on the student alone
+until the usual backoff ends.  Without this check, the kick can drive the
+atom further into the encounter and each later teacher call then kicks
+harder, which heats the system without bound.
 
 This fix is not invoked during :doc:`energy minimization <minimize>`.
 
