@@ -152,6 +152,11 @@ void Verlet::setup(int flag)
   }
 
   if (force->kspace) {
+    auto *pair_mliap_check = dynamic_cast<PairMLIAP *>(force->pair);
+    if (pair_mliap_check) {
+      force->kspace->init();
+      force->kspace->set_gewaldflag();
+    }
     force->kspace->setup();
     if (kspace_compute_flag) force->kspace->compute(eflag,vflag);
     else force->kspace->compute_dummy(eflag,vflag);
@@ -272,6 +277,7 @@ void Verlet::run(int n)
     if (n_post_integrate) modify->post_integrate();
     timer->stamp(Timer::MODIFY);
 
+    // TODO: FENCE
     // regular communication vs neighbor list rebuild
 
     nflag = neighbor->decide();
@@ -310,6 +316,7 @@ void Verlet::run(int n)
         timer->stamp(Timer::MODIFY);
       }
     }
+    // TODO: FENCE
 
     // force computations
     // important for pair to come before bonded contributions
@@ -325,10 +332,12 @@ void Verlet::run(int n)
       timer->stamp(Timer::MODIFY);
     }
 
+    // TODO: FENCE
     if (pair_compute_flag) {
       force->pair->compute(eflag,vflag);
       timer->stamp(Timer::PAIR);
     }
+    // TODO: FENCE
 
     if (atom->molecular != Atom::ATOMIC) {
       if (force->bond) force->bond->compute(eflag,vflag);
@@ -350,6 +359,7 @@ void Verlet::run(int n)
 
     if (pair_mliap && pppm) {
       pair_mliap->compute_charge_response_forces(pppm->phi);
+      timer->stamp(Timer::PAIR);
     }
 
     if (n_pre_reverse) {

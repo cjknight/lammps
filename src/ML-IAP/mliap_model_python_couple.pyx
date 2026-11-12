@@ -68,8 +68,24 @@ cdef public int MLIAPPY_load_model(MLIAPModelPython * c_model, char* fname) with
         returnval = 0
     else:
         if str_fname.endswith(".pt") or str_fname.endswith('.pth'):
+            import warnings
+            warnings.filterwarnings("ignore", message=".*Overriding a previously registered kernel.*")
+            warnings.filterwarnings("ignore", message=".*smallest subnormal.*")
+            warnings.filterwarnings("ignore", category=UserWarning, module="torch.*")
             import torch
-            model = torch.load(str_fname, weights_only=False)
+            device = torch.device("cpu")
+            if torch.cuda.is_available():
+                device = torch.device("cuda")
+            elif torch.xpu.is_available():
+                device = torch.device("xpu")
+            elif torch.mps.is_available():
+                device = torch.device("mps")
+            #print("USING DEVICE: ", device.type, flush=True)
+
+            model = torch.load(str_fname, map_location=device, weights_only=False)
+
+            model.device = device
+            model.model = model.model.to(device)
         else:
             with open(str_fname,'rb') as pfile:
                 model = pickle.load(pfile)

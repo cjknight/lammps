@@ -23,6 +23,9 @@
 #include "pair_mliap_kokkos.h"
 #include "atom_masks.h"
 #include "kokkos.h"
+#include "kspace.h"
+#include "force.h"
+
 
 /* ---------------------------------------------------------------------- */
 
@@ -45,6 +48,7 @@ template<class DeviceType>
 MLIAPDataKokkos<DeviceType>::~MLIAPDataKokkos() {
   memoryKK->destroy_kokkos(k_gradforce,gradforce);
   memoryKK->destroy_kokkos(k_betas,betas);
+  memoryKK->destroy_kokkos(k_charge_betas,charge_betas);
   memoryKK->destroy_kokkos(k_descriptors,descriptors);
   memoryKK->destroy_kokkos(k_eatoms,eatoms);
   memoryKK->destroy_kokkos(k_gamma_row_index,gamma_row_index);
@@ -96,6 +100,8 @@ void MLIAPDataKokkos<DeviceType>::generate_neighdata(class NeighList *list_in, i
   if (nlistatoms_max < nlistatoms) {
     memoryKK->destroy_kokkos(k_betas,betas);
     memoryKK->create_kokkos(k_betas, betas, nlistatoms, ndescriptors, "mliap_data:betas");
+    memoryKK->destroy_kokkos(k_charge_betas,charge_betas);
+    memoryKK->create_kokkos(k_charge_betas, charge_betas, nlistatoms, ndescriptors, "mliap_data:charge_betas");
     memoryKK->destroy_kokkos(k_descriptors,descriptors);
     memoryKK->create_kokkos(k_descriptors, descriptors, nlistatoms, ndescriptors, "mliap_data:descriptors");
     memoryKK->destroy_kokkos(k_eatoms,eatoms);
@@ -280,6 +286,7 @@ void MLIAPDataKokkos<DeviceType>::modified(ExecutionSpace space, uint64_t mask, 
     if (mask & ELEMS_MASK       ) k_elems          .modify_device();
     if (mask & IJ_MASK          ) k_ij             .modify_device();
     if (mask & BETAS_MASK       ) k_betas          .modify_device();
+    if (mask & CHARGE_BETAS_MASK ) k_charge_betas    .modify_device();
     if (mask & DESCRIPTORS_MASK ) k_descriptors    .modify_device();
     if (mask & EATOMS_MASK      ) k_eatoms         .modify_device();
     if (mask & RIJ_MASK         ) k_rij            .modify_device();
@@ -300,6 +307,7 @@ void MLIAPDataKokkos<DeviceType>::modified(ExecutionSpace space, uint64_t mask, 
     if (mask & ELEMS_MASK       ) k_elems          .modify_host();
     if (mask & IJ_MASK          ) k_ij             .modify_host();
     if (mask & BETAS_MASK       ) k_betas          .modify_host();
+    if (mask & CHARGE_BETAS_MASK ) k_charge_betas    .modify_host();
     if (mask & DESCRIPTORS_MASK ) k_descriptors    .modify_host();
     if (mask & EATOMS_MASK      ) k_eatoms         .modify_host();
     if (mask & RIJ_MASK         ) k_rij            .modify_host();
@@ -328,6 +336,7 @@ void MLIAPDataKokkos<DeviceType>::sync(ExecutionSpace space, uint64_t mask, bool
     if (mask & ELEMS_MASK       ) k_elems          .sync_device();
     if (mask & IJ_MASK          ) k_ij             .sync_device();
     if (mask & BETAS_MASK       ) k_betas          .sync_device();
+    if (mask & CHARGE_BETAS_MASK ) k_charge_betas    .sync_device();
     if (mask & DESCRIPTORS_MASK ) k_descriptors    .sync_device();
     if (mask & EATOMS_MASK      ) k_eatoms         .sync_device();
     if (mask & RIJ_MASK         ) k_rij            .sync_device();
@@ -347,6 +356,7 @@ void MLIAPDataKokkos<DeviceType>::sync(ExecutionSpace space, uint64_t mask, bool
     if (mask & ELEMS_MASK       ) k_elems          .sync_host();
     if (mask & IJ_MASK          ) k_ij             .sync_host();
     if (mask & BETAS_MASK       ) k_betas          .sync_host();
+    if (mask & CHARGE_BETAS_MASK ) k_charge_betas    .sync_host();
     if (mask & DESCRIPTORS_MASK ) k_descriptors    .sync_host();
     if (mask & EATOMS_MASK      ) k_eatoms         .sync_host();
     if (mask & RIJ_MASK         ) k_rij            .sync_host();
@@ -357,6 +367,23 @@ void MLIAPDataKokkos<DeviceType>::sync(ExecutionSpace space, uint64_t mask, bool
     if (mask & GAMMA_ROW_MASK   ) k_gamma_row_index.sync_host();
     if (mask & GAMMA_COL_MASK   ) k_gamma_col_index.sync_host();
   }
+}
+
+template <class DeviceType>
+double *MLIAPDataKokkos<DeviceType>::get_charges()
+{
+  AtomKokkos *atomKK = (AtomKokkos *) atom;
+  return atomKK->k_q.view<DeviceType>().data();
+}
+
+template <class DeviceType>
+void MLIAPDataKokkos<DeviceType>::update_charges()
+{
+  AtomKokkos *atomKK = (AtomKokkos *) atom;
+  atomKK->modified(execution_space, Q_MASK);
+  atomKK->sync(Host, Q_MASK);
+  if (force->kspace)
+    force->kspace->qsum_qsq(1);
 }
 
 /* ---------------------------------------------------------------------- */

@@ -32,6 +32,8 @@
 #include "kokkos.h"
 #include "pointers.h"
 
+#include "mliap_descriptor_mtp_kokkos.h"
+
 using namespace LAMMPS_NS;
 
 /* ---------------------------------------------------------------------- */
@@ -125,6 +127,9 @@ void PairMLIAPKokkos<DeviceType>::compute(int eflag, int vflag)
     k_data->modified(model_space, EATOMS_MASK);
   }
 
+  comm->forward_comm();
+
+
   // calculate force contributions beta_i*dB_i/dR_j
   atomKK->sync(descriptor_space,F_MASK);
   k_data->sync(descriptor_space, NUMNEIGHS_MASK | IATOMS_MASK | IELEMS_MASK | ELEMS_MASK | BETAS_MASK | JATOMS_MASK | PAIR_I_MASK | JELEMS_MASK | RIJ_MASK );
@@ -198,6 +203,10 @@ void PairMLIAPKokkos<DeviceType>::settings(int narg, char ** arg)
         delete descriptor;
         descriptor = new MLIAPDescriptorSO3Kokkos<DeviceType>(lmp,arg[iarg+2]);
         iarg += 3;
+      } else if (strcmp(arg[iarg+1],"mtp") == 0) {
+        delete descriptor;
+	descriptor = new MLIAPDescriptorMTPKokkos<DeviceType>(lmp);
+	iarg += 2;
       } else
         new_args.push_back(arg[iarg++]);
     } else if (strcmp(arg[iarg], "unified") == 0) {
@@ -666,6 +675,25 @@ void PairMLIAPKokkos<DeviceType>::unpack_reverse_comm(int nv, int *idx, double *
       copy_to[gstart++] += static_cast<CommType>(fill[start++]);
   }
 }
+
+template <class DeviceType>
+void PairMLIAPKokkos<DeviceType>::compute_charge_response_forces(
+    typename ArrayTypes<DeviceType>::t_double_1d d_phi)
+{
+  MLIAPDescriptorMTPKokkos<DeviceType> *mtp =
+      dynamic_cast<MLIAPDescriptorMTPKokkos<DeviceType> *>(descriptor);
+
+  if (!mtp) return;
+
+  MLIAPDataKokkos<DeviceType> *k_data = (MLIAPDataKokkos<DeviceType>*)(data);
+
+  mtp->compute_forces_from_coeffs(
+      k_data,
+      k_data->k_charge_betas,
+      d_phi);
+}
+
+
 namespace LAMMPS_NS {
 template class PairMLIAPKokkos<LMPDeviceType>;
 template int PairMLIAPKokkos<LMPDeviceType>::forward_comm<float>(float*,float*,const int);

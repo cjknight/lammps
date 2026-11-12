@@ -1,20 +1,22 @@
 units           metal
-atom_style      charge
+atom_style      charge/kk
 
 boundary        p p p
 
 read_data       bigger.data
 
+suffix off
 pair_style      mliap model mliappy hfo2_model_wrapped.pt descriptor mtp 
+suffix on
 pair_coeff       * * Hf O
 
-#kspace_style    ewald 1e-9
-#kspace_modify mesh 128 128 128
-kspace_style pppm 1.0e-6
+kspace_style pppm/kk 1.0e-6
 #kspace_modify order 7
 
 neighbor        0.3 bin
 neigh_modify    delay 0 every 20 check no
+
+#displace_atoms all move 10.0 10.0 10.0 units lattice
 
 fix             1 all nve
 
@@ -25,5 +27,6 @@ thermo          1
 #thermo_style custom step pe epair emol elong
 thermo_style custom pe etotal epair evdwl ecoul elong
 
-run             0
+run_style verlet/kk
+run             10
 

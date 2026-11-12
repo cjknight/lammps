@@ -18,7 +18,7 @@
 
 namespace LAMMPS_NS {
 
-class MLIAPDescriptorMTP : public MLIAPDescriptor {
+class MLIAPDescriptorMTP : public MLIAPDescriptor, virtual protected Pointers {
  public:
   MLIAPDescriptorMTP(class LAMMPS *);
   ~MLIAPDescriptorMTP() override;
@@ -31,6 +31,9 @@ class MLIAPDescriptorMTP : public MLIAPDescriptor {
   void compute_forces_from_coeffs(class MLIAPData *, double **coeffs, double *phi = nullptr);
   void compute_force_gradients(class MLIAPData *) override;
   bool printed = false;
+
+  static constexpr int MAX_N_RADIAL = 12;
+  static constexpr int MAX_N_RF = 8;
 
  protected:
   enum BasisType {

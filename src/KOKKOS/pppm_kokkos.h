@@ -63,6 +63,7 @@ struct TagPPPM_poisson_ik7{};
 struct TagPPPM_poisson_ik8{};
 struct TagPPPM_poisson_ik9{};
 struct TagPPPM_poisson_ik10{};
+struct TagPPPM_poisson_ik11{};
 struct TagPPPM_poisson_ik_triclinic1{};
 struct TagPPPM_poisson_ik_triclinic2{};
 struct TagPPPM_poisson_ik_triclinic3{};
@@ -113,6 +114,8 @@ class PPPMKokkos : public PPPM, public KokkosBaseFFT {
   int timing_1d(int, double &) override;
   int timing_3d(int, double &) override;
   double memory_usage() override;
+
+  typename AT::t_double_1d get_phi() const { return d_phi; }
 
 // NOLINTNEXTLINE
   KOKKOS_INLINE_FUNCTION
@@ -217,6 +220,10 @@ class PPPMKokkos : public PPPM, public KokkosBaseFFT {
 // NOLINTNEXTLINE
   KOKKOS_INLINE_FUNCTION
   void operator()(TagPPPM_poisson_ik10, const int&) const;
+
+// NOLINTNEXTLINE
+  KOKKOS_INLINE_FUNCTION
+  void operator()(TagPPPM_poisson_ik11, const int&) const;
 
 // NOLINTNEXTLINE
   KOKKOS_INLINE_FUNCTION
@@ -417,6 +424,7 @@ class PPPMKokkos : public PPPM, public KokkosBaseFFT {
 
   typename FFT_AT::t_FFT_SCALAR_3d d_density_brick;
   typename FFT_AT::t_FFT_SCALAR_3d d_vdx_brick,d_vdy_brick,d_vdz_brick;
+  typename FFT_AT::t_FFT_SCALAR_3d d_phi_brick;
   typename FFT_AT::t_FFT_SCALAR_3d d_u_brick;
   typename FFT_AT::t_FFT_SCALAR_3d d_v0_brick,d_v1_brick,d_v2_brick;
   typename FFT_AT::t_FFT_SCALAR_3d d_v3_brick,d_v4_brick,d_v5_brick;
@@ -428,9 +436,13 @@ class PPPMKokkos : public PPPM, public KokkosBaseFFT {
   FFT_DAT::tdual_FFT_SCALAR_1d k_density_fft;
   FFT_DAT::tdual_FFT_SCALAR_1d k_work1;
   FFT_DAT::tdual_FFT_SCALAR_1d k_work2;
+  FFT_DAT::tdual_FFT_SCALAR_1d k_work3;
+  DAT::tdual_double_1d k_phi;
   typename FFT_AT::t_FFT_SCALAR_1d d_density_fft;
   typename FFT_AT::t_FFT_SCALAR_1d d_work1;
   typename FFT_AT::t_FFT_SCALAR_1d d_work2;
+  typename FFT_AT::t_FFT_SCALAR_1d d_work3;
+  typename AT::t_double_1d d_phi;
 
   DAT::tdual_double_1d k_gf_b;
   typename AT::t_double_1d d_gf_b;
@@ -445,7 +457,7 @@ class PPPMKokkos : public PPPM, public KokkosBaseFFT {
 
   // FFTs and grid communication
 
-  FFT3dKokkos<DeviceType> *fft1,*fft2;
+  FFT3dKokkos<DeviceType> *fft1,*fft2,*fft_phi;
   RemapKokkos<DeviceType> *remap;
   Grid3dKokkos<DeviceType> *gc;
 
@@ -467,6 +479,8 @@ class PPPMKokkos : public PPPM, public KokkosBaseFFT {
   double estimate_ik_error(double, double, bigint) override;
   void compute_gf_denom() override;
   void compute_gf_ik() override;
+
+  void qsum_qsq(int warning_flag = 1) override;
 
   void particle_map() override;
   void make_rho() override;
