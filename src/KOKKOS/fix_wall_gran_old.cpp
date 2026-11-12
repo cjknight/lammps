@@ -503,8 +503,6 @@ int FixWallGranOld::setmask()
 
 void FixWallGranOld::init()
 {
-  int i;
-
   dt = update->dt;
 
   if (utils::strmatch(update->integrate_style,"^respa"))
@@ -513,9 +511,8 @@ void FixWallGranOld::init()
   // check for FixRigid so can extract rigid body masses
 
   fix_rigid = nullptr;
-  for (i = 0; i < modify->nfix; i++)
-    if (modify->fix[i]->rigid_flag) break;
-  if (i < modify->nfix) fix_rigid = modify->fix[i];
+  for (const auto &ifix : modify->get_fix_list())
+    if (ifix->rigid_flag) { fix_rigid = ifix; break; }
 
   if(pairstyle == GRANULAR) {
     tangential_history_index = 0;
@@ -549,6 +546,7 @@ void FixWallGranOld::init()
       normal_coeffs[1] = 1.2728-4.2783*cor+11.087*pow(cor,2)-22.348*pow(cor,3)+
           27.467*pow(cor,4)-18.022*pow(cor,5)+
           4.8218*pow(cor,6);
+      normal_coeffs[1] *= MY_SQRT2;
     }
   }
 }
