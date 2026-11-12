@@ -162,7 +162,6 @@ void VerletKokkos::setup(int flag)
     auto *pair_mliap_check = dynamic_cast<PairMLIAPKokkos<LMPDeviceType> *>(force->pair);
     if (pair_mliap_check) {
       force->kspace->init();
-      force->kspace->set_gewaldflag();
     }
     force->kspace->setup();
     if (kspace_compute_flag) {

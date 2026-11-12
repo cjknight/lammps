@@ -640,6 +640,10 @@ void PPPMKokkos<DeviceType>::compute(int eflag, int vflag)
     nmax = atomKK->nmax;
     d_part2grid = typename AT::t_int_1d_3("pppm:part2grid",nmax);
     d_rho1d = typename FFT_AT::t_FFT_SCALAR_2d_3("pppm:rho1d",nmax,order/2+order/2+1);
+
+    memoryKK->destroy_kokkos(k_phi,phi);
+    memoryKK->create_kokkos(k_phi,phi,nmax,"pppm:phi");
+    d_phi = k_phi.view<DeviceType>();
   }
 
   // find grid points for all my particles
@@ -666,7 +670,7 @@ void PPPMKokkos<DeviceType>::compute(int eflag, int vflag)
   // all procs communicate E-field values
   // to fill ghost cells surrounding their 3d bricks
 
-  gc->forward_comm(Grid3d::KSPACE,this,FORWARD_IK,3,sizeof(FFT_SCALAR),
+  gc->forward_comm(Grid3d::KSPACE,this,FORWARD_IK,4,sizeof(FFT_SCALAR),
                    k_gc_buf1,k_gc_buf2,MPI_FFT_SCALAR);
 
   // extra per-atom energy/virial communication
