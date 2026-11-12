@@ -534,6 +534,11 @@ class FixBAOABTether : public FixBAOAB {
   void mb_final_integrate();
   double diag_om_unres, diag_om_unres_p99, diag_om_analytic;
   int diag_unres_type;
+  // compute_vector() values reduced over all ranks (counts summed, maxima maxed), computed
+  // once per timestep: the per-rank counters alone made thermo print only rank 0's share
+  bigint cvec_step;
+  double cvec[18];
+  void reduce_vector();
   bigint n_teacher_calls;       // diagnostic: teacher_pair->compute() calls (compute_vector())
   // wall-clock cost of the teacher (compute_vector() 16/17, summary in post_run()):
   // whole compute_force_delta() calls, and the teacher_pair->compute() part of them

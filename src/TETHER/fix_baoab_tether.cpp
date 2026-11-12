@@ -113,6 +113,8 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   a_th_mass_scale = 0;
   eligibility_bonded = 2;
   om_mask_thr = 0.0;
+  cvec_step = -1;
+  for (double &v : cvec) v = 0.0;
   bonded = nullptr;
   newton_res_length = 0;
   newton_tol_rel = 5.0;
@@ -5883,27 +5885,46 @@ double FixBAOABTether::memory_usage()
 
 double FixBAOABTether::compute_vector(int n)
 {
-  switch (n) {
-    case 0: return (double) n_guard_newton;
-    case 1: return (double) n_guard_flip;
-    case 2: return (double) n_guard_energy;
-    case 3: return (double) n_partial_force_calls;
-    case 4: return (double) n_recompute_calls;
-    case 5: return (double) n_demoted;
-    case 6: return (double) n_kinetic_guard;
-    case 7: return (double) n_ghost_miss;
-    case 8: return (double) n_mask_agree;
-    case 9: return (double) n_mask_stale_soft;
-    case 10: return (double) n_mask_stale_tight;
-    case 11: return (double) n_teacher_calls;
-    case 12: return diag_om_unres;
-    case 13: return (double) diag_unres_type;
-    case 14: return diag_om_unres_p99;
-    case 15: return diag_om_analytic;
-    case 16: return t_teacher_total;
-    case 17: return t_teacher_pair;
-    default: return 0.0;
-  }
+  if ((n < 0) || (n >= 18)) return 0.0;
+  if (cvec_step != update->ntimestep) reduce_vector();
+  return cvec[n];
+}
+
+/* ----------------------------------------------------------------------
+   global values of the output vector: the counters (0-11) are summed over all
+   ranks, the dt-limiter maxima (12, 15) are maxed, with the atom type (13) of
+   the rank holding the largest unresolved frequency; the 99th percentile (14)
+   is global under eligibility per_mode (update_dt()) and rank 0's otherwise.
+   The teacher timings (16, 17) are wall-clock values, taken from rank 0.
+------------------------------------------------------------------------- */
+
+void FixBAOABTether::reduce_vector()
+{
+  double cnt[12] = {(double) n_guard_newton, (double) n_guard_flip, (double) n_guard_energy,
+                    (double) n_partial_force_calls, (double) n_recompute_calls, (double) n_demoted,
+                    (double) n_kinetic_guard, (double) n_ghost_miss, (double) n_mask_agree,
+                    (double) n_mask_stale_soft, (double) n_mask_stale_tight, (double) n_teacher_calls};
+  MPI_Allreduce(cnt, cvec, 12, MPI_DOUBLE, MPI_SUM, world);
+  // the teacher is one collective call per outer step: every rank counts each call
+  cvec[11] = (double) n_teacher_calls;
+
+  struct {
+    double val;
+    int rank;
+  } loc = {diag_om_unres, comm->me}, glob;
+  MPI_Allreduce(&loc, &glob, 1, MPI_DOUBLE_INT, MPI_MAXLOC, world);
+  int type = diag_unres_type;
+  MPI_Bcast(&type, 1, MPI_INT, glob.rank, world);
+  double om_an = 0.0;
+  MPI_Allreduce(&diag_om_analytic, &om_an, 1, MPI_DOUBLE, MPI_MAX, world);
+
+  cvec[12] = glob.val;
+  cvec[13] = (double) type;
+  cvec[14] = diag_om_unres_p99;
+  cvec[15] = om_an;
+  cvec[16] = t_teacher_total;
+  cvec[17] = t_teacher_pair;
+  cvec_step = update->ntimestep;
 }
 
 /* ----------------------------------------------------------------------

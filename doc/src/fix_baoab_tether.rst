@@ -996,8 +996,9 @@ previous value), and the running count of stored back-reaction neighbors
 that could not be resolved on the calling rank because they had drifted
 outside the current ghost cutoff since the last curvature refresh (see
 Restrictions below; that contribution is silently dropped rather than
-causing an error). The 4th and 5th entries are a per-rank, halo-local
-proxy for the fix's force-evaluation cost. All eight entries are 0 unless
+causing an error). The 4th and 5th entries are a proxy for the fix's
+force-evaluation cost. All counts are summed over all processors, and the
+frequency diagnostics report the maximum over all processors. All eight entries are 0 unless
 *mollify* is *yes*; the 6th, 7th, and 8th are additionally 0 unless
 *adapt* is also *yes* (the 8th can in principle occur with *mollify yes*
 alone, but in practice only matters once *adapt* keeps a fixed curvature
