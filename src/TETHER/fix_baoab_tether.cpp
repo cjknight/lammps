@@ -4182,7 +4182,7 @@ void FixBAOABTether::update_dt(bool fresh_sample)
     if (w <= PM_LO) return 0;
     return MIN(PM_NBINS - 1, (int) (log(w / PM_LO) / log(PM_RATIO)));
   };
-  double om_hard = 0.0;
+  double om_hard = 0.0, om_pop_max = 0.0;
   for (int i = 0; i < nlocal; i++) {
     if (!(mask[i] & groupbit)) continue;
     // exile_substep: this atom is already safely self-integrating via
@@ -4214,8 +4214,10 @@ void FixBAOABTether::update_dt(bool fresh_sample)
       if (per_mode_dt) {
         if (cooling)
           om_hard = MAX(om_hard, w);
-        else if (om[i][m] <= om_split)
+        else if (om[i][m] <= om_split) {
           pm_hist[pm_bin(w)] += 1.0;
+          om_pop_max = MAX(om_pop_max, w);
+        }
       }
     }
   }
@@ -4230,21 +4232,27 @@ void FixBAOABTether::update_dt(bool fresh_sample)
   }
 
   if (comm->nprocs > 1) {
-    double local[3] = {om_unres, om_analytic_max, om_hard};
-    double global[3];
-    MPI_Allreduce(local, global, 3, MPI_DOUBLE, MPI_MAX, world);
+    double local[4] = {om_unres, om_analytic_max, om_hard, om_pop_max};
+    double global[4];
+    MPI_Allreduce(local, global, 4, MPI_DOUBLE, MPI_MAX, world);
     om_unres = global[0];
     om_analytic_max = global[1];
     om_hard = global[2];
+    om_pop_max = global[3];
   }
+  // frequency that decides a step-size INCREASE (and the first rung); see per_mode below
+  double om_up = om_unres;
 
-  // per_mode: dt from the 99th percentile of the maskable modes (not their maximum), plus
-  // the maximum over atoms that cannot be masked (demotion cooldown). Every maskable mode
-  // above c_acc/(0.85*dt) is masked (om_mask_thr below), so no unresolved mode violates the
-  // accuracy bound; the percentile only decides when dt must shrink because the bulk of
-  // the spectrum moved. The maximum of N modes keeps growing with N, a percentile does not,
-  // so dt no longer falls as the system grows (H/Pd: 5 fs at 7296 atoms, 2.8 fs at 24624
-  // with the maximum). At most 1% of the maskable modes are masked by this rule.
+  // per_mode: a rung is ENTERED (first rung, relax-up) only if the maximum of every maskable
+  // mode allows it, exactly as before; it is LEFT (shrink) only if the 99th percentile of
+  // the maskable modes, or the maximum over atoms that cannot be masked (demotion cooldown),
+  // requires it. Every maskable mode above c_acc/(0.85*dt) is masked (om_mask_thr, set in
+  // apply_new_dt()), so no unresolved mode violates the accuracy bound while the step holds.
+  // The maximum of N modes keeps growing with N, a percentile does not: a rare fast mode in
+  // a large system no longer halves dt for every atom (H/Pd: 2.8 fs instead of 5 fs at
+  // 24624 atoms with the maximum), while a shift of the bulk of the spectrum still shrinks
+  // it. Promoting on the percentile instead would mask the top 1% of the bulk spectrum at a
+  // larger rung (seen on the 114-atom production deck: 10 fs, 10x more Newton guard trips).
   if (per_mode_dt) {
     if (comm->nprocs > 1) MPI_Allreduce(MPI_IN_PLACE, pm_hist.data(), PM_NBINS, MPI_DOUBLE,
                                         MPI_SUM, world);
@@ -4263,6 +4271,7 @@ void FixBAOABTether::update_dt(bool fresh_sample)
     }
     diag_om_unres_p99 = om_q;
     om_unres = MAX(om_q, om_hard);
+    om_up = MAX(om_pop_max, om_hard);
   }
 
   // gamma_quench auto (continuous, not a one-time warm-up calibration):
@@ -4446,14 +4455,20 @@ void FixBAOABTether::update_dt(bool fresh_sample)
   // analytic or zero) -- fall back to a floor that keeps dt_c well inside
   // [dt_min, dt_max] rather than dividing by zero.
   if (om_unres <= 0.0) om_unres = c_acc / dt_max;
+  if (om_up <= 0.0) om_up = c_acc / dt_max;
 
   double dt_c = c_acc / om_unres;
-  if (om_analytic_max > 0.0) dt_c = MIN(dt_c, 2.2 / om_analytic_max);
+  double dt_c_up = c_acc / om_up;    // == dt_c unless per_mode
+  if (om_analytic_max > 0.0) {
+    dt_c = MIN(dt_c, 2.2 / om_analytic_max);
+    dt_c_up = MIN(dt_c_up, 2.2 / om_analytic_max);
+  }
   dt_c = MAX(dt_min, MIN(dt_max, dt_c));
+  dt_c_up = MAX(dt_min, MIN(dt_max, dt_c_up));
 
   if (dt_lvl < 0) {
-    // first-ever call: initialize the rung directly from dt_c, no hysteresis.
-    dt_lvl = MAX(0, (int) lround(log(dt_max / dt_c) / log(2.0)));
+    // first-ever call: initialize the rung directly from dt_c_up, no hysteresis.
+    dt_lvl = MAX(0, (int) lround(log(dt_max / dt_c_up) / log(2.0)));
   } else {
     double rung_dt = dt_max / pow(2.0, dt_lvl);
     // dt_floor_until (Attempt 7 Part B, preshrink only): captured once at
@@ -4465,7 +4480,12 @@ void FixBAOABTether::update_dt(bool fresh_sample)
     // dt_floor_until.
     bool locked = (update->ntimestep < dt_floor_until);
 
-    if (dt_c < 0.85 * rung_dt) {
+    // per_mode: hold a rung while the 99th percentile still meets the bound that ENTERING it
+    // required of every mode (dt_c_up > 1.87 * rung/2, i.e. 0.935 * rung); outliers above that
+    // are masked (up to c_acc/(0.85*dt)). Holding up to the plain 0.85 shrink bound instead
+    // masked the upper edge of the bulk spectrum (114-atom production deck at 10 fs: 10x more
+    // Newton guard trips).
+    if (dt_c < (per_mode_dt ? 0.935 : 0.85) * rung_dt) {
       dt_lvl = MAX(dt_lvl + 1, (int) ceil(log(dt_max / dt_c) / log(2.0)));
       if (fresh_sample) settle_streak = 0;
     } else {
@@ -4474,7 +4494,7 @@ void FixBAOABTether::update_dt(bool fresh_sample)
       // that band, so any dt_c in (1.25, 1.7)*rung_dt flipped the step between two rungs on
       // every refresh (found on water: dt alternated 1.0/2.0 fs at every refresh). 1.87 =
       // 1.7 plus a 10% margin; dt_c is clamped to dt_max, so the top rung stays reachable.
-      bool margin_ok = (dt_c > 1.87 * rung_dt);
+      bool margin_ok = (dt_c_up > 1.87 * rung_dt);
 
       // settle_confirm (default 0 = disabled, exactly today's fixed-
       // duration lockout): while a dt_floor_until lockout from

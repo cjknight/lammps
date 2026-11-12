@@ -797,13 +797,16 @@ hydrogen atom crossing between interstitial sites) entirely unresolved,
 and because all atoms share one timestep, such an atom limits the timestep
 for the whole system. In large systems some atom is almost always in that
 state, so *all_modes* can lose most of the timestep gain. With *per_mode*
-two further rules keep the timestep independent of system size: any mode
-too fast for the current timestep (above *c_acc* divided by 0.85 times the
-timestep) is also clamped, and the timestep is chosen from the 99th
-percentile of the frequencies of the modes that may be clamped instead of
-their maximum, which keeps growing with the number of atoms. Modes of
-atoms that cannot be clamped (for example after a demotion) still enter
-with their maximum. With
+two further rules keep the timestep independent of system size. A larger
+timestep is still only taken when every mode allows it, but the timestep
+is reduced only when more than 1% of the modes that may be clamped no
+longer allow it (the 99th percentile of their frequencies), not as soon as
+the single fastest one does. The fastest mode among many atoms keeps
+getting faster as the system grows, so without this rule a single rare
+fast mode would reduce the timestep for all atoms. A mode that is too fast
+for the current timestep (above *c_acc* divided by 0.85 times the
+timestep) is clamped instead. Modes of atoms that cannot be clamped (for
+example after a demotion) still reduce the timestep on their own. With
 *eligibility bonded* only atoms that have at least one bond skip the
 all-modes test. It requires a molecular atom style and a bond style, and
 with *mollify yes* the usual *newton_bond off* requirement applies.
