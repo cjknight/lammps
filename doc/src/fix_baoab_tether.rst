@@ -678,6 +678,20 @@ its cooldown decays -- only what the atom does while exiled, and whether
 it is counted. Leaving this keyword at its default of *no* reproduces the
 original behavior exactly.
 
+.. versionchanged:: TBD
+
+While exiled with *exile_substep yes*, an atom receives the strong
+*gamma_quench* friction only during steps in which its kinetic energy
+exceeds the *ke_rel* threshold; otherwise it receives the same weak
+*gamma_soft* friction as every other atom. Most exiles are not caused
+by an energetic event: a strongly anharmonic light atom in a
+flat-bottomed site (H in Pd is the tested case) can trip the center-solve
+guard repeatedly at ordinary thermal energy, and keeping such atoms under
+strong friction for most of a run over-damps their vibrations. On H in Pd
+with an EAM potential, this rule raised the overlap of the H vibrational
+density of states with a fully resolved reference from 0.64 to 0.95, with
+unchanged temperatures and cost.
+
 In testing on the same H-in-Pd EAM system used above, *exile_substep yes*
 left the system safe -- the heavy-subsystem temperature trace and total
 energy stayed within their established stable ranges, with no sign of the

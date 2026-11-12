@@ -767,7 +767,8 @@ class FixBAOABTether : public FixBAOAB {
   // only ever advances on the former.
   void update_dt(bool fresh_sample = true);
   void apply_new_dt(double dt_new);
-  void demote_atom(int i, bigint backoff_steps, const char *source);
+  void demote_atom(int i, bigint backoff_steps, const char *source,
+                   const std::string &detail = std::string());
   void kinetic_guard_and_quench(int i, double mi, double kT, bool *msk, double *q1, double *p1,
                                  bool &quench_active, bool &sub_stepped);
   void sub_step_free_atom(int i, double mi, const double *x_mid, const double *v_mid,

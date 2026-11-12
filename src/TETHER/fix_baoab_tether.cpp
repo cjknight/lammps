@@ -1066,7 +1066,21 @@ void FixBAOABTether::initial_integrate(int /*vflag*/)
       // energy bookkeeping.
       bool exile_quench = (quench_exempt[i] <= update->ntimestep) &&
                           (last_demote[i] != update->ntimestep);
-      double ch = exp(-gamma_quench * 0.5 * update->dt);
+      // The strong friction acts only while the atom is actually hot (kinetic energy above the
+      // kinetic guard's ke_cap); otherwise the atom gets the baseline gamma_soft every other atom
+      // gets. Most exiles are benign: an anharmonic rattler in a flat-bottomed well (H in Pd)
+      // stalls the center solve and is exiled every ~100 steps at thermal energy. Quenching
+      // those at gamma_quench (~ the H vibration frequency) kept H near critical damping for 80%
+      // of the run (H VDOS overlap with the resolved reference 0.64 -> 0.95 with this rule,
+      // 2026-11-12, workloads/hpd_student_quality/newton_forensics/).
+      double g_ex = gamma_quench;
+      if (exile_quench) {
+        double ke_now = 0.5 * force->mvv2e * mi *
+            (v[i][0] * v[i][0] + v[i][1] * v[i][1] + v[i][2] * v[i][2]);
+        if (ke_now <= ke_rel * kT * force->mvv2e) g_ex = gamma_soft;
+        if (g_ex <= 0.0) exile_quench = false;
+      }
+      double ch = exp(-g_ex * 0.5 * update->dt);
       double noise_h = sqrt(kT * invmass * (1.0 - ch * ch));
       double ke_pre = 0.0;
       if (exile_quench) {
@@ -1534,16 +1548,21 @@ void FixBAOABTether::end_of_step()
    flat 3*refresh_every with no backoff -- matching the reference exactly.
 ------------------------------------------------------------------------- */
 
-void FixBAOABTether::demote_atom(int i, bigint backoff_steps, const char *source)
+void FixBAOABTether::demote_atom(int i, bigint backoff_steps, const char *source,
+                                 const std::string &detail)
 {
   bigint ntimestep = update->ntimestep;
+  if (event_log_fp)
+    log_event("DEMOTE", atom->tag[i], -1.0, -1.0, -1.0, -1.0, nullptr, update->dt,
+              fmt::format("backoff={} source={} type={} count={} since_last={}{}", backoff_steps,
+                          source, atom->type[i], demote_count[i],
+                          (demote_count[i] > 0) ? ntimestep - last_demote[i] : (bigint) -1,
+                          detail));
   demote_count[i]++;
   last_demote[i] = ntimestep;
   demote_cool[i] = ntimestep + backoff_steps;
   n_demoted++;
   need_refresh = 1;
-  log_event("DEMOTE", atom->tag[i], -1.0, -1.0, -1.0, -1.0, nullptr, -1.0,
-            fmt::format("backoff={} source={}", backoff_steps, source));
 }
 
 /* ----------------------------------------------------------------------
@@ -4652,6 +4671,8 @@ void FixBAOABTether::solve_center(int i, double mi, double kT, double *cnew)
   double damp = newton_damp;
   double res = 0.0;
   bool newton_diverged = false;
+  double res0 = 0.0;      // event_log forensics: residual of the warm start
+  int n_accepted = 0;     // event_log forensics: accepted Newton steps
 
   if (dbg)
     fprintf(stderr, "  msk=(%d %d %d) any_masked=%d a_th=%.6g tol=%.6g q_now=(%.6g %.6g %.6g) "
@@ -4687,6 +4708,7 @@ void FixBAOABTether::solve_center(int i, double mi, double kT, double *cnew)
     for (int m = 0; m < 3; m++)
       if (msk[m]) res += newton_res_comp(r[m], mi, om[i][m]);
     res = sqrt(res);
+    res0 = res;
 
     if (dbg)
       fprintf(stderr, "  initial: trial=(%.6g %.6g %.6g) res=%.6g (tol=%.6g, res/tol=%.4g)\n",
@@ -4804,6 +4826,7 @@ void FixBAOABTether::solve_center(int i, double mi, double kT, double *cnew)
       for (int k = 0; k < 3; k++) trial[k] = trial_try[k];
       for (int m = 0; m < 3; m++) r[m] = r_try[m];
       res = res_try;
+      n_accepted++;
     }
   }
 
@@ -4880,11 +4903,52 @@ void FixBAOABTether::solve_center(int i, double mi, double kT, double *cnew)
       int expo = MIN(demote_count[i], 6);
       bigint mult = ((bigint) 1) << expo;
       bigint backoff = MIN((bigint) refresh_every * 3 * mult, (bigint) 2000);
+      // event_log forensics: the guard state at the trip, and the atom's local environment
+      // (nearest neighbor at the current position and at the solved center).
+      std::string detail;
+      if (event_log_fp) {
+        const double w2r = sqrt(force->ftm2v);
+        double rmin_now = 1.0e30, rmin_c = 1.0e30, rmin_same = 1.0e30;
+        int jtype_min = 0;
+        if (list) {
+          int *jlist = list->firstneigh[i];
+          int jnum = list->numneigh[i];
+          for (int jj = 0; jj < jnum; jj++) {
+            int j = jlist[jj] & NEIGHMASK;
+            double d1[3] = {x[i][0] - x[j][0], x[i][1] - x[j][1], x[i][2] - x[j][2]};
+            double d2[3] = {cnew[0] - x[j][0], cnew[1] - x[j][1], cnew[2] - x[j][2]};
+            double r1 = sqrt(d1[0] * d1[0] + d1[1] * d1[1] + d1[2] * d1[2]);
+            double r2 = sqrt(d2[0] * d2[0] + d2[1] * d2[1] + d2[2] * d2[2]);
+            if (r1 < rmin_now) {
+              rmin_now = r1;
+              jtype_min = atom->type[j];
+            }
+            if (atom->type[j] == atom->type[i]) rmin_same = MIN(rmin_same, r1);
+            rmin_c = MIN(rmin_c, r2);
+          }
+        }
+        double osc = 0.0, cen = 0.0;
+        for (int m = 0; m < 3; m++)
+          if (msk[m]) {
+            osc += (q_now[m] - q[m]) * (q_now[m] - q[m]);
+            cen += q[m] * q[m];
+          }
+        double ar = MAX(a_th, 1.0e-300);
+        detail = fmt::format(" msk={}{}{} om=({:.1f},{:.1f},{:.1f}) split={:.1f} res0={:.3g} res={:.3g} "
+                             "div={} nacc={} flip={:.3g} eharm={:.3g} osc={:.3g} cen={:.3g} "
+                             "a_th={:.4g} rnn={:.4f} jt={} rnn_c={:.4f} rsame={:.4f}",
+                             (int) msk[0], (int) msk[1], (int) msk[2], om[i][0] * w2r,
+                             om[i][1] * w2r, om[i][2] * w2r, om_split * w2r, res0 / ar, res / ar,
+                             (int) newton_diverged, n_accepted, flip / ar,
+                             eharm / (kT * (a_th_mass_scale ? force->mvv2e : 1.0)), sqrt(osc) / ar,
+                             sqrt(cen) / ar, a_th, rmin_now, jtype_min, rmin_c, rmin_same);
+      }
       demote_atom(i, backoff,
                   g_e ? (g_n ? (g_f ? "solve_center_gn_gf_ge" : "solve_center_gn_ge")
                              : (g_f ? "solve_center_gf_ge" : "solve_center_ge"))
                       : (g_n ? (g_f ? "solve_center_gn_gf" : "solve_center_gn")
-                             : "solve_center_gf"));
+                             : "solve_center_gf"),
+                  detail);
       for (int k = 0; k < 3; k++) cnew[k] = x[i][k];
     }
   }
