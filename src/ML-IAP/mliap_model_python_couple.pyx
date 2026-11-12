@@ -68,6 +68,10 @@ cdef public int MLIAPPY_load_model(MLIAPModelPython * c_model, char* fname) with
         returnval = 0
     else:
         if str_fname.endswith(".pt") or str_fname.endswith('.pth'):
+            import warnings
+            warnings.filterwarnings("ignore", message=".*Overriding a previously registered kernel.*")
+            warnings.filterwarnings("ignore", message=".*smallest subnormal.*")
+            warnings.filterwarnings("ignore", category=UserWarning, module="torch.*")
             import torch
             device = torch.device("cpu")
             if torch.cuda.is_available():

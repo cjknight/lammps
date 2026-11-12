@@ -157,7 +157,12 @@ void VerletKokkos::setup(int flag)
   }
 
   //nvtxRangePushA("PPPM Setup");
+
   if (force->kspace) {
+    auto *pair_mliap_check = dynamic_cast<PairMLIAPKokkos<LMPDeviceType> *>(force->pair);
+    if (pair_mliap_check) {
+      force->kspace->init();
+    }
     force->kspace->setup();
     if (kspace_compute_flag) {
       atomKK->sync(force->kspace->execution_space,force->kspace->datamask_read);

@@ -152,6 +152,11 @@ void Verlet::setup(int flag)
   }
 
   if (force->kspace) {
+    auto *pair_mliap_check = dynamic_cast<PairMLIAP *>(force->pair);
+    if (pair_mliap_check) {
+      force->kspace->init();
+      force->kspace->set_gewaldflag();
+    }
     force->kspace->setup();
     if (kspace_compute_flag) force->kspace->compute(eflag,vflag);
     else force->kspace->compute_dummy(eflag,vflag);

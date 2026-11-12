@@ -379,6 +379,8 @@ void MLIAPDescriptorMTPKokkos<DeviceType>::compute_forces_from_coeffs(
   }
 
   auto d_force_coeffs = coeffs.template view<DeviceType>();
+  const bool have_phi = (phi.data() != nullptr);
+  auto d_phi = phi;
 
   /*
    * The force contribution for a central atom is accumulated independently
@@ -796,7 +798,8 @@ void MLIAPDescriptorMTPKokkos<DeviceType>::compute_forces_from_coeffs(
                   dfmu[mu0] * ez;
             }
 
-            const double coeff = d_force_coeffs(ii, nelem + b);
+            double coeff = d_force_coeffs(ii, nelem + b);
+            if (have_phi) coeff *= d_phi(i);
 
             fij[0] += coeff * gx;
             fij[1] += coeff * gy;
