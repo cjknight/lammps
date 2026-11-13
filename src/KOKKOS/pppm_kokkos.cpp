@@ -1014,7 +1014,7 @@ void PPPMKokkos<DeviceType>::deallocate()
   d_work1 = typename FFT_AT::t_FFT_SCALAR_1d();
   d_work2 = typename FFT_AT::t_FFT_SCALAR_1d();
   d_work3 = typename FFT_AT::t_FFT_SCALAR_1d();
-  d_phi = typename FFT_AT::t_FFT_SCALAR_1d();
+  d_phi = typename AT::t_double_1d();
 
   delete fft1;
   fft1 = nullptr;
