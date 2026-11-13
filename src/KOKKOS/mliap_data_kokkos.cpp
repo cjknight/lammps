@@ -382,6 +382,10 @@ void MLIAPDataKokkos<DeviceType>::update_charges()
   AtomKokkos *atomKK = (AtomKokkos *) atom;
   atomKK->modified(execution_space, Q_MASK);
   atomKK->sync(Host, Q_MASK);
+  // the model wrote raw charges; make them neutral over the whole system (collective), on the
+  // host copy just synced, and mark the host copy as the current one
+  neutralize_charges(atomKK->k_q.view_hostkk().data(), nlistatoms);
+  atomKK->modified(Host, Q_MASK);
   if (force->kspace)
     force->kspace->qsum_qsq(1);
 }
