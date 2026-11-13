@@ -36,6 +36,7 @@
 #include "atom.h"
 #include "comm.h"
 #include "error.h"
+#include "kspace.h"
 #include "force.h"
 #include "info.h"
 #include "memory.h"
@@ -241,6 +242,10 @@ void PairMLIAP::settings(int narg, char ** arg)
 
   if (model == nullptr || descriptor == nullptr)
     error->all(FLERR,"Incomplete pair_style mliap setup: need model and descriptor, or unified");
+
+  // MTP descriptor: the model also predicts position-dependent charges (LES), whose response
+  // force needs the kspace potential, see compute_kspace_response()
+  kspace_response_flag = (dynamic_cast<MLIAPDescriptorMTP *>(descriptor) != nullptr) ? 1 : 0;
 }
 
 /* ----------------------------------------------------------------------
@@ -420,6 +425,16 @@ void *PairMLIAP::extract(const char *str, int &iarg)
   }
 
   return nullptr;
+}
+
+void PairMLIAP::compute_kspace_response(int, int)
+{
+  if (!force->kspace) return;
+  auto *phi = (double *) force->kspace->extract("phi");
+  if (!phi)
+    error->all(FLERR, "Pair style mliap with charges (descriptor mtp) requires a kspace style that "
+               "provides the per-atom potential (pppm)");
+  compute_charge_response_forces(phi);
 }
 
 void PairMLIAP::compute_charge_response_forces(double *phi)

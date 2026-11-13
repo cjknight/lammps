@@ -56,6 +56,7 @@ class Pair : protected Pointers {
   int single_hessian_enable;      // 1 if single_hessian() routine exists
   int atomic_energy_enable;       // 1 if compute_atomic_energy() routine exists
   int has_local_partial_force;    // 1 if local_partial_force() routine exists
+  int kspace_response_flag;       // 1 if compute_kspace_response() must run after kspace
 
   int restartinfo;                // 1 if pair style writes restart info
   int respa_enable;               // 1 if inner/middle/outer rRESPA routines
@@ -159,6 +160,13 @@ class Pair : protected Pointers {
 
   virtual void compute(int, int) = 0;
   virtual void compute_inner() {}
+
+  // Force contribution that needs the kspace solution of the same configuration, e.g. the
+  // charge-response term sum_i phi_i dq_i/dR of a model whose charges depend on the positions
+  // (pair mliap with an LES model). Called after kspace->compute() and before the reverse
+  // communication of forces, by every integrator, and by fixes that recompute forces, when
+  // kspace_response_flag is set.
+  virtual void compute_kspace_response(int, int) {}
   virtual void compute_middle() {}
   virtual void compute_outer(int, int) {}
   virtual double compute_atomic_energy(int, NeighList *) { return 0.0; }

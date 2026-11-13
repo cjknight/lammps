@@ -97,6 +97,7 @@ public:
   void unpack_reverse_comm(int, int *, double *,CommType *copy_to);
 
   void compute_charge_response_forces(typename AT::t_double_1d d_phi);
+  void compute_kspace_response(int, int) override;
 
   // Variables to store to/from pointers and types between
   // forward_comm/reverse_comm and virutal functions. Ugly work-around which

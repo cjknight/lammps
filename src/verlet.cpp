@@ -33,8 +33,6 @@
 #include "timer.h"
 #include "update.h"
 
-#include "pair_mliap.h"
-#include "pppm.h"
 #include "mliap_descriptor_mtp.h"
 
 #include <cstring>
@@ -152,8 +150,9 @@ void Verlet::setup(int flag)
   }
 
   if (force->kspace) {
-    auto *pair_mliap_check = dynamic_cast<PairMLIAP *>(force->pair);
-    if (pair_mliap_check) {
+    // charges set by the pair style (kspace_response_flag): re-init kspace with the model's
+    // charges from the pair compute above, then keep g_ewald fixed for the run
+    if (force->pair && force->pair->kspace_response_flag) {
       force->kspace->init();
       force->kspace->set_gewaldflag();
     }
@@ -162,14 +161,9 @@ void Verlet::setup(int flag)
     else force->kspace->compute_dummy(eflag,vflag);
   }
 
-  // Add force correction for charges dependent on position
-  //   Hard-coded for MLIAP and PPPM for now
-  PairMLIAP *pair_mliap = dynamic_cast<PairMLIAP *>(force->pair);
-  PPPM *pppm = dynamic_cast<PPPM *>(force->kspace);
-
-  if (pair_mliap && pppm) {
-    pair_mliap->compute_charge_response_forces(pppm->phi);
-  }
+  // force contribution that needs this configuration's kspace solution (e.g. charge response)
+  if (force->kspace && force->pair && force->pair->kspace_response_flag)
+    force->pair->compute_kspace_response(eflag,vflag);
 
   modify->setup_pre_reverse(eflag,vflag);
   if (force->newton) comm->reverse_comm();
@@ -352,13 +346,9 @@ void Verlet::run(int n)
       timer->stamp(Timer::KSPACE);
     }
 
-    // Add force correction for charges dependent on position
-    //   Hard-coded for MLIAP and PPPM for now
-    PairMLIAP *pair_mliap = dynamic_cast<PairMLIAP *>(force->pair);
-    PPPM *pppm = dynamic_cast<PPPM *>(force->kspace);
-
-    if (pair_mliap && pppm) {
-      pair_mliap->compute_charge_response_forces(pppm->phi);
+    // force contribution that needs this configuration's kspace solution (e.g. charge response)
+    if (kspace_compute_flag && force->pair && force->pair->kspace_response_flag) {
+      force->pair->compute_kspace_response(eflag,vflag);
       timer->stamp(Timer::PAIR);
     }
 

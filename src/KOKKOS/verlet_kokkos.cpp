@@ -31,8 +31,6 @@
 #include "timer.h"
 #include "kokkos.h"
 
-#include "pair_mliap_kokkos.h"
-#include "pppm_kokkos.h"
 
 //#include <nvtx3/nvToolsExt.h>
 
@@ -200,8 +198,8 @@ void VerletKokkos::setup(int flag)
   //nvtxRangePushA("PPPM Setup");
 
   if (force->kspace) {
-    auto *pair_mliap_check = dynamic_cast<PairMLIAPKokkos<LMPDeviceType> *>(force->pair);
-    if (pair_mliap_check) {
+    // charges set by the pair style: re-init kspace with the model's charges
+    if (force->pair && force->pair->kspace_response_flag) {
       force->kspace->init();
     }
     force->kspace->setup();
@@ -213,13 +211,9 @@ void VerletKokkos::setup(int flag)
   }
   //nvtxRangePop();
 
-  // Add force correction for charges dependent on position
-  //   Hard-coded for MLIAP and PPPM for now
-  auto *pair_mliap = dynamic_cast<PairMLIAPKokkos<LMPDeviceType> *>(force->pair);
-  auto *pppm = dynamic_cast<PPPMKokkos<LMPDeviceType> *>(force->kspace);
-  if (pair_mliap && pppm) {
-    pair_mliap->compute_charge_response_forces(pppm->get_phi());
-  }
+  // force contribution that needs this configuration's kspace solution (e.g. charge response)
+  if (force->kspace && force->pair && force->pair->kspace_response_flag)
+    force->pair->compute_kspace_response(eflag,vflag);
 
   //nvtxRangePushA("Reverse Comm Setup");
   modify->setup_pre_reverse(eflag,vflag);
@@ -546,13 +540,9 @@ void VerletKokkos::run(int n)
     }
     //nvtxRangePop();
 
-    // Add force correction for charges dependent on position
-    //   Hard-coded for MLIAP and PPPM for now
-    auto *pair_mliap = dynamic_cast<PairMLIAPKokkos<LMPDeviceType> *>(force->pair);
-    auto *pppm = dynamic_cast<PPPMKokkos<LMPDeviceType> *>(force->kspace);
-    if (pair_mliap && pppm) {
-      pair_mliap->compute_charge_response_forces(pppm->get_phi());
-    }
+    // force contribution that needs this configuration's kspace solution (e.g. charge response)
+    if (kspace_compute_flag && force->pair && force->pair->kspace_response_flag)
+      force->pair->compute_kspace_response(eflag,vflag);
 
     if (execute_on_host) {
       if (f_merge_copy.extent(0) < atomKK->k_f.extent(0))

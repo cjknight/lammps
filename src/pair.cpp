@@ -79,6 +79,7 @@ Pair::Pair(LAMMPS *lmp) :
   born_matrix_enable = 0;
   single_hessian_enable = 0;
   has_local_partial_force = 0;
+  kspace_response_flag = 0;
   restartinfo = 1;
   respa_enable = 0;
   one_coeff = 0;

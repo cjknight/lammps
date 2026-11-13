@@ -37,6 +37,7 @@
 #include "kokkos_few.h"
 
 #include <cmath>
+#include <cstring>
 
 using namespace LAMMPS_NS;
 using namespace MathConst;
@@ -621,6 +622,21 @@ void PPPMKokkos<DeviceType>::reset_grid()
 /* ----------------------------------------------------------------------
    compute the PPPM long-range force, energy, virial
 ------------------------------------------------------------------------- */
+
+/* ----------------------------------------------------------------------
+   "phi/kk": pointer to the per-atom potential view d_phi (typename AT::t_double_1d) of the last
+   compute(), for Pair::compute_kspace_response(). The host array "phi" of PPPM is not filled here.
+------------------------------------------------------------------------- */
+
+template<class DeviceType>
+void *PPPMKokkos<DeviceType>::extract(const char *str)
+{
+  if (strcmp(str, "phi/kk") == 0) return (void *) &d_phi;
+  if (strcmp(str, "phi") == 0) return nullptr;
+  return KSpace::extract(str);
+}
+
+/* ---------------------------------------------------------------------- */
 
 template<class DeviceType>
 void PPPMKokkos<DeviceType>::compute(int eflag, int vflag)

@@ -27,6 +27,8 @@
 #include "mliap_unified_kokkos.h"
 #endif
 #include "error.h"
+#include "force.h"
+#include "kspace.h"
 #include "neigh_request.h"
 #include "lammps.h"
 #include "kokkos.h"
@@ -677,6 +679,21 @@ void PairMLIAPKokkos<DeviceType>::unpack_reverse_comm(int nv, int *idx, double *
     for (int j=0;j<vec_len;++j)
       copy_to[gstart++] += static_cast<CommType>(fill[start++]);
   }
+}
+
+template <class DeviceType>
+void PairMLIAPKokkos<DeviceType>::compute_kspace_response(int, int)
+{
+  if (!force->kspace) return;
+  // the view type behind "phi/kk" is that of the kspace style's own DeviceType
+  if (!force->kspace->kokkosable || force->kspace->execution_space != execution_space)
+    error->all(FLERR, "Pair style mliap/kk with charges (descriptor mtp) requires a KOKKOS kspace "
+               "style (pppm/kk) in the same execution space");
+  auto *pphi = (typename AT::t_double_1d *) force->kspace->extract("phi/kk");
+  if (!pphi)
+    error->all(FLERR, "Pair style mliap/kk with charges (descriptor mtp) requires a kspace style "
+               "that provides the per-atom potential (pppm/kk)");
+  compute_charge_response_forces(*pphi);
 }
 
 template <class DeviceType>

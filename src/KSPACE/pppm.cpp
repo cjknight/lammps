@@ -2462,6 +2462,17 @@ void PPPM::fieldforce()
 }
 
 /* ----------------------------------------------------------------------
+   "phi": per-atom electrostatic potential of the last compute() (filled by fieldforce_ik(),
+   used by charge-response forces, see Pair::compute_kspace_response())
+------------------------------------------------------------------------- */
+
+void *PPPM::extract(const char *str)
+{
+  if (strcmp(str, "phi") == 0) return (void *) phi;
+  return KSpace::extract(str);
+}
+
+/* ----------------------------------------------------------------------
    interpolate from grid to get electric field & force on my particles for ik
 ------------------------------------------------------------------------- */
 

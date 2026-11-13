@@ -34,6 +34,7 @@ class PPPM : public KSpace {
   void setup() override;
   void reset_grid() override;
   void compute(int, int) override;
+  void *extract(const char *) override;
   int timing_1d(int, double &) override;
   int timing_3d(int, double &) override;
   double memory_usage() override;

@@ -38,6 +38,7 @@ class PairMLIAP : public Pair {
   double memory_usage() override;
   void *extract(const char *str, int &iarg);
   void compute_charge_response_forces(double *phi);
+  void compute_kspace_response(int, int) override;
 
  protected:
   virtual void allocate();

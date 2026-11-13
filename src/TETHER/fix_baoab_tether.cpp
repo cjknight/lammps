@@ -567,6 +567,9 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
     error->all(FLERR, "Fix baoab/tether ke_rel warmup requires adapt yes");
   if (ke_rel_margin_blocks < 1)
     error->all(FLERR, "Fix baoab/tether ke_rel_margin_blocks must be >= 1");
+  if (kspace_center && force->pair && force->pair->kspace_response_flag)
+    error->all(FLERR, "Fix baoab/tether kspace_center is not supported with a pair style whose "
+               "charges depend on the positions ({})", force->pair_style);
   if (force_eval_full && comm->nprocs > 1)
     error->all(FLERR, "Fix baoab/tether force_eval full is a single-process validation mode "
                        "and cannot run under MPI domain decomposition");
@@ -823,7 +826,9 @@ void FixBAOABTether::init()
                  "is supported)",
                  force->pair_style);
     use_local_partial_force = force->pair->has_local_partial_force;
-    if (!use_local_partial_force && !force->pair->single_enable)
+    // force_eval full evaluates every trial force by a whole-system recompute
+    // (full_system_force()), so it needs neither per-atom kernel
+    if (!force_eval_full && !use_local_partial_force && !force->pair->single_enable)
       error->all(FLERR, "Fix baoab/tether mollify yes requires a pair style that supports "
                          "either single() or local_partial_force()");
     if (atom->map_style == Atom::MAP_NONE)
@@ -5396,6 +5401,8 @@ bool FixBAOABTether::full_system_force(int i, const double *xtrial, double *fout
 
   std::vector<double> fsave(3 * ntotal);
   if (ntotal) memcpy(fsave.data(), &f[0][0], 3 * ntotal * sizeof(double));
+  std::vector<double> qsave;
+  save_charges(qsave);
 
   double xreal[3] = {x[i][0], x[i][1], x[i][2]};
   x[i][0] = xtrial[0];
@@ -5430,6 +5437,7 @@ bool FixBAOABTether::full_system_force(int i, const double *xtrial, double *fout
   comm->forward_comm();
 
   if (ntotal) memcpy(&f[0][0], fsave.data(), 3 * ntotal * sizeof(double));
+  restore_charges(qsave);
 
   return true;
 }
@@ -5534,6 +5542,10 @@ void FixBAOABTether::apply_modal_filter_and_backreaction()
 
 void FixBAOABTether::force_moll()
 {
+  // the recomputes below run at the clamped geometry; keep the real-geometry charges
+  std::vector<double> qsave;
+  save_charges(qsave);
+
   double **x = atom->x;
   double **f = atom->f;
   int *mask = atom->mask;
@@ -5597,6 +5609,7 @@ void FixBAOABTether::force_moll()
     recompute_forces_local();
     if (ntotal) memcpy(&f[0][0], fsave.data(), 3 * ntotal * sizeof(double));
   }
+  restore_charges(qsave);
 }
 
 /* ----------------------------------------------------------------------
@@ -5870,9 +5883,34 @@ void FixBAOABTether::recompute_forces_local()
   if (force->dihedral) force->dihedral->compute(0, 0);
   if (force->improper) force->improper->compute(0, 0);
   if (force->kspace) force->kspace->compute(0, 0);
+  // force term that needs this configuration's kspace solution (charge response of an LES
+  // model), exactly as the integrator adds it (Pair::compute_kspace_response())
+  if (force->kspace && force->pair && force->pair->kspace_response_flag)
+    force->pair->compute_kspace_response(0, 0);
 
   if (modify->n_pre_reverse) modify->pre_reverse(0, 0);
   if (force->newton) comm->reverse_comm();
+}
+
+/* ---------------------------------------------------------------------- */
+
+bool FixBAOABTether::charges_from_pair() const
+{
+  return atom->q_flag && force->pair && force->pair->kspace_response_flag;
+}
+
+void FixBAOABTether::save_charges(std::vector<double> &qs) const
+{
+  if (!charges_from_pair()) return;
+  qs.assign(atom->q, atom->q + atom->nlocal + atom->nghost);
+}
+
+void FixBAOABTether::restore_charges(const std::vector<double> &qs)
+{
+  if (!charges_from_pair() || qs.empty()) return;
+  int n = MIN((int) qs.size(), atom->nlocal + atom->nghost);
+  memcpy(atom->q, qs.data(), n * sizeof(double));
+  if (force->kspace) force->kspace->qsum_qsq();
 }
 
 /* ---------------------------------------------------------------------- */

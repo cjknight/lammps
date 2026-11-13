@@ -694,6 +694,12 @@ class FixBAOABTether : public FixBAOAB {
   double effective_skin(int i, double mi, double kT) const;
   void force_clear_local();
   void recompute_forces_local();
+  // charges set by the pair style at every compute (Pair::kspace_response_flag, e.g. an LES
+  // model): a scratch recompute leaves atom->q at the scratch geometry, so callers save the
+  // real-geometry charges first and restore them afterwards
+  bool charges_from_pair() const;
+  void save_charges(std::vector<double> &qs) const;
+  void restore_charges(const std::vector<double> &qs);
   void modal_force_correction(int i, double mi, double *fcorr) const;
 
   // stage-2 additions
