@@ -294,6 +294,9 @@ void PairMLIAPKokkos<DeviceType>::coeff(int narg, char **arg) {
   model->init();
   descriptor->init();
 
+  // as in PairMLIAP::coeff(): kspace (LES charges) reads cutoff_coul via extract("cut_coul")
+  cutoff_coul = descriptor->cutmax;
+
   auto h_cutsq=k_cutsq.view_host();
   for (int itype=1; itype <= atom->ntypes; ++itype)
     for (int jtype=1; jtype <= atom->ntypes; ++jtype)
@@ -687,10 +690,25 @@ void PairMLIAPKokkos<DeviceType>::compute_charge_response_forces(
 
   MLIAPDataKokkos<DeviceType> *k_data = (MLIAPDataKokkos<DeviceType>*)(data);
 
+  // charges are q_raw - mean(q_raw) over the whole system (MLIAPData::neutralize_charges()), so
+  // the response needs phi - mean(phi) with the same global mean (see PairMLIAP's version)
+  const int n = k_data->nlistatoms;
+  k_data->k_iatoms.template sync<DeviceType>();
+  auto d_iatoms = k_data->k_iatoms.template view<DeviceType>();
+  double loc[2] = {0.0, (double) n}, tot[2];
+  Kokkos::parallel_reduce("PairMLIAPKokkos::phibar", Kokkos::RangePolicy<DeviceType>(0, n),
+    KOKKOS_LAMBDA(const int ii, double &sum) { sum += d_phi(d_iatoms(ii)); }, loc[0]);
+  MPI_Allreduce(loc, tot, 2, MPI_DOUBLE, MPI_SUM, world);
+  const double phibar = (tot[1] > 0.0) ? tot[0] / tot[1] : 0.0;
+
+  typename ArrayTypes<DeviceType>::t_double_1d d_phis("PairMLIAPKokkos::phis", d_phi.extent(0));
+  Kokkos::parallel_for("PairMLIAPKokkos::phishift", Kokkos::RangePolicy<DeviceType>(0, n),
+    KOKKOS_LAMBDA(const int ii) { const int i = d_iatoms(ii); d_phis(i) = d_phi(i) - phibar; });
+
   mtp->compute_forces_from_coeffs(
       k_data,
       k_data->k_charge_betas,
-      d_phi);
+      d_phis);
 }
 
 

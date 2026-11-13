@@ -323,7 +323,34 @@ double *MLIAPData::get_charges() {
 }
 
 void MLIAPData::update_charges() {
+  neutralize_charges(atom->q, nlistatoms);
   if (force->kspace)
         force->kspace->qsum_qsq(1);
+}
+
+/* ----------------------------------------------------------------------
+   mean of v over every rank's n list entries: v[idx[ii]] if idx is given, else v[ii].
+   Collective: every rank must call it, including ranks with n = 0.
+------------------------------------------------------------------------- */
+
+double MLIAPData::global_list_mean(const double *v, int n, const int *idx)
+{
+  double loc[2] = {0.0, (double) n}, tot[2];
+  for (int ii = 0; ii < n; ii++) loc[0] += v[idx ? idx[ii] : ii];
+  MPI_Allreduce(loc, tot, 2, MPI_DOUBLE, MPI_SUM, world);
+  return (tot[1] > 0.0) ? tot[0] / tot[1] : 0.0;
+}
+
+/* ----------------------------------------------------------------------
+   make the model's raw per-atom charges q[0..n) neutral over the whole system: the model
+   returns q_raw, and LAMMPS subtracts the global mean (one Allreduce), so the charges do not
+   depend on the domain decomposition. The charge-response force uses the matching
+   phi - mean(phi) (PairMLIAP::compute_charge_response_forces()).
+------------------------------------------------------------------------- */
+
+void MLIAPData::neutralize_charges(double *q, int n)
+{
+  const double qbar = global_list_mean(q, n);
+  for (int ii = 0; ii < n; ii++) q[ii] -= qbar;
 }
 

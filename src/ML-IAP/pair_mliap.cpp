@@ -43,6 +43,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <vector>
 //#include <nvtx3/nvToolsExt.h>
 
 using namespace LAMMPS_NS;
@@ -426,5 +427,13 @@ void PairMLIAP::compute_charge_response_forces(double *phi)
     MLIAPDescriptorMTP *mtp = dynamic_cast<MLIAPDescriptorMTP *>(descriptor);
     if (!mtp) return;
 
-    mtp->compute_forces_from_coeffs(data, data->charge_betas, phi);
+    // The charges are q_i = q_raw_i - mean(q_raw), the mean taken over the whole system
+    // (MLIAPData::neutralize_charges()), and charge_betas = dq_raw_i/dB_i. Then
+    // sum_k phi_k dq_k/dR = sum_m (phi_m - mean(phi)) dq_raw_m/dR, with the same global mean.
+    const int n = data->nlistatoms;
+    std::vector<double> phis(atom->nlocal + atom->nghost, 0.0);
+    const double phibar = data->global_list_mean(phi, n, data->iatoms);
+    for (int ii = 0; ii < n; ii++) phis[data->iatoms[ii]] = phi[data->iatoms[ii]] - phibar;
+
+    mtp->compute_forces_from_coeffs(data, data->charge_betas, phis.data());
 }

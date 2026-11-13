@@ -31,6 +31,8 @@ class MLIAPData : protected Pointers {
   double memory_usage();
   double *get_charges();
   void update_charges();
+  void neutralize_charges(double *q, int n);
+  double global_list_mean(const double *v, int n, const int *idx = nullptr);
 
   int size_array_rows, size_array_cols;
   int natoms;

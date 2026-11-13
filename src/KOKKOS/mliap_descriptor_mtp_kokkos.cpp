@@ -887,7 +887,7 @@ void MLIAPDescriptorMTPKokkos<DeviceType>::compute_force_gradients(
 /* ---------------------------------------------------------------------- */
 
 template <class DeviceType>
-double MLIAPDescriptorMTPKokkos<DeviceType>::memory_usage() {}
+double MLIAPDescriptorMTPKokkos<DeviceType>::memory_usage() { return 0.0; }   // was missing a return (undefined behavior; clang traps)
 
 /* ---------------------------------------------------------------------- */
 
