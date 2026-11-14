@@ -311,6 +311,8 @@ void Min::setup(int flag)
     force->kspace->setup();
     if (kspace_compute_flag) force->kspace->compute(eflag,vflag);
     else force->kspace->compute_dummy(eflag,vflag);
+    if (kspace_compute_flag && force->pair && force->pair->kspace_response_flag)
+      force->pair->compute_kspace_response(eflag, vflag);
   }
 
   modify->setup_pre_reverse(eflag,vflag);
@@ -393,6 +395,8 @@ void Min::setup_minimal(int flag)
     force->kspace->setup();
     if (kspace_compute_flag) force->kspace->compute(eflag,vflag);
     else force->kspace->compute_dummy(eflag,vflag);
+    if (kspace_compute_flag && force->pair && force->pair->kspace_response_flag)
+      force->pair->compute_kspace_response(eflag, vflag);
   }
 
   modify->setup_pre_reverse(eflag,vflag);
@@ -564,6 +568,8 @@ double Min::energy_force(int resetflag)
 
   if (kspace_compute_flag) {
     force->kspace->compute(eflag,vflag);
+    if (force->pair && force->pair->kspace_response_flag)
+      force->pair->compute_kspace_response(eflag, vflag);
     timer->stamp(Timer::KSPACE);
   }
 

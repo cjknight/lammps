@@ -242,6 +242,8 @@ void DynamicalMatrixKokkos::update_force()
     force->kspace->compute(eflag,vflag);
     lmp->kokkos->auto_sync = prev_auto_sync;
     atomKK->modified(force->kspace->execution_space,~(~force->kspace->datamask_modify|(F_MASK | ENERGY_MASK | VIRIAL_MASK)));
+    if (force->pair && force->pair->kspace_response_flag)
+      force->pair->compute_kspace_response(eflag, vflag);
     timer->stamp(Timer::KSPACE);
   }
 

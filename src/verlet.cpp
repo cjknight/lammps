@@ -225,6 +225,8 @@ void Verlet::setup_minimal(int flag)
     force->kspace->setup();
     if (kspace_compute_flag) force->kspace->compute(eflag,vflag);
     else force->kspace->compute_dummy(eflag,vflag);
+    if (kspace_compute_flag && force->pair && force->pair->kspace_response_flag)
+      force->pair->compute_kspace_response(eflag, vflag);
   }
 
   modify->setup_pre_reverse(eflag,vflag);

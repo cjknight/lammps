@@ -203,6 +203,8 @@ void MinKokkos::setup(int flag)
       atomKK->sync(force->kspace->execution_space,force->kspace->datamask_read);
       force->kspace->compute(eflag,vflag);
       atomKK->modified(force->kspace->execution_space,force->kspace->datamask_modify);
+      if (force->pair && force->pair->kspace_response_flag)
+        force->pair->compute_kspace_response(eflag, vflag);
     } else force->kspace->compute_dummy(eflag,vflag,0);
   }
 
@@ -312,6 +314,8 @@ void MinKokkos::setup_minimal(int flag)
       atomKK->sync(force->kspace->execution_space,force->kspace->datamask_read);
       force->kspace->compute(eflag,vflag);
       atomKK->modified(force->kspace->execution_space,force->kspace->datamask_modify);
+      if (force->pair && force->pair->kspace_response_flag)
+        force->pair->compute_kspace_response(eflag, vflag);
     } else force->kspace->compute_dummy(eflag,vflag,0);
   }
 
@@ -513,6 +517,8 @@ double MinKokkos::energy_force(int resetflag)
     force->kspace->compute(eflag,vflag);
     lmp->kokkos->auto_sync = prev_auto_sync;
     atomKK->modified(force->kspace->execution_space,force->kspace->datamask_modify);
+    if (force->pair && force->pair->kspace_response_flag)
+      force->pair->compute_kspace_response(eflag, vflag);
     timer->stamp(Timer::KSPACE);
   }
 

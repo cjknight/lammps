@@ -451,6 +451,8 @@ void DynamicalMatrix::update_force()
   }
   if (kspace_compute_flag) {
     force->kspace->compute(eflag,vflag);
+    if (force->pair && force->pair->kspace_response_flag)
+      force->pair->compute_kspace_response(eflag, vflag);
     timer->stamp(Timer::KSPACE);
   }
   if (n_pre_reverse) {
