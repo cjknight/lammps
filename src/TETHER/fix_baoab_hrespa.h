@@ -37,7 +37,9 @@ namespace LAMMPS_NS {
 // force is then either the student itself (inner_force student) or the "graft" (default with a
 // student) F_h + F_s - F_hs, where F_hs is the student's own harmonic model at the same
 // reference: the teacher's curvature plus only the student's anharmonicity. The graft is stored
-// as one harmonic model with K - K_s and f_ref - f_s,ref.
+// as one harmonic model with K - K_s and f_ref - f_s,ref. With "middle M" (graft only) there are
+// three levels, as the Python prototype's graft3: F_h on the inner substeps, the student's
+// anharmonic part F_s - F_hs as M middle steps per timestep, the teacher's remainder outermost.
 
 class FixBAOABHRespa : public FixBAOABTetherBase {
  public:
@@ -53,7 +55,7 @@ class FixBAOABHRespa : public FixBAOABTetherBase {
 
  private:
   enum { HARMONIC, STUDENT, GRAFT };
-  int inner_user, nin, inner_kind;
+  int inner_user, nin, inner_kind, middle;
   double cut, wmax, eps;
   char *file_in, *file_out;
   bool ready;
@@ -65,8 +67,13 @@ class FixBAOABHRespa : public FixBAOABTetherBase {
     std::vector<double> K;                   // 9 per block, (a, b) row-major: K_{ia, jb}
   };
   HModel hm;                                 // the harmonic part of the inner force
-  std::vector<double> fin, fs;               // inner force, student force (owned atoms, 3 each)
+  HModel hs;                                 // middle > 0: the student's harmonic model
+  std::vector<double> fsref;                 // middle > 0: the student's force at x_ref (by ID)
+  std::vector<double> fin, fs, fmid;         // inner, student, middle force (owned atoms, 3 each)
   bigint fin_step;                           // step at whose end fin was computed (-1 = none)
+  // outer remainder (force - fast force) and middle force: sums of squares and counts by type
+  std::vector<double> rem2, mid2;
+  std::vector<bigint> remn;
 
   // student
   std::string student_name;
@@ -82,8 +89,10 @@ class FixBAOABHRespa : public FixBAOABTetherBase {
   void write_model(const char *) const;
   void finish_model(std::vector<tagint> &, std::vector<tagint> &, std::vector<double> &, HModel &);
   double fastest_frequency(const HModel &) const;
+  void harmonic_eval(const HModel &, const std::vector<double> &, std::vector<double> &) const;
   void student_force();
   void inner_force();
+  void middle_force();
 };
 
 }    // namespace LAMMPS_NS

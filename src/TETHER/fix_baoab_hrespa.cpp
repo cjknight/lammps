@@ -38,7 +38,7 @@ using namespace LAMMPS_NS;
 
 FixBAOABHRespa::FixBAOABHRespa(LAMMPS *lmp, int narg, char **arg) :
     FixBAOABTetherBase(lmp, narg, arg, "Fix baoab/hrespa"), inner_user(0), nin(1),
-    inner_kind(-1), cut(0.0), wmax(0.0), eps(0.0), file_in(nullptr), file_out(nullptr),
+    inner_kind(-1), middle(0), cut(0.0), wmax(0.0), eps(0.0), file_in(nullptr), file_out(nullptr),
     ready(false), natoms_ref(0), fin_step(-1), student(nullptr), n_student_calls(0),
     n_student_calls_run0(0)
 {
@@ -76,6 +76,11 @@ FixBAOABHRespa::FixBAOABHRespa(LAMMPS *lmp, int narg, char **arg) :
       student_settings.assign(w.begin() + 1, w.end());
     } else if (strcmp(arg[iarg], "student_coeff") == 0) {
       iarg = parse_counted_args(narg, arg, iarg, student_coeff);
+    } else if (strcmp(arg[iarg], "middle") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/hrespa middle", error);
+      middle = utils::inumeric(FLERR, arg[iarg + 1], false, lmp);
+      if (middle < 0) error->all(FLERR, iarg + 1, "Fix baoab/hrespa middle must be >= 0");
+      iarg += 2;
     } else if (strcmp(arg[iarg], "inner_force") == 0) {
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/hrespa inner_force", error);
       if (strcmp(arg[iarg + 1], "harmonic") == 0) inner_kind = HARMONIC;
@@ -94,6 +99,8 @@ FixBAOABHRespa::FixBAOABHRespa(LAMMPS *lmp, int narg, char **arg) :
   if ((inner_kind != HARMONIC) && student_name.empty())
     error->all(FLERR, "Fix baoab/hrespa inner_force student or graft requires student_style and "
                "student_coeff");
+  if ((middle > 0) && (inner_kind != GRAFT))
+    error->all(FLERR, "Fix baoab/hrespa middle requires inner_force graft (and a student)");
   if ((inner_kind == STUDENT) && file_in)
     error->all(FLERR, "Fix baoab/hrespa inner_force student does not use a harmonic model: "
                "remove read");
@@ -140,6 +147,9 @@ void FixBAOABHRespa::setup(int /*vflag*/)
 {
   fin_step = -1;
   n_student_calls_run0 = n_student_calls;
+  rem2.assign(atom->ntypes + 1, 0.0);
+  mid2.assign(atom->ntypes + 1, 0.0);
+  remn.assign(atom->ntypes + 1, 0);
   setup_model();
 }
 
@@ -150,6 +160,25 @@ void FixBAOABHRespa::post_run()
   if (student && (comm->me == 0))
     utils::logmesg(lmp, "  baoab/hrespa: {} student force evaluations in this run\n",
                    n_student_calls - n_student_calls_run0);
+
+  // rms of the outer remainder (force - fast force; it is applied as the outer kicks) and of
+  // the middle force, per force component, by atom type, over the steps of this run
+  int nt = atom->ntypes;
+  std::vector<double> r(nt + 1, 0.0), q(nt + 1, 0.0);
+  std::vector<bigint> c(nt + 1, 0);
+  MPI_Allreduce(rem2.data(), r.data(), nt + 1, MPI_DOUBLE, MPI_SUM, world);
+  MPI_Allreduce(mid2.data(), q.data(), nt + 1, MPI_DOUBLE, MPI_SUM, world);
+  MPI_Allreduce(remn.data(), c.data(), nt + 1, MPI_LMP_BIGINT, MPI_SUM, world);
+  if (comm->me != 0) return;
+  std::string line = "  baoab/hrespa: rms outer remainder by atom type:";
+  std::string mline = "  baoab/hrespa: rms middle force by atom type:";
+  for (int t = 1; t <= nt; t++)
+    if (c[t] > 0) {
+      line += fmt::format(" {} {:.4g}", t, sqrt(r[t] / (3.0 * c[t])));
+      mline += fmt::format(" {} {:.4g}", t, sqrt(q[t] / (3.0 * c[t])));
+    }
+  utils::logmesg(lmp, line + " (force units)\n");
+  if (middle > 0) utils::logmesg(lmp, mline + " (force units)\n");
 }
 
 /* ---------------------------------------------------------------------- */
@@ -229,11 +258,13 @@ void FixBAOABHRespa::setup_model()
     // the student's harmonic model at the same reference: the substep size for inner_force
     // student, the subtracted part of the graft
     if (inner_kind != HARMONIC) {
-      std::vector<double> fsref;
       build_model_fd(student, fsref, rows, cols, vals);
-      HModel hs;
       finish_model(rows, cols, vals, hs);
-      if (inner_kind == STUDENT) {
+      if (middle > 0) {
+        if (comm->me == 0)
+          utils::logmesg(lmp, "  baoab/hrespa: graft in three levels, student fastest frequency "
+                         "{:.4g} rad/time unit\n", fastest_frequency(hs));
+      } else if (inner_kind == STUDENT) {
         wmax = fastest_frequency(hs);
         hm = HModel();
       } else {
@@ -270,6 +301,8 @@ void FixBAOABHRespa::setup_model()
           utils::logmesg(lmp, "  baoab/hrespa: graft inner force; student fastest frequency {:.4g} "
                          "rad/time unit; teacher - student at the reference: max |K| element "
                          "{:.4g}, max |f| {:.4g}\n", ws, kmax, fmax);
+        hs = HModel();
+        fsref.clear();
       }
     }
     ready = true;
@@ -283,14 +316,21 @@ void FixBAOABHRespa::setup_model()
   }
 
   // inner substeps: omega_max * h <= 0.1 (velocity Verlet's frequency error ~(omega h)^2/24 ~ 4e-4)
+  // (per middle step with middle > 0)
+  double dsub = (middle > 0) ? update->dt / middle : update->dt;
   nin = inner_user;
   if (nin == 0) {
-    nin = (int) ceil(wmax * update->dt / 0.1);
+    nin = (int) ceil(wmax * dsub / 0.1);
     nin = MAX(2, nin + (nin % 2));
   }
-  if (comm->me == 0)
-    utils::logmesg(lmp, "  baoab/hrespa: {} inner substeps per timestep (omega_max * dt = {:.3f})\n",
-                   nin, wmax * update->dt);
+  if (comm->me == 0) {
+    if (middle > 0)
+      utils::logmesg(lmp, "  baoab/hrespa: {} middle steps per timestep, {} inner substeps per "
+                     "middle step (omega_max * middle step = {:.3f})\n", middle, nin, wmax * dsub);
+    else
+      utils::logmesg(lmp, "  baoab/hrespa: {} inner substeps per timestep (omega_max * dt = {:.3f})\n",
+                     nin, wmax * update->dt);
+  }
 }
 
 // K of the teacher (p = nullptr: whole-system recomputes of every force contribution) or of the
@@ -593,6 +633,36 @@ void FixBAOABHRespa::read_model(const char *file, std::vector<tagint> &rows,
   if (comm->me == 0) utils::logmesg(lmp, "  baoab/hrespa: harmonic model read from {}\n", file);
 }
 
+// harmonic model m with reference forces fr (by atom ID) at the current positions, on the owned
+// atoms (ghosts must be current): out = fr - K (x - x_ref)
+void FixBAOABHRespa::harmonic_eval(const HModel &m, const std::vector<double> &fr,
+                                   std::vector<double> &out) const
+{
+  double **x = atom->x;
+  tagint *tag = atom->tag;
+  int nlocal = atom->nlocal;
+  out.resize(3 * nlocal);
+  for (int i = 0; i < nlocal; i++) {
+    tagint ti = tag[i];
+    double fi[3] = {fr[3 * ti], fr[3 * ti + 1], fr[3 * ti + 2]};
+    for (bigint k = m.rowptr[ti]; k < m.rowptr[ti + 1]; k++) {
+      tagint t = m.col[k];
+      int j = atom->map(t);
+      if (j < 0)
+        error->one(FLERR, "Fix baoab/hrespa: atom {} (coupled to atom {}) is not a local or "
+                   "ghost atom: either the run became unstable (atoms moved far from their "
+                   "reference positions) or the ghost-atom cutoff is too small (comm_modify "
+                   "cutoff)", t, ti);
+      double d[3] = {x[j][0] - xref[3 * t], x[j][1] - xref[3 * t + 1],
+                     x[j][2] - xref[3 * t + 2]};
+      domain->minimum_image(FLERR, d);
+      const double *Kb = &m.K[9 * k];
+      for (int a = 0; a < 3; a++) fi[a] -= Kb[3 * a] * d[0] + Kb[3 * a + 1] * d[1] + Kb[3 * a + 2] * d[2];
+    }
+    for (int a = 0; a < 3; a++) out[3 * i + a] = fi[a];
+  }
+}
+
 // student force on the owned atoms at the current positions (ghosts must be current)
 void FixBAOABHRespa::student_force()
 {
@@ -601,42 +671,33 @@ void FixBAOABHRespa::student_force()
 }
 
 // inner force on every owned atom at the current positions (ghosts must be current): the
-// harmonic model, the student, or the graft (harmonic difference model + student)
+// harmonic model, the student, or the graft (harmonic difference model + student); with
+// middle > 0 the teacher's harmonic model alone
 void FixBAOABHRespa::inner_force()
 {
-  double **x = atom->x;
-  tagint *tag = atom->tag;
-  int nlocal = atom->nlocal;
-  fin.resize(3 * nlocal);
-  if (inner_kind != HARMONIC) student_force();
   if (inner_kind == STUDENT) {
+    student_force();
     fin = fs;
     return;
   }
-  for (int i = 0; i < nlocal; i++) {
-    tagint ti = tag[i];
-    double fi[3] = {fref[3 * ti], fref[3 * ti + 1], fref[3 * ti + 2]};
-    for (bigint k = hm.rowptr[ti]; k < hm.rowptr[ti + 1]; k++) {
-      tagint t = hm.col[k];
-      int m = atom->map(t);
-      if (m < 0)
-        error->one(FLERR, "Fix baoab/hrespa: atom {} (coupled to atom {}) is not a local or "
-                   "ghost atom; increase the ghost-atom cutoff (comm_modify cutoff)", t, ti);
-      double d[3] = {x[m][0] - xref[3 * t], x[m][1] - xref[3 * t + 1],
-                     x[m][2] - xref[3 * t + 2]};
-      domain->minimum_image(FLERR, d);
-      const double *Kb = &hm.K[9 * k];
-      for (int a = 0; a < 3; a++) fi[a] -= Kb[3 * a] * d[0] + Kb[3 * a + 1] * d[1] + Kb[3 * a + 2] * d[2];
-    }
-    if (inner_kind == GRAFT)
-      for (int a = 0; a < 3; a++) fin[3 * i + a] = fi[a] + fs[3 * i + a];
-    else
-      for (int a = 0; a < 3; a++) fin[3 * i + a] = fi[a];
-  }
+  if ((inner_kind == GRAFT) && (middle == 0)) student_force();
+  harmonic_eval(hm, fref, fin);
+  if ((inner_kind == GRAFT) && (middle == 0))
+    for (size_t k = 0; k < fin.size(); k++) fin[k] += fs[k];
 }
 
-// outer half kick with F - F_h, inner velocity-Verlet substeps under F_h (O step mid-loop),
-// the closing outer half kick is in final_integrate()
+// middle force (middle > 0): the student's anharmonic part F_s - F_hs
+void FixBAOABHRespa::middle_force()
+{
+  student_force();
+  harmonic_eval(hs, fsref, fmid);
+  for (size_t k = 0; k < fmid.size(); k++) fmid[k] = fs[k] - fmid[k];
+}
+
+// outer half kick with F - (fast force), then the middle steps (middle > 0, each with half kicks
+// by the middle force around inner substeps) or the inner substeps directly. Inner substeps are
+// velocity Verlet under the inner force. The O step is applied once per step, in the middle.
+// The closing outer half kick is in final_integrate().
 void FixBAOABHRespa::initial_integrate(int /*vflag*/)
 {
   compute_target();
@@ -651,38 +712,70 @@ void FixBAOABHRespa::initial_integrate(int /*vflag*/)
   double kT = force->boltz * t_target / force->mvv2e;
   double c1o = exp(-gamma * dt), s1o = sqrt(kT * (-std::expm1(-2.0 * gamma * dt)));
 
+  int nmid = MAX(1, middle);
   int ns = MAX(1, nin);
-  double h = dt / ns, hk = 0.5 * h * force->ftm2v;
+  double dm = dt / nmid;
+  double h = dm / ns, hk = 0.5 * h * force->ftm2v, hkm = 0.5 * dm * force->ftm2v;
   int omid = ns / 2;
+  // the O step: between middle steps nmid/2 - 1 and nmid/2 for an even number of them, else in
+  // the middle of the substeps of middle step nmid/2
+  int kO = nmid / 2;
+  bool o_between = (middle > 0) && (nmid % 2 == 0);
 
-  // the inner force at these positions was computed at the end of the previous step (nothing
+  auto ostep = [&]() {
+    if (gamma <= 0.0) return;
+    for (int i = 0; i < nlocal; i++) {
+      double mi = rmass ? rmass[i] : mass[type[i]];
+      double sv = s1o / sqrt(mi);
+      for (int a = 0; a < 3; a++) v[i][a] = c1o * v[i][a] + sv * random->gaussian();
+    }
+  };
+
+  // the fast forces at these positions were computed at the end of the previous step (nothing
   // moves or reorders atoms in between)
-  if ((fin_step != update->ntimestep - 1) || ((int) fin.size() != 3 * nlocal)) inner_force();
+  if ((fin_step != update->ntimestep - 1) || ((int) fin.size() != 3 * nlocal)) {
+    inner_force();
+    if (middle > 0) middle_force();
+  }
   for (int i = 0; i < nlocal; i++) {
     double mi = rmass ? rmass[i] : mass[type[i]];
-    for (int a = 0; a < 3; a++) v[i][a] += dtf * (f[i][a] - fin[3 * i + a]) / mi;
+    if (middle > 0)
+      for (int a = 0; a < 3; a++) v[i][a] += dtf * (f[i][a] - fin[3 * i + a] - fmid[3 * i + a]) / mi;
+    else
+      for (int a = 0; a < 3; a++) v[i][a] += dtf * (f[i][a] - fin[3 * i + a]) / mi;
   }
-  for (int s = 0; s < ns; s++) {
-    for (int i = 0; i < nlocal; i++) {
-      double mi = rmass ? rmass[i] : mass[type[i]];
-      for (int a = 0; a < 3; a++) {
-        v[i][a] += hk * fin[3 * i + a] / mi;
-        x[i][a] += h * v[i][a];
-      }
-    }
-    comm->forward_comm();
-    inner_force();
-    for (int i = 0; i < nlocal; i++) {
-      double mi = rmass ? rmass[i] : mass[type[i]];
-      for (int a = 0; a < 3; a++) v[i][a] += hk * fin[3 * i + a] / mi;
-    }
-    if (((s == omid - 1) || (ns == 1)) && (gamma > 0.0))
+  for (int k = 0; k < nmid; k++) {
+    if (middle > 0)
       for (int i = 0; i < nlocal; i++) {
         double mi = rmass ? rmass[i] : mass[type[i]];
-        double sv = s1o / sqrt(mi);
-        for (int a = 0; a < 3; a++) v[i][a] = c1o * v[i][a] + sv * random->gaussian();
+        for (int a = 0; a < 3; a++) v[i][a] += hkm * fmid[3 * i + a] / mi;
       }
+    for (int s = 0; s < ns; s++) {
+      for (int i = 0; i < nlocal; i++) {
+        double mi = rmass ? rmass[i] : mass[type[i]];
+        for (int a = 0; a < 3; a++) {
+          v[i][a] += hk * fin[3 * i + a] / mi;
+          x[i][a] += h * v[i][a];
+        }
+      }
+      comm->forward_comm();
+      inner_force();
+      for (int i = 0; i < nlocal; i++) {
+        double mi = rmass ? rmass[i] : mass[type[i]];
+        for (int a = 0; a < 3; a++) v[i][a] += hk * fin[3 * i + a] / mi;
+      }
+      if (!o_between && (k == kO % nmid) && ((s == omid - 1) || (ns == 1))) ostep();
+    }
+    if (middle > 0) {
+      middle_force();
+      for (int i = 0; i < nlocal; i++) {
+        double mi = rmass ? rmass[i] : mass[type[i]];
+        for (int a = 0; a < 3; a++) v[i][a] += hkm * fmid[3 * i + a] / mi;
+      }
+      if (o_between && (k == kO - 1)) ostep();
+    }
   }
+  fin_step = -2;    // fin (and fmid) are at the positions at the end of the substeps
 }
 
 void FixBAOABHRespa::final_integrate()
@@ -694,10 +787,26 @@ void FixBAOABHRespa::final_integrate()
   int *type = atom->type;
   int nlocal = atom->nlocal;
 
-  inner_force();
+  // unless the atoms were reneighbored (which may reorder them), the fast forces from the end of
+  // the substeps are at the current positions
+  if ((fin_step != -2) || (neighbor->ago == 0) || ((int) fin.size() != 3 * nlocal)) {
+    inner_force();
+    if (middle > 0) middle_force();
+  }
   fin_step = update->ntimestep;
   for (int i = 0; i < nlocal; i++) {
     double mi = rmass ? rmass[i] : mass[type[i]];
-    for (int a = 0; a < 3; a++) v[i][a] += dtf * (f[i][a] - fin[3 * i + a]) / mi;
+    double r[3];
+    if (middle > 0)
+      for (int a = 0; a < 3; a++) r[a] = f[i][a] - fin[3 * i + a] - fmid[3 * i + a];
+    else
+      for (int a = 0; a < 3; a++) r[a] = f[i][a] - fin[3 * i + a];
+    for (int a = 0; a < 3; a++) v[i][a] += dtf * r[a] / mi;
+    int t = type[i];
+    rem2[t] += r[0] * r[0] + r[1] * r[1] + r[2] * r[2];
+    if (middle > 0)
+      mid2[t] += fmid[3 * i] * fmid[3 * i] + fmid[3 * i + 1] * fmid[3 * i + 1] +
+          fmid[3 * i + 2] * fmid[3 * i + 2];
+    remn[t]++;
   }
 }

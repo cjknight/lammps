@@ -16,7 +16,7 @@ Syntax
 * damp = damping parameter (time units)
 * seed = random number seed (positive integer)
 * zero or more keyword/value pairs may be appended
-* keyword = *inner* or *cut* or *eps* or *read* or *write* or *student_style* or *student_coeff* or *inner_force*
+* keyword = *inner* or *cut* or *eps* or *read* or *write* or *student_style* or *student_coeff* or *inner_force* or *middle*
 
   .. parsed-literal::
 
@@ -38,6 +38,8 @@ Syntax
          args = arguments of the :doc:`pair_coeff <pair_coeff>` command for
            the student
        *inner_force* value = *harmonic* or *student* or *graft*
+       *middle* value = number of middle steps per timestep, must be >= 0
+         (0 = two levels; requires *inner_force* *graft* otherwise)
 
 Examples
 """"""""
@@ -118,7 +120,17 @@ force of the fast level:
   from the student (the default with a student).
 
 With a student, the student is evaluated once per substep, and the slow
-force is the teacher's force minus the fast one.  For *student* and
+force is the teacher's force minus the fast one.  With *middle* M > 0
+(and *graft*) there are three levels: the teacher's harmonic model on the
+substeps, the student's anharmonic part
+:math:`\mathbf{F}_s - \mathbf{F}_{hs}` as M middle steps per timestep
+(the student is then evaluated once per middle step, and *inner* is the
+number of substeps per middle step), and the teacher's remainder on the
+timestep.  At the end of each run the fix prints the rms remainder that
+the outer kicks apply, by atom type.  The student is evaluated within the
+timestep with the neighbor list checked at its start, as with
+:doc:`run_style respa <run_style>`: the neighbor skin must cover the
+motion of the atoms during one whole timestep.  For *student* and
 *graft* the automatic number of substeps uses the student's harmonic
 model or the teacher's, respectively.  The masses set in the input are
 kept, even if the student's :doc:`pair_coeff <pair_coeff>` sets others
@@ -169,4 +181,4 @@ Default
 
 *inner* = 0, *cut* = the pair style cutoff, *eps* = 0.001 Angstrom,
 no *read* or *write* file, no student, *inner_force* = *harmonic*
-without a student and *graft* with one.
+without a student and *graft* with one, *middle* = 0.
