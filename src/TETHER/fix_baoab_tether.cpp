@@ -36,16 +36,11 @@
 #include "pair.h"
 #include "platform.h"
 #include "random_mars.h"
-#include "safe_pointers.h"
-#include "text_file_reader.h"
-#include "tokenizer.h"
 #include "update.h"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <cstring>
-#include <map>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -55,17 +50,6 @@ using namespace LAMMPS_NS;
 using namespace FixConst;
 
 namespace {
-
-// Validate the shared FixBAOAB positional arguments (t_start t_stop damp
-// seed at arg[3..6]) before FixBAOAB's own constructor runs, since it is
-// invoked below with a literal narg of 7 regardless of the caller's real
-// narg -- without this check, a too-short command line would make FixBAOAB
-// read past the end of the caller's arg array.
-int check_base_args(LAMMPS *lmp, int narg)
-{
-  if (narg < 7) utils::missing_cmd_args(FLERR, "fix baoab/tether", lmp->error);
-  return 7;
-}
 
 // small fixed 3x3 helpers used by the stage-2 mollifier (response block S_i,
 // cross-Hessian probes, back-reaction matvecs) -- kept local rather than
@@ -94,7 +78,7 @@ inline void mat3_matmat(const double a[9], const double b[9], double out[9])
 /* ---------------------------------------------------------------------- */
 
 FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
-    FixBAOAB(lmp, check_base_args(lmp, narg), arg), list(nullptr), x0(nullptr), c(nullptr),
+    FixBAOABTetherBase(lmp, narg, arg, "fix baoab/tether"), list(nullptr), x0(nullptr), c(nullptr),
     evecs(nullptr), om(nullptr), Hacc(nullptr), n_hess_samples(nullptr), nJ(nullptr),
     Jtag(nullptr), Jblk(nullptr), demote_count(nullptr), last_demote(nullptr),
     demote_cool(nullptr), quench_exempt(nullptr), last_ke(nullptr), teacher_pair(nullptr),
@@ -171,14 +155,6 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
   molblock = 0;
   mb_verbose = 0;
   mb_inner_user = 0;
-  hrespa = 0;
-  hr_inner_user = 0;
-  hr_nin = 1;
-  hr_cut = 0.0;
-  hr_wmax = 0.0;
-  hr_file_in = hr_file_out = nullptr;
-  hr_ready = false;
-  hr_natoms = 0;
   mb_nin = 1;
   mb_wmax = 0.0;
   mb_last_refresh = -1;
@@ -457,30 +433,6 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether molblock", error);
       molblock = utils::logical(FLERR, arg[iarg + 1], false, lmp);
       iarg += 2;
-    } else if (strcmp(arg[iarg], "hrespa") == 0) {
-      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether hrespa", error);
-      hrespa = utils::logical(FLERR, arg[iarg + 1], false, lmp);
-      iarg += 2;
-    } else if (strcmp(arg[iarg], "hrespa_inner") == 0) {
-      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether hrespa_inner", error);
-      hr_inner_user = utils::inumeric(FLERR, arg[iarg + 1], false, lmp);
-      if (hr_inner_user < 0) error->all(FLERR, "Fix baoab/tether hrespa_inner must be >= 0");
-      iarg += 2;
-    } else if (strcmp(arg[iarg], "hrespa_cut") == 0) {
-      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether hrespa_cut", error);
-      hr_cut = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
-      if (hr_cut <= 0.0) error->all(FLERR, "Fix baoab/tether hrespa_cut must be > 0");
-      iarg += 2;
-    } else if (strcmp(arg[iarg], "hrespa_read") == 0) {
-      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether hrespa_read", error);
-      delete[] hr_file_in;
-      hr_file_in = utils::strdup(arg[iarg + 1]);
-      iarg += 2;
-    } else if (strcmp(arg[iarg], "hrespa_write") == 0) {
-      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether hrespa_write", error);
-      delete[] hr_file_out;
-      hr_file_out = utils::strdup(arg[iarg + 1]);
-      iarg += 2;
     } else if (strcmp(arg[iarg], "molblock_inner") == 0) {
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether molblock_inner", error);
       mb_inner_user = utils::inumeric(FLERR, arg[iarg + 1], false, lmp);
@@ -556,11 +508,6 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
     }
   }
 
-  // hrespa neither masks modes nor refreshes curvature blocks: theta and refresh are unused
-  if (hrespa) {
-    if (theta <= 0.0) theta = 1.0;
-    if (refresh_every <= 0) refresh_every = 1;
-  }
   if (theta <= 0.0) error->all(FLERR, "Fix baoab/tether theta must be > 0");
   if (refresh_every <= 0) error->all(FLERR, "Fix baoab/tether refresh must be > 0");
   if (promote_every < 0) error->all(FLERR, "Fix baoab/tether promote_every must be >= 0");
@@ -577,12 +524,6 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
     error->all(FLERR, "Fix baoab/tether refresh_skin and refresh_skin_rel are mutually exclusive");
   if (molblock && !mollify)
     error->all(FLERR, "Fix baoab/tether molblock requires mollify yes");
-  if (hrespa && (mollify || adapt || molblock))
-    error->all(FLERR, "Fix baoab/tether hrespa cannot be combined with mollify, adapt, or molblock");
-  if (hrespa && (igroup != 0))
-    error->all(FLERR, "Fix baoab/tether hrespa must be applied to group all");
-  if (!hrespa && (hr_file_in || hr_file_out || hr_inner_user || (hr_cut > 0.0)))
-    error->all(FLERR, "Fix baoab/tether hrespa_* keywords require hrespa yes");
   if (molblock && adapt)
     error->all(FLERR, "Fix baoab/tether molblock cannot be combined with adapt yes");
   if (molblock && (atom->molecular != Atom::MOLECULAR))
@@ -758,8 +699,6 @@ FixBAOABTether::~FixBAOABTether()
   if (molblock) atom->delete_callback(id, Atom::BORDER);
   memory->destroy(mb_state);
   memory->destroy(mb_anc);
-  delete[] hr_file_in;
-  delete[] hr_file_out;
 
   memory->destroy(x0);
   memory->destroy(c);
@@ -1015,10 +954,6 @@ void FixBAOABTether::initial_integrate(int /*vflag*/)
 
   if (molblock) {
     mb_initial_integrate();
-    return;
-  }
-  if (hrespa) {
-    hr_initial_integrate();
     return;
   }
 
@@ -1374,10 +1309,6 @@ void FixBAOABTether::final_integrate()
     mb_final_integrate();
     return;
   }
-  if (hrespa) {
-    hr_final_integrate();
-    return;
-  }
 
   if (mollify) {
     double kT = force->boltz * t_target / force->mvv2e;
@@ -1489,7 +1420,6 @@ void FixBAOABTether::final_integrate()
 
 void FixBAOABTether::end_of_step()
 {
-  if (hrespa) return;
   bigint ntimestep = update->ntimestep;
 
   // promote_every (default 0 = disabled): re-run update_dt() more often than
@@ -5923,55 +5853,6 @@ void FixBAOABTether::kspace_snapshot()
 
 /* ---------------------------------------------------------------------- */
 
-void FixBAOABTether::force_clear_local()
-{
-  size_t nbytes = sizeof(double) * (atom->nlocal + atom->nghost);
-  if (nbytes) memset(&atom->f[0][0], 0, 3 * nbytes);
-}
-
-/* ---------------------------------------------------------------------- */
-
-void FixBAOABTether::recompute_forces_local()
-{
-  n_recompute_calls++;
-  force_clear_local();
-
-  if (force->pair) force->pair->compute(0, 0);
-  if (force->bond) force->bond->compute(0, 0);
-  if (force->angle) force->angle->compute(0, 0);
-  if (force->dihedral) force->dihedral->compute(0, 0);
-  if (force->improper) force->improper->compute(0, 0);
-  if (force->kspace) force->kspace->compute(0, 0);
-  // force term that needs this configuration's kspace solution (charge response of an LES
-  // model), exactly as the integrator adds it (Pair::compute_kspace_response())
-  if (force->kspace && force->pair && force->pair->kspace_response_flag)
-    force->pair->compute_kspace_response(0, 0);
-
-  if (modify->n_pre_reverse) modify->pre_reverse(0, 0);
-  if (force->newton) comm->reverse_comm();
-}
-
-/* ---------------------------------------------------------------------- */
-
-bool FixBAOABTether::charges_from_pair() const
-{
-  return atom->q_flag && force->pair && force->pair->kspace_response_flag;
-}
-
-void FixBAOABTether::save_charges(std::vector<double> &qs) const
-{
-  if (!charges_from_pair()) return;
-  qs.assign(atom->q, atom->q + atom->nlocal + atom->nghost);
-}
-
-void FixBAOABTether::restore_charges(const std::vector<double> &qs)
-{
-  if (!charges_from_pair() || qs.empty()) return;
-  int n = MIN((int) qs.size(), atom->nlocal + atom->nghost);
-  memcpy(atom->q, qs.data(), n * sizeof(double));
-  if (force->kspace) force->kspace->qsum_qsq();
-}
-
 /* ---------------------------------------------------------------------- */
 
 double FixBAOABTether::memory_usage()
@@ -6056,7 +5937,6 @@ void FixBAOABTether::reduce_vector()
 
 void FixBAOABTether::setup(int /*vflag*/)
 {
-  if (hrespa) hr_setup();
   t_run_start = platform::walltime();
   t_teacher_total_run0 = t_teacher_total;
   t_teacher_pair_run0 = t_teacher_pair;
@@ -6420,427 +6300,4 @@ int FixBAOABTether::unpack_border(int n, int first, double *buf)
     mb_anc[i] = 0;
   }
   return m;
-}
-
-/* ----------------------------------------------------------------------
-   hrespa: Hessian-built RESPA (see the header). The harmonic inner model is
-     F_h(x) = f_ref - K (x - x_ref),  displacements by minimum image,
-   with K symmetric, cut at hr_cut (atom pairs farther apart at x_ref are dropped) and the
-   acoustic sum rule restored (diagonal blocks from the off-diagonal ones), as in the Python
-   prototype (workloads/mtp-les_HfO/mts_proto/mts_levels.py, HarmonicCartesian).
-------------------------------------------------------------------------- */
-
-void FixBAOABTether::hr_setup()
-{
-  if (atom->map_style == Atom::MAP_NONE)
-    error->all(FLERR, "Fix baoab/tether hrespa requires atom_modify map (yes|array)");
-  if (atom->natoms > MAXSMALLINT || atom->map_tag_max != atom->natoms)
-    error->all(FLERR, "Fix baoab/tether hrespa requires consecutive atom IDs 1..N");
-  if (!force->pair) error->all(FLERR, "Fix baoab/tether hrespa requires a pair style");
-  if (hr_cut <= 0.0) hr_cut = force->pair->cutforce;
-  double cutghost = comm->get_comm_cutoff();
-  if (hr_cut > cutghost)
-    error->all(FLERR, "Fix baoab/tether hrespa_cut {} exceeds the ghost-atom cutoff {}; increase it "
-               "with comm_modify cutoff", hr_cut, cutghost);
-
-  int nlocal = atom->nlocal;
-  tagint *tag = atom->tag;
-  if (hr_ready && atom->natoms != hr_natoms)
-    error->all(FLERR, "Fix baoab/tether hrespa: the number of atoms changed since the harmonic "
-               "model was built");
-
-  // masses by atom ID (the model is replicated, so are they)
-  bigint N = atom->natoms;
-  {
-    std::vector<double> m(N + 1, 0.0);
-    for (int i = 0; i < nlocal; i++)
-      m[tag[i]] = atom->rmass ? atom->rmass[i] : atom->mass[atom->type[i]];
-    hr_mass.assign(N + 1, 0.0);
-    MPI_Allreduce(m.data(), hr_mass.data(), N + 1, MPI_DOUBLE, MPI_SUM, world);
-  }
-
-  if (!hr_ready) {
-    hr_natoms = N;
-    double t0 = platform::walltime();
-    if (hr_file_in) hr_read(hr_file_in);
-    else hr_build_fd();
-    if (hr_file_out) hr_write(hr_file_out);
-    hr_ready = true;
-
-    // fastest harmonic frequency (power iteration on M^-1/2 K M^-1/2, identical on every rank)
-    std::vector<double> z(3 * (N + 1), 0.0), y(3 * (N + 1), 0.0);
-    for (bigint t = 1; t <= N; t++)
-      for (int a = 0; a < 3; a++) z[3 * t + a] = ((t * 7 + a * 3) % 11) - 5.0 + 0.1 * a;
-    double lam = 0.0;
-    for (int it = 0; it < 300; it++) {
-      double nz = 0.0;
-      for (auto zi : z) nz += zi * zi;
-      nz = sqrt(nz);
-      for (auto &zi : z) zi /= nz;
-      for (bigint i = 1; i <= N; i++) {
-        double yi[3] = {0.0, 0.0, 0.0};
-        for (bigint k = hr_rowptr[i]; k < hr_rowptr[i + 1]; k++) {
-          tagint t = hr_col[k];
-          const double *Kb = &hr_K[9 * k];
-          double st = 1.0 / sqrt(hr_mass[t]);
-          for (int a = 0; a < 3; a++)
-            for (int b = 0; b < 3; b++) yi[a] += Kb[3 * a + b] * st * z[3 * t + b];
-        }
-        for (int a = 0; a < 3; a++) y[3 * i + a] = yi[a] / sqrt(hr_mass[i]);
-      }
-      lam = 0.0;
-      for (size_t k = 0; k < z.size(); k++) lam += z[k] * y[k];
-      z.swap(y);
-    }
-    hr_wmax = sqrt(fabs(lam) * force->ftm2v);
-    if (comm->me == 0)
-      utils::logmesg(lmp, "  hrespa: harmonic model of {} atoms, {} 3x3 blocks ({:.1f} per atom, "
-                     "cut {}), fastest frequency {:.4g} rad/time unit, built in {:.1f} s\n", N,
-                     hr_K.size() / 9, (double) hr_K.size() / 9.0 / N, hr_cut, hr_wmax,
-                     platform::walltime() - t0);
-  }
-
-  // inner substeps: omega_max * h <= 0.1 (velocity Verlet's frequency error ~(omega h)^2/24 ~ 4e-4)
-  hr_nin = hr_inner_user;
-  if (hr_nin == 0) {
-    hr_nin = (int) ceil(hr_wmax * update->dt / 0.1);
-    hr_nin = MAX(2, hr_nin + (hr_nin % 2));
-  }
-  if (comm->me == 0)
-    utils::logmesg(lmp, "  hrespa: {} inner substeps per timestep (omega_max * dt = {:.3f})\n",
-                   hr_nin, hr_wmax * update->dt);
-}
-
-// reference = the current configuration; K by central differences of whole-system forces
-// (6N recomputes). The step is eps if given, else 0.001 Angstrom (as in the Python prototype).
-void FixBAOABTether::hr_build_fd()
-{
-  double **x = atom->x;
-  double **f = atom->f;
-  tagint *tag = atom->tag;
-  int nlocal = atom->nlocal;
-  int ntotal = nlocal + atom->nghost;
-  bigint N = hr_natoms;
-
-  // reference positions and forces by atom ID (replicated)
-  {
-    std::vector<double> xl(3 * (N + 1), 0.0), fl(3 * (N + 1), 0.0);
-    for (int i = 0; i < nlocal; i++)
-      for (int a = 0; a < 3; a++) {
-        xl[3 * tag[i] + a] = x[i][a];
-        fl[3 * tag[i] + a] = f[i][a];
-      }
-    hr_xref.assign(3 * (N + 1), 0.0);
-    hr_fref.assign(3 * (N + 1), 0.0);
-    MPI_Allreduce(xl.data(), hr_xref.data(), 3 * (N + 1), MPI_DOUBLE, MPI_SUM, world);
-    MPI_Allreduce(fl.data(), hr_fref.data(), 3 * (N + 1), MPI_DOUBLE, MPI_SUM, world);
-  }
-
-  // the probes overwrite forces, charges and the accumulated energies/virials: save them
-  std::vector<double> fsave(3 * ntotal);
-  if (ntotal) memcpy(fsave.data(), &f[0][0], 3 * ntotal * sizeof(double));
-  std::vector<double> qsave;
-  save_charges(qsave);
-  double esave[2 + 6 + 1 + 6] = {0.0};
-  esave[0] = force->pair->eng_vdwl;
-  esave[1] = force->pair->eng_coul;
-  for (int k = 0; k < 6; k++) esave[2 + k] = force->pair->virial[k];
-  if (force->kspace) {
-    esave[8] = force->kspace->energy;
-    for (int k = 0; k < 6; k++) esave[9 + k] = force->kspace->virial[k];
-  }
-
-  double e = eps_was_set ? eps : 1.0e-3 * force->angstrom;
-  double cut2 = hr_cut * hr_cut;
-  std::vector<double> fplus(3 * nlocal), loc;    // loc: (row ID, column ID, b, -dF_row/dx_col,b)
-  double t0 = platform::walltime();
-  if (comm->me == 0)
-    utils::logmesg(lmp, "  hrespa: building the harmonic model by finite differences ({} force "
-                   "evaluations, step {})\n", 6 * N, e);
-  for (bigint t = 1; t <= N; t++) {
-    int it = atom->map((tagint) t);
-    bool own = (it >= 0) && (it < nlocal);
-    for (int b = 0; b < 3; b++) {
-      double x0 = own ? x[it][b] : 0.0;
-      for (int s = 0; s < 2; s++) {
-        if (own) x[it][b] = x0 + (s == 0 ? e : -e);
-        comm->forward_comm();
-        recompute_forces_local();
-        if (s == 0)
-          for (int j = 0; j < nlocal; j++)
-            for (int a = 0; a < 3; a++) fplus[3 * j + a] = f[j][a];
-      }
-      if (own) x[it][b] = x0;
-      for (int j = 0; j < nlocal; j++) {
-        tagint tj = tag[j];
-        double d[3];
-        for (int a = 0; a < 3; a++) d[a] = hr_xref[3 * tj + a] - hr_xref[3 * t + a];
-        domain->minimum_image(FLERR, d);
-        if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > cut2) continue;
-        loc.push_back((double) tj);
-        loc.push_back((double) t);
-        loc.push_back((double) b);
-        for (int a = 0; a < 3; a++) loc.push_back(-(fplus[3 * j + a] - f[j][a]) / (2.0 * e));
-      }
-    }
-    if ((comm->me == 0) && ((t % MAX(1, N / 10)) == 0))
-      utils::logmesg(lmp, "  hrespa: {}/{} atoms, {:.1f} s\n", t, N, platform::walltime() - t0);
-  }
-  comm->forward_comm();
-  if (ntotal) memcpy(&f[0][0], fsave.data(), 3 * ntotal * sizeof(double));
-  restore_charges(qsave);
-  force->pair->eng_vdwl = esave[0];
-  force->pair->eng_coul = esave[1];
-  for (int k = 0; k < 6; k++) force->pair->virial[k] = esave[2 + k];
-  if (force->kspace) {
-    force->kspace->energy = esave[8];
-    for (int k = 0; k < 6; k++) force->kspace->virial[k] = esave[9 + k];
-  }
-
-  // gather every rank's columns
-  int n = (int) loc.size(), np = comm->nprocs;
-  std::vector<int> cnt(np), dsp(np, 0);
-  MPI_Allgather(&n, 1, MPI_INT, cnt.data(), 1, MPI_INT, world);
-  for (int p = 1; p < np; p++) dsp[p] = dsp[p - 1] + cnt[p - 1];
-  std::vector<double> all(dsp[np - 1] + cnt[np - 1]);
-  MPI_Allgatherv(loc.data(), n, MPI_DOUBLE, all.data(), cnt.data(), dsp.data(), MPI_DOUBLE, world);
-
-  std::map<std::pair<tagint, tagint>, std::array<double, 9>> B;
-  for (size_t k = 0; k < all.size(); k += 6) {
-    auto key = std::make_pair((tagint) all[k], (tagint) all[k + 1]);
-    int b = (int) all[k + 2];
-    auto it = B.find(key);
-    if (it == B.end()) it = B.emplace(key, std::array<double, 9>{}).first;
-    for (int a = 0; a < 3; a++) it->second[3 * a + b] = all[k + 3 + a];
-  }
-  std::vector<tagint> rows, cols;
-  std::vector<double> vals;
-  for (auto &kv : B) {
-    rows.push_back(kv.first.first);
-    cols.push_back(kv.first.second);
-    vals.insert(vals.end(), kv.second.begin(), kv.second.end());
-  }
-  hr_finish(rows, cols, vals);
-}
-
-// symmetrize, cut, restore the acoustic sum rule, store as CSR rows by atom ID
-void FixBAOABTether::hr_finish(std::vector<tagint> &rows, std::vector<tagint> &cols,
-                               std::vector<double> &vals)
-{
-  bigint N = hr_natoms;
-  double cut2 = hr_cut * hr_cut;
-  std::map<std::pair<tagint, tagint>, std::array<double, 9>> B;
-  for (size_t k = 0; k < rows.size(); k++) {
-    tagint i = rows[k], j = cols[k];
-    if (i == j) continue;    // diagonal blocks come from the sum rule
-    double d[3];
-    for (int a = 0; a < 3; a++) d[a] = hr_xref[3 * i + a] - hr_xref[3 * j + a];
-    domain->minimum_image(FLERR, d);
-    if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > cut2) continue;
-    std::array<double, 9> blk;
-    for (int q = 0; q < 9; q++) blk[q] = vals[9 * k + q];
-    B[std::make_pair(i, j)] = blk;
-  }
-  // K_ij = (K_ij + K_ji^T) / 2 (a block missing on one side counts as zero)
-  std::map<std::pair<tagint, tagint>, std::array<double, 9>> S;
-  for (auto &kv : B) {
-    tagint i = kv.first.first, j = kv.first.second;
-    if (S.count(kv.first)) continue;
-    std::array<double, 9> kij = kv.second, kji{};
-    auto it = B.find(std::make_pair(j, i));
-    if (it != B.end()) kji = it->second;
-    std::array<double, 9> s, st;
-    for (int a = 0; a < 3; a++)
-      for (int b = 0; b < 3; b++) {
-        s[3 * a + b] = 0.5 * (kij[3 * a + b] + kji[3 * b + a]);
-        st[3 * b + a] = s[3 * a + b];
-      }
-    S[kv.first] = s;
-    S[std::make_pair(j, i)] = st;
-  }
-  // diagonal: -(sum_j K_ij) symmetrized
-  std::vector<std::array<double, 9>> D(N + 1, std::array<double, 9>{});
-  for (auto &kv : S)
-    for (int q = 0; q < 9; q++) D[kv.first.first][q] -= kv.second[q];
-  for (bigint i = 1; i <= N; i++) {
-    std::array<double, 9> d = D[i];
-    for (int a = 0; a < 3; a++)
-      for (int b = 0; b < 3; b++) D[i][3 * a + b] = 0.5 * (d[3 * a + b] + d[3 * b + a]);
-    S[std::make_pair((tagint) i, (tagint) i)] = D[i];
-  }
-  hr_rowptr.assign(N + 2, 0);
-  hr_col.clear();
-  hr_K.clear();
-  for (auto &kv : S) {    // ordered by (row, column)
-    hr_rowptr[kv.first.first + 1]++;
-    hr_col.push_back(kv.first.second);
-    hr_K.insert(hr_K.end(), kv.second.begin(), kv.second.end());
-  }
-  for (bigint i = 1; i <= N + 1; i++) hr_rowptr[i] += hr_rowptr[i - 1];
-}
-
-// file format (text): comment lines start with '#'; then "N nblocks"; N lines
-// "ID x y z fx fy fz" (the reference); nblocks lines "I J K_xx K_xy ... K_zz" (row atom I,
-// column atom J, row-major). Blocks are re-cut, symmetrized and sum-ruled on reading.
-void FixBAOABTether::hr_write(const char *file) const
-{
-  if (comm->me != 0) return;
-  SafeFilePtr fp = fopen(file, "w");
-  if (!fp) error->one(FLERR, "Fix baoab/tether hrespa_write: cannot open file {}: {}", file,
-                      utils::getsyserror());
-  bigint N = hr_natoms;
-  utils::print(fp, "# fix baoab/tether hrespa harmonic model: F(x) = f_ref - K (x - x_ref)\n");
-  utils::print(fp, "{} {}\n", N, hr_K.size() / 9);
-  for (bigint t = 1; t <= N; t++)
-    utils::print(fp, "{} {:.17g} {:.17g} {:.17g} {:.17g} {:.17g} {:.17g}\n", t, hr_xref[3 * t],
-               hr_xref[3 * t + 1], hr_xref[3 * t + 2], hr_fref[3 * t], hr_fref[3 * t + 1],
-               hr_fref[3 * t + 2]);
-  for (bigint i = 1; i <= N; i++)
-    for (bigint k = hr_rowptr[i]; k < hr_rowptr[i + 1]; k++) {
-      utils::print(fp, "{} {}", i, hr_col[k]);
-      for (int q = 0; q < 9; q++) utils::print(fp, " {:.17g}", hr_K[9 * k + q]);
-      utils::print(fp, "\n");
-    }
-  fp = nullptr;
-  utils::logmesg(lmp, "  hrespa: harmonic model written to {}\n", file);
-}
-
-void FixBAOABTether::hr_read(const char *file)
-{
-  bigint N = hr_natoms;
-  std::vector<double> xf(6 * (N + 1), 0.0);
-  std::vector<tagint> rows, cols;
-  std::vector<double> vals;
-  bigint nb = 0;
-  if (comm->me == 0) {
-    try {
-      TextFileReader reader(file, "hrespa harmonic model");
-      auto v = reader.next_values(2);
-      bigint nf = v.next_bigint();
-      nb = v.next_bigint();
-      if (nf != N)
-        error->one(FLERR, "Fix baoab/tether hrespa_read: file {} has {} atoms, the system {}", file,
-                   nf, N);
-      for (bigint t = 0; t < N; t++) {
-        auto w = reader.next_values(7);
-        tagint id = w.next_tagint();
-        if (id < 1 || id > N) error->one(FLERR, "Fix baoab/tether hrespa_read: bad atom ID {}", id);
-        for (int q = 0; q < 6; q++) xf[6 * id + q] = w.next_double();
-      }
-      for (bigint k = 0; k < nb; k++) {
-        auto w = reader.next_values(11);
-        rows.push_back(w.next_tagint());
-        cols.push_back(w.next_tagint());
-        for (int q = 0; q < 9; q++) vals.push_back(w.next_double());
-      }
-    } catch (std::exception &ex) {
-      error->one(FLERR, "Fix baoab/tether hrespa_read: error reading {}: {}", file, ex.what());
-    }
-  }
-  MPI_Bcast(xf.data(), 6 * (N + 1), MPI_DOUBLE, 0, world);
-  MPI_Bcast(&nb, 1, MPI_LMP_BIGINT, 0, world);
-  rows.resize(nb);
-  cols.resize(nb);
-  vals.resize(9 * nb);
-  MPI_Bcast(rows.data(), nb, MPI_LMP_TAGINT, 0, world);
-  MPI_Bcast(cols.data(), nb, MPI_LMP_TAGINT, 0, world);
-  MPI_Bcast(vals.data(), 9 * nb, MPI_DOUBLE, 0, world);
-  hr_xref.assign(3 * (N + 1), 0.0);
-  hr_fref.assign(3 * (N + 1), 0.0);
-  for (bigint t = 1; t <= N; t++)
-    for (int a = 0; a < 3; a++) {
-      hr_xref[3 * t + a] = xf[6 * t + a];
-      hr_fref[3 * t + a] = xf[6 * t + 3 + a];
-    }
-  hr_finish(rows, cols, vals);
-  if (comm->me == 0) utils::logmesg(lmp, "  hrespa: harmonic model read from {}\n", file);
-}
-
-// harmonic force on every owned atom at the current positions (ghosts must be current)
-void FixBAOABTether::hr_force()
-{
-  double **x = atom->x;
-  tagint *tag = atom->tag;
-  int nlocal = atom->nlocal;
-  hr_f.resize(3 * nlocal);
-  for (int i = 0; i < nlocal; i++) {
-    tagint ti = tag[i];
-    double fi[3] = {hr_fref[3 * ti], hr_fref[3 * ti + 1], hr_fref[3 * ti + 2]};
-    for (bigint k = hr_rowptr[ti]; k < hr_rowptr[ti + 1]; k++) {
-      tagint t = hr_col[k];
-      int m = atom->map(t);
-      if (m < 0)
-        error->one(FLERR, "Fix baoab/tether hrespa: atom {} (coupled to atom {}) is not a local or "
-                   "ghost atom; increase the ghost-atom cutoff (comm_modify cutoff)", t, ti);
-      double d[3] = {x[m][0] - hr_xref[3 * t], x[m][1] - hr_xref[3 * t + 1],
-                     x[m][2] - hr_xref[3 * t + 2]};
-      domain->minimum_image(FLERR, d);
-      const double *Kb = &hr_K[9 * k];
-      for (int a = 0; a < 3; a++) fi[a] -= Kb[3 * a] * d[0] + Kb[3 * a + 1] * d[1] + Kb[3 * a + 2] * d[2];
-    }
-    for (int a = 0; a < 3; a++) hr_f[3 * i + a] = fi[a];
-  }
-}
-
-// outer half kick with F - F_h, inner velocity-Verlet substeps under F_h (O step mid-loop),
-// the closing outer half kick is in hr_final_integrate()
-void FixBAOABTether::hr_initial_integrate()
-{
-  double **x = atom->x;
-  double **v = atom->v;
-  double **f = atom->f;
-  double *mass = atom->mass;
-  double *rmass = atom->rmass;
-  int *type = atom->type;
-  int nlocal = atom->nlocal;
-  double dt = update->dt;
-  double kT = force->boltz * t_target / force->mvv2e;
-  double c1o = exp(-gamma * dt), s1o = sqrt(kT * (-std::expm1(-2.0 * gamma * dt)));
-
-  int nin = MAX(1, hr_nin);
-  double h = dt / nin, hk = 0.5 * h * force->ftm2v;
-  int omid = nin / 2;
-
-  hr_force();
-  for (int i = 0; i < nlocal; i++) {
-    double mi = rmass ? rmass[i] : mass[type[i]];
-    for (int a = 0; a < 3; a++) v[i][a] += dtf * (f[i][a] - hr_f[3 * i + a]) / mi;
-  }
-  for (int s = 0; s < nin; s++) {
-    for (int i = 0; i < nlocal; i++) {
-      double mi = rmass ? rmass[i] : mass[type[i]];
-      for (int a = 0; a < 3; a++) {
-        v[i][a] += hk * hr_f[3 * i + a] / mi;
-        x[i][a] += h * v[i][a];
-      }
-    }
-    comm->forward_comm();
-    hr_force();
-    for (int i = 0; i < nlocal; i++) {
-      double mi = rmass ? rmass[i] : mass[type[i]];
-      for (int a = 0; a < 3; a++) v[i][a] += hk * hr_f[3 * i + a] / mi;
-    }
-    if (((s == omid - 1) || (nin == 1)) && (gamma > 0.0))
-      for (int i = 0; i < nlocal; i++) {
-        double mi = rmass ? rmass[i] : mass[type[i]];
-        double sv = s1o / sqrt(mi);
-        for (int a = 0; a < 3; a++) v[i][a] = c1o * v[i][a] + sv * random->gaussian();
-      }
-  }
-}
-
-void FixBAOABTether::hr_final_integrate()
-{
-  double **v = atom->v;
-  double **f = atom->f;
-  double *mass = atom->mass;
-  double *rmass = atom->rmass;
-  int *type = atom->type;
-  int nlocal = atom->nlocal;
-
-  hr_force();
-  for (int i = 0; i < nlocal; i++) {
-    double mi = rmass ? rmass[i] : mass[type[i]];
-    for (int a = 0; a < 3; a++) v[i][a] += dtf * (f[i][a] - hr_f[3 * i + a]) / mi;
-  }
 }

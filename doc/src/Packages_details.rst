@@ -3110,15 +3110,18 @@ TETHER package
 
 **Contents:**
 
-A single fix, :doc:`fix baoab/tether <fix_baoab_tether>`, that integrates
-atoms in its group as though tethered to a frozen harmonic center for
-whichever local vibrational eigenmodes are currently stiff relative to the
-timestep, allowing longer timesteps while preserving dynamical information.
-It is derived from and requires :doc:`fix baoab <fix_baoab>`.
+Long-timestep integrators derived from :doc:`fix baoab <fix_baoab>` (which
+they require).  :doc:`fix baoab/tether <fix_baoab_tether>` integrates atoms
+in its group as though tethered to a frozen harmonic center for whichever
+local vibrational eigenmodes are currently stiff relative to the timestep,
+allowing longer timesteps while preserving dynamical information.
+:doc:`fix baoab/hrespa <fix_baoab_hrespa>` is a multiple-time-step
+integrator whose fast level is a harmonic model of the whole force field.
 
 **Supporting info:**
 
 * ``src/TETHER``: filenames -> commands
+* :doc:`fix baoab/hrespa <fix_baoab_hrespa>`
 * :doc:`fix baoab/tether <fix_baoab_tether>`
 
 ----------

@@ -19,7 +19,7 @@ FixStyle(baoab/tether,FixBAOABTether);
 #ifndef LMP_FIX_BAOAB_TETHER_H
 #define LMP_FIX_BAOAB_TETHER_H
 
-#include "fix_baoab.h"
+#include "fix_baoab_tether_base.h"
 #include "force.h"
 #include "safe_pointers.h"
 #include "update.h"
@@ -41,7 +41,7 @@ namespace LAMMPS_NS {
 // its own neighbor list -- no mollify keyword or Newton state at all when
 // "mollify no", which reduces exactly to stage 1's static-center behavior.
 
-class FixBAOABTether : public FixBAOAB {
+class FixBAOABTether : public FixBAOABTetherBase {
  public:
   FixBAOABTether(class LAMMPS *, int, char **);
   ~FixBAOABTether() override;
@@ -532,31 +532,6 @@ class FixBAOABTether : public FixBAOAB {
   void mb_initial_integrate();
   void mb_final_integrate();
 
-  // hrespa: Hessian-built RESPA for systems without a molecular split (crystals, glasses, ...).
-  // Inner level = the harmonic model F_h(x) = f_ref - K (x - x_ref) of the whole force field at
-  // the run's starting configuration, with K cut at hr_cut and the acoustic sum rule restored;
-  // it is integrated with velocity Verlet substeps (one forward_comm each, no force-field calls).
-  // Outer level = the full force minus F_h, applied as half kicks at the ends of the step.
-  // Phase 1 layout: the reference (x_ref, f_ref, K as CSR rows by atom ID) is replicated on every
-  // rank, built once by finite differences of whole-system recomputes (6N) or read from a file.
-  int hrespa, hr_inner_user, hr_nin;
-  double hr_cut, hr_wmax;
-  char *hr_file_in, *hr_file_out;
-  bool hr_ready;
-  bigint hr_natoms;
-  std::vector<double> hr_xref, hr_fref, hr_mass;   // 3 (or 1) per atom ID, index = ID
-  std::vector<bigint> hr_rowptr;                   // CSR rows by atom ID (size natoms + 2)
-  std::vector<tagint> hr_col;                      // column atom ID of each 3x3 block
-  std::vector<double> hr_K;                        // 9 per block, (a, b) row-major: K_{ia, jb}
-  std::vector<double> hr_f;                        // harmonic force on owned atoms (3 per atom)
-  void hr_setup();
-  void hr_build_fd();
-  void hr_read(const char *);
-  void hr_write(const char *) const;
-  void hr_finish(std::vector<tagint> &, std::vector<tagint> &, std::vector<double> &);
-  void hr_force();
-  void hr_initial_integrate();
-  void hr_final_integrate();
   double diag_om_unres, diag_om_unres_p99, diag_om_analytic;
   int diag_unres_type;
   // compute_vector() values reduced over all ranks (counts summed, maxima maxed), computed
@@ -712,20 +687,12 @@ class FixBAOABTether : public FixBAOAB {
   // halo-locality cost accounting (plan Sec 6.1 honest force-call cost):
   // partial_force() calls (Newton inner loop, mollify=yes) vs. full local
   // recompute_forces_local() calls -- exposed via compute_vector().
-  bigint n_partial_force_calls, n_recompute_calls;
+  bigint n_partial_force_calls;
 
   void refresh_blocks();
   void recoil_accumulate(int, const double *, double, double *) const;
   void refresh_one_atom(int i, const double *xi, bool instantaneous);
   double effective_skin(int i, double mi, double kT) const;
-  void force_clear_local();
-  void recompute_forces_local();
-  // charges set by the pair style at every compute (Pair::kspace_response_flag, e.g. an LES
-  // model): a scratch recompute leaves atom->q at the scratch geometry, so callers save the
-  // real-geometry charges first and restore them afterwards
-  bool charges_from_pair() const;
-  void save_charges(std::vector<double> &qs) const;
-  void restore_charges(const std::vector<double> &qs);
   void modal_force_correction(int i, double mi, double *fcorr) const;
 
   // stage-2 additions

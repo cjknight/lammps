@@ -37,6 +37,7 @@ parenthesis: g = GPU, i = INTEL, k = KOKKOS, o = OPENMP, t = OPT.
    * :doc:`aveforce (k) <fix_aveforce>`
    * :doc:`balance <fix_balance>`
    * :doc:`baoab (k) <fix_baoab>`
+   * :doc:`baoab/hrespa <fix_baoab_hrespa>`
    * :doc:`baoab/tether <fix_baoab_tether>`
    * :doc:`bocs <fix_bocs>`
    * :doc:`bond/break <fix_bond_break>`

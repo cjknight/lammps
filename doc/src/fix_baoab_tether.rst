@@ -16,7 +16,7 @@ Syntax
 * damp = damping parameter (time units)
 * seed = random number seed (positive integer)
 * two or more keyword/value pairs must be appended
-* keyword = *theta* or *refresh* or *heff_samples* or *promote_every* or *settle_confirm* or *eps* or *mollify* or *newton_iters* or *newton_damp* or *solve_tol_rel* or *force_eval* or *adapt* or *c_acc* or *dt_min* or *dt_max* or *ke_rel* or *ke_rel_refresh* or *ke_rel_margin_blocks* or *gamma_quench* or *gamma_quench_calib_gain* or *gamma_quench_calib_max_step* or *gamma_quench_calib_confirm* or *gamma_quench_calib_deadband* or *gamma_quench_calib_ceiling* or *gamma_quench_calib_refresh* or *refresh_skin* or *refresh_skin_rel* or *drift_response* or *exile_substep* or *preshrink_exile* or *gamma_soft* or *eligibility* or *newton_res_length* or *recoil* or *molblock* or *molblock_inner* or *molblock_verbose* or *molblock_diag* or *hrespa* or *hrespa_inner* or *hrespa_cut* or *hrespa_read* or *hrespa_write* or *event_log*
+* keyword = *theta* or *refresh* or *heff_samples* or *promote_every* or *settle_confirm* or *eps* or *mollify* or *newton_iters* or *newton_damp* or *solve_tol_rel* or *force_eval* or *adapt* or *c_acc* or *dt_min* or *dt_max* or *ke_rel* or *ke_rel_refresh* or *ke_rel_margin_blocks* or *gamma_quench* or *gamma_quench_calib_gain* or *gamma_quench_calib_max_step* or *gamma_quench_calib_confirm* or *gamma_quench_calib_deadband* or *gamma_quench_calib_ceiling* or *gamma_quench_calib_refresh* or *refresh_skin* or *refresh_skin_rel* or *drift_response* or *exile_substep* or *preshrink_exile* or *gamma_soft* or *eligibility* or *newton_res_length* or *recoil* or *molblock* or *molblock_inner* or *molblock_verbose* or *molblock_diag* or *event_log*
 
   .. parsed-literal::
 
@@ -149,18 +149,6 @@ Syntax
        *molblock_verbose* value = *yes* or *no* (optional; default *no*;
          only used if *molblock* is *yes*)
        *molblock_diag* value = *yes* or *no* (optional; default *no*)
-       *hrespa* value = *yes* or *no* (optional; default *no*; cannot be
-         combined with *mollify*, *adapt*, or *molblock*; group must be *all*)
-       *hrespa_inner* value = number of inner substeps per timestep,
-         must be >= 0 (optional; default 0, which selects the number
-         automatically; only used if *hrespa* is *yes*)
-       *hrespa_cut* value = distance (distance units) beyond which atom pairs
-         are not coupled in the harmonic model (optional; default: the
-         pair style cutoff; only used if *hrespa* is *yes*)
-       *hrespa_read* value = file to read the harmonic model from (optional;
-         default none, which builds it at the start of the first run)
-       *hrespa_write* value = file to write the harmonic model to (optional;
-         default none)
        *event_log* value = filename for a per-atom/per-event diagnostic
          log (optional; default none, which disables this log entirely)
 
@@ -975,55 +963,6 @@ with its lowest-ID atom and move with it between processors.  All atoms of
 a molecule must be within the ghost-atom cutoff of each other, which holds
 automatically for small molecules with the usual pair-style cutoffs.
 
-----------
-
-.. versionadded:: TBD
-
-The *hrespa* keyword selects a two-level multiple-time-step (RESPA-like)
-integrator for systems without a molecular split, such as crystals,
-glasses, or oxides described by machine-learned potentials.  Its fast
-level is a harmonic model of the complete force field,
-
-.. math::
-
-   \mathbf{F}_h(\mathbf{x}) = \mathbf{f}_\text{ref} - \mathbf{K}\,(\mathbf{x} - \mathbf{x}_\text{ref}) ,
-
-where displacements are taken by the minimum-image convention.  Each
-timestep starts and ends with a half kick by the difference between the
-full force and :math:`\mathbf{F}_h`; in between, *hrespa_inner* velocity
-Verlet substeps integrate the atoms under :math:`\mathbf{F}_h` alone.  The
-substeps need no force-field evaluations (one communication of positions
-each), so the cost per timestep is about one force evaluation.  The
-thermostat (with friction 1/*damp*) acts once per timestep, in the middle
-of the substeps; a very large *damp* gives microcanonical dynamics.  With
-*hrespa_inner* 0 the number of substeps is chosen so that the fastest
-harmonic frequency times the substep is at most 0.1.
-
-Without *hrespa_read*, the harmonic model is built at the start of the
-first run from the current configuration: :math:`\mathbf{x}_\text{ref}` and
-:math:`\mathbf{f}_\text{ref}` are the current positions and forces, and
-:math:`\mathbf{K}` is obtained by central finite differences of the forces
-(6 force evaluations per atom, displacement *eps*, default 0.001
-Angstrom).  It is usually best to minimize the energy first.  Blocks of
-:math:`\mathbf{K}` coupling atoms farther apart than *hrespa_cut* at
-:math:`\mathbf{x}_\text{ref}` are dropped, :math:`\mathbf{K}` is made
-symmetric, and the diagonal blocks are set so that a rigid translation
-costs no force.  *hrespa_write* saves the model in a text file that
-*hrespa_read* can use for later runs; the model is kept for all
-subsequent runs in the same input.  The file lists the number of atoms
-and of 3x3 blocks, one line per atom with its ID, reference position and
-force, and one line per block with the two atom IDs and the nine block
-entries (row by row).
-
-The largest stable timestep is limited by a resonance of the slow forces
-with the fastest vibrations (about one third of the shortest vibrational
-period), so *hrespa* is accurate when the anharmonic part of the forces
-is small, e.g. a solid at moderate temperature.  The model is stored on
-every processor, which limits system sizes to some ten thousand atoms.
-*hrespa* requires consecutive atom IDs, *atom_modify map*, and that all
-atoms coupled by the model are within the ghost-atom cutoff (which holds
-for the default *hrespa_cut*).  *theta* and *refresh* are not used.
-
 
 Restart, fix_modify, output, run start/stop, minimize info
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""
@@ -1212,6 +1151,7 @@ Related commands
 """""""""""""""""
 
 :doc:`fix baoab <fix_baoab>`,
+:doc:`fix baoab/hrespa <fix_baoab_hrespa>`,
 :doc:`fix langevin <fix_langevin>`,
 :doc:`fix nvt <fix_nh>`
 
@@ -1239,6 +1179,5 @@ defaults to 2.0. *gamma_quench_calib_confirm* defaults to 3.
 *exile_substep* defaults to *no*. *preshrink_exile* defaults to *no*. *recoil* defaults to *yes*.
 *gamma_soft* defaults to 1/*damp*. *eligibility* defaults to *per_mode*. *newton_res_length* defaults to *no*.
 *molblock* defaults to *no*. *molblock_inner* defaults to 0. *molblock_verbose* defaults to *no*.
-*hrespa* defaults to *no*. *hrespa_inner* defaults to 0. *hrespa_cut* defaults to the pair style cutoff.
 *molblock_diag* defaults to *no*.
 *event_log* defaults to unset (disabled).
