@@ -951,6 +951,8 @@
 /fix_baoab_tether_base.h
 /fix_baoab_hrespa.cpp
 /fix_baoab_hrespa.h
+/fix_baoab_molblock.cpp
+/fix_baoab_molblock.h
 /fix_bocs.cpp
 /fix_bocs.h
 /fix_bond_break.cpp

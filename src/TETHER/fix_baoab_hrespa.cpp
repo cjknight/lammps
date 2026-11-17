@@ -36,7 +36,7 @@ using namespace LAMMPS_NS;
 /* ---------------------------------------------------------------------- */
 
 FixBAOABHRespa::FixBAOABHRespa(LAMMPS *lmp, int narg, char **arg) :
-    FixBAOABTetherBase(lmp, narg, arg, "fix baoab/hrespa"), inner_user(0), nin(1), cut(0.0),
+    FixBAOABTetherBase(lmp, narg, arg, "Fix baoab/hrespa"), inner_user(0), nin(1), cut(0.0),
     wmax(0.0), eps(0.0), file_in(nullptr), file_out(nullptr), ready(false), natoms_ref(0)
 {
   int iarg = 7;

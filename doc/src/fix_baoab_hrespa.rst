@@ -119,6 +119,7 @@ Related commands
 
 :doc:`fix baoab <fix_baoab>`,
 :doc:`fix baoab/tether <fix_baoab_tether>`,
+:doc:`fix baoab/molblock <fix_baoab_molblock>`,
 :doc:`run_style respa <run_style>`
 
 Default

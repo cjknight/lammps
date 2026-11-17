@@ -3116,12 +3116,15 @@ in its group as though tethered to a frozen harmonic center for whichever
 local vibrational eigenmodes are currently stiff relative to the timestep,
 allowing longer timesteps while preserving dynamical information.
 :doc:`fix baoab/hrespa <fix_baoab_hrespa>` is a multiple-time-step
-integrator whose fast level is a harmonic model of the whole force field.
+integrator whose fast level is a harmonic model of the whole force field,
+and :doc:`fix baoab/molblock <fix_baoab_molblock>` one whose fast level is
+a harmonic model of the bonds and angles of small stiff molecules.
 
 **Supporting info:**
 
 * ``src/TETHER``: filenames -> commands
 * :doc:`fix baoab/hrespa <fix_baoab_hrespa>`
+* :doc:`fix baoab/molblock <fix_baoab_molblock>`
 * :doc:`fix baoab/tether <fix_baoab_tether>`
 
 ----------

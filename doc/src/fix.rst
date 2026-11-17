@@ -216,6 +216,7 @@ accelerated styles exist.
 * :doc:`balance <fix_balance>` - perform dynamic load-balancing
 * :doc:`baoab <fix_baoab>` -  BAOAB Langevin dynamics integrator
 * :doc:`baoab/hrespa <fix_baoab_hrespa>` - multiple-time-step BAOAB integrator with a harmonic fast level
+* :doc:`baoab/molblock <fix_baoab_molblock>` - multiple-time-step BAOAB integrator for small stiff molecules
 * :doc:`baoab/tether <fix_baoab_tether>` - frozen-Hessian mollified BAOAB integrator for locally stiff atoms
 * :doc:`brownian <fix_brownian>` - overdamped translational brownian motion
 * :doc:`brownian/asphere <fix_brownian>` - overdamped translational and rotational brownian motion for ellipsoids

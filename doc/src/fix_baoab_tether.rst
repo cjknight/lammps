@@ -16,7 +16,7 @@ Syntax
 * damp = damping parameter (time units)
 * seed = random number seed (positive integer)
 * two or more keyword/value pairs must be appended
-* keyword = *theta* or *refresh* or *heff_samples* or *promote_every* or *settle_confirm* or *eps* or *mollify* or *newton_iters* or *newton_damp* or *solve_tol_rel* or *force_eval* or *adapt* or *c_acc* or *dt_min* or *dt_max* or *ke_rel* or *ke_rel_refresh* or *ke_rel_margin_blocks* or *gamma_quench* or *gamma_quench_calib_gain* or *gamma_quench_calib_max_step* or *gamma_quench_calib_confirm* or *gamma_quench_calib_deadband* or *gamma_quench_calib_ceiling* or *gamma_quench_calib_refresh* or *refresh_skin* or *refresh_skin_rel* or *drift_response* or *exile_substep* or *preshrink_exile* or *gamma_soft* or *eligibility* or *newton_res_length* or *recoil* or *molblock* or *molblock_inner* or *molblock_verbose* or *molblock_diag* or *event_log*
+* keyword = *theta* or *refresh* or *heff_samples* or *promote_every* or *settle_confirm* or *eps* or *mollify* or *newton_iters* or *newton_damp* or *solve_tol_rel* or *force_eval* or *adapt* or *c_acc* or *dt_min* or *dt_max* or *ke_rel* or *ke_rel_refresh* or *ke_rel_margin_blocks* or *gamma_quench* or *gamma_quench_calib_gain* or *gamma_quench_calib_max_step* or *gamma_quench_calib_confirm* or *gamma_quench_calib_deadband* or *gamma_quench_calib_ceiling* or *gamma_quench_calib_refresh* or *refresh_skin* or *refresh_skin_rel* or *drift_response* or *exile_substep* or *preshrink_exile* or *gamma_soft* or *eligibility* or *newton_res_length* or *recoil* or *molblock_diag* or *event_log*
 
   .. parsed-literal::
 
@@ -141,13 +141,6 @@ Syntax
          (optional; default *per_mode*; only used if *adapt* is *yes*;
          *bonded* requires a molecular atom style with a bond style)
        *newton_res_length* value = *yes* or *no* (optional; default *no*)
-       *molblock* value = *yes* or *no* (optional; default *no*; requires
-         *mollify yes*, *adapt no*, and a molecular atom style)
-       *molblock_inner* value = number of inner substeps per timestep,
-         must be >= 0 (optional; default 0, which selects the number
-         automatically; only used if *molblock* is *yes*)
-       *molblock_verbose* value = *yes* or *no* (optional; default *no*;
-         only used if *molblock* is *yes*)
        *molblock_diag* value = *yes* or *no* (optional; default *no*)
        *event_log* value = filename for a per-atom/per-event diagnostic
          log (optional; default none, which disables this log entirely)
@@ -180,8 +173,6 @@ Examples
          mollify yes adapt yes c_acc 0.25 dt_min 0.0002 dt_max 0.01 &
          ke_rel 25.0 gamma_quench auto calib 2000 2000 &
          refresh_skin 0.1 drift_response preshrink event_log tether.log
-   fix 1 all baoab/tether 300.0 300.0 1000.0 12345 theta 0.2 refresh 10 &
-         mollify yes molblock yes heff_samples 12 gamma_soft 0.001
 
 .. versionadded:: TBD
 
@@ -839,129 +830,12 @@ bonded modes, such as flexible water in real units.
 
 .. versionadded:: TBD
 
-The *molblock* keyword replaces the per-atom treatment described above with
-a multiple time step integrator for small, stiff, bonded molecules, such as
-flexible water.  A molecule here is an atom together with its bond and angle
-partners, at most 5 atoms in total.  At every curvature refresh the fix
-assembles the full second-derivative matrix of each molecule from the same
-finite-difference probes it uses for the per-atom blocks.  If any internal
-vibration of a molecule is faster than the *theta* threshold allows, every
-bond length and bond angle of that molecule is included in a "fast" harmonic
-model, :math:`V_{\rm fast} = \frac{1}{2}(s - s_0)^T F (s - s_0)`, where
-*s* holds the bond lengths and angles.  The force constants *F* are
-extracted from the measured second derivatives and forces (the Wilson GF
-method), so they follow whatever force field or machine-learned potential is
-in use, including the influence of neighboring molecules; no fast/slow split
-of the force field itself has to be specified.  The reference values
-:math:`s_0` are set once, at the molecule's equilibrium position in its
-environment at the first step, and are kept for the rest of the run.
-
-A bond angle larger than 150 degrees at a probe refresh is treated as the
-bend of a linear group (for example carbon dioxide).  A single angle cannot
-describe such a bend, which can happen in two perpendicular directions and
-has no well-defined direction of change at 180 degrees, so it is replaced
-by the two components of the displacement of the middle atom from the line
-through the two outer atoms.  These two coordinates share one force
-constant and are not coupled to the bond lengths, and their reference
-value is zero (all exact by symmetry for a linear equilibrium structure),
-so the fast energy does not depend on how the two perpendicular directions
-are chosen.
-
-Each timestep then applies half a kick from the remaining ("slow") force,
-the full force minus the fast model force, followed by several short
-velocity-Verlet substeps that use only the fast model force, which needs no
-force evaluations, and ends with another slow half kick.  The Langevin
-thermostat, with rate *gamma_soft*, is applied once per timestep in the
-middle of the substeps.  Atoms that are not part of a stiff molecule simply
-drift during the substeps.  When the force constants are refreshed, the
-timestep in progress completes with the old constants and the new constants
-take effect at the start of the next timestep, so that every timestep is a
-consistent splitting of the same total force.  Only one force evaluation is
-needed per timestep, as in plain velocity Verlet, plus the curvature probes
-at each refresh.
-
-How the force constants are updated after the first step depends on
-*heff_samples*.  With *heff_samples 0* (the default), they are measured
-again from finite-difference probes every *refresh* steps, which gives
-the instantaneous curvature at that moment but costs roughly as much as
-15 to 20 ordinary timesteps per refresh.  With *heff_samples* N > 0, the
-probes are used only at the first step.  Afterwards the force constants
-are estimated from the trajectory itself, at no extra cost: from one
-timestep to the next, the change in the force on the bond lengths and
-angles is very nearly the force constants times the change in those
-coordinates, because the vibration dominates both changes while the
-slow drift of the molecule's surroundings largely cancels.  These
-step-to-step changes are accumulated over each block of *refresh*
-steps, blended into a running average in which each new block has
-weight 1/N (with the probed values as the starting point), and the
-resulting force constants are used from the next timestep on.  This is
-a thermally averaged effective curvature, in the same spirit as
-*heff_samples* for the per-atom treatment.  An estimate that is not
-physically sensible (not positive definite) is discarded and the
-previous force constants are kept.  For flexible SPC/Fw water, *refresh
-10* with *heff_samples 12* gave force constants matching the probed
-values to within their thermal fluctuation (about 1.5 percent), the
-same accuracy in all checks listed below as probing every 10 steps, and
-about twice the speed; a shorter memory (*heff_samples 4*) was stable
-but conserved energy slightly less well.
-
-The *molblock_inner* keyword sets the number of substeps.  With the
-default of 0 the fix chooses, at every refresh, the smallest even number
-(at least 2) that keeps the fastest fast-model frequency times the substep
-length at or below 0.3.  For flexible SPC/Fw water in real units this gives
-6 substeps at a 2 fs timestep.  In tests on flexible SPC/Fw water at 300 K,
-a 2 fs timestep reproduced the temperature, the stretch and bend peaks of
-the velocity spectrum, the radial distribution functions, and the diffusion
-coefficient of a 0.5 fs velocity-Verlet reference within statistical
-uncertainty; the librational band of the spectrum is about 10 percent
-weaker relative to the stretch peak.  At 4 fs the peaks and the structure
-are still reproduced, but the temperature reads about 5 K low and the
-diffusion coefficient is about 12 percent low.  With the thermostat off, the
-total energy drift at 1 and 2 fs is comparable to that of :doc:`run_style
-respa <run_style>` with the bonded terms on the inner level, and somewhat
-larger at 4 fs.  For flexible carbon dioxide (liquid, 250 K) and nitrogen
-(liquid, 77 K), timesteps of 2, 3 and 4 fs reproduced the temperature, all
-vibrational peaks (for carbon dioxide including the bend), the radial
-distribution functions and the diffusion coefficient of a 0.5 fs
-velocity-Verlet reference within the statistical uncertainty of 20 ps runs
-with three random seeds.
-
-The *molblock_verbose* keyword prints, at every refresh, the number of
-molecules and fast coordinates (or, with *heff_samples* > 0, the number
-of molecules whose force constants were updated or kept), the fastest
-frequency times the timestep, and the number of substeps, together with
-the force constants of one molecule at the first refresh and, with
-*heff_samples* > 0, the average diagonal force constants.
-
 The *molblock_diag* keyword is a diagnostic that changes no dynamics.  At
-every refresh it assembles each molecule's second-derivative matrix as
-above and prints a summary of its internal and rigid-body frequencies.
-
-*molblock* requires *mollify yes* (which provides the finite-difference
-probes and the *newton_bond off* bond and angle storage it relies on), a
-molecular atom style, and *adapt no*; the timestep stays fixed.  Molecules
-are found from the bond and angle lists, so the bond and angle styles must
-be able to report their atoms to this fix; with a machine-learned potential
-that supplies all forces, use *bond_style harmonic* and *angle_style
-harmonic* with zero force constants rather than the *zero* styles.  Every
-atom of a molecule must be linked to every other one by a bond or an angle
-(water, diatomics, linear triatomics such as carbon dioxide, ammonia-like
-molecules), and the bonds and angles of a molecule must be independent of
-each other, which excludes molecules with rings; the fix stops with an error
-otherwise.
-
-*molblock* runs in parallel without any communication during the
-substeps.  Each processor integrates its own copy of every molecule that
-has at least one atom it owns, using ghost atoms for the other atoms of the
-molecule, and keeps the result only for its owned atoms; velocities and
-forces of ghost atoms are communicated once per timestep, before the
-substeps.  The thermostat noise of each atom is generated from the random
-seed, the atom ID and the timestep, so all copies of a molecule draw the
-same numbers and results do not depend on the number of processors, apart
-from round-off.  Each molecule's force constants and averages are stored
-with its lowest-ID atom and move with it between processors.  All atoms of
-a molecule must be within the ghost-atom cutoff of each other, which holds
-automatically for small molecules with the usual pair-style cutoffs.
+every curvature refresh it assembles the second-derivative matrix of each
+molecule (an atom together with its bond and angle partners) from the
+finite-difference probes and prints a summary of its internal and
+rigid-body frequencies.  The multiple-time-step integrator for such
+molecules that this led to is :doc:`fix baoab/molblock <fix_baoab_molblock>`.
 
 
 Restart, fix_modify, output, run start/stop, minimize info
@@ -1152,6 +1026,7 @@ Related commands
 
 :doc:`fix baoab <fix_baoab>`,
 :doc:`fix baoab/hrespa <fix_baoab_hrespa>`,
+:doc:`fix baoab/molblock <fix_baoab_molblock>`,
 :doc:`fix langevin <fix_langevin>`,
 :doc:`fix nvt <fix_nh>`
 
@@ -1178,6 +1053,5 @@ defaults to 2.0. *gamma_quench_calib_confirm* defaults to 3.
 *settle_confirm* defaults to 0. *drift_response* defaults to *retether*.
 *exile_substep* defaults to *no*. *preshrink_exile* defaults to *no*. *recoil* defaults to *yes*.
 *gamma_soft* defaults to 1/*damp*. *eligibility* defaults to *per_mode*. *newton_res_length* defaults to *no*.
-*molblock* defaults to *no*. *molblock_inner* defaults to 0. *molblock_verbose* defaults to *no*.
 *molblock_diag* defaults to *no*.
 *event_log* defaults to unset (disabled).
