@@ -455,26 +455,16 @@ FixBAOABTether::FixBAOABTether(LAMMPS *lmp, int narg, char **arg) :
       // vary in number (e.g. "symmetrix/mace no_mpi_message_passing" is 2
       // tokens). Stored now, actually constructed in init() once the
       // production pair style (needed to size/validate against) is final.
-      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether teacher_style", error);
-      int n = utils::inumeric(FLERR, arg[iarg + 1], false, lmp);
-      if (n < 1) error->all(FLERR, iarg + 1, "Fix baoab/tether teacher_style count must be >= 1");
-      if (iarg + 2 + n > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether teacher_style", error);
-      teacher_style_name = arg[iarg + 2];
-      teacher_settings_args.clear();
-      for (int k = 1; k < n; k++) teacher_settings_args.emplace_back(arg[iarg + 2 + k]);
-      iarg += 2 + n;
+      std::vector<std::string> w;
+      iarg = parse_counted_args(narg, arg, iarg, w);
+      teacher_style_name = w[0];
+      teacher_settings_args.assign(w.begin() + 1, w.end());
     } else if (strcmp(arg[iarg], "teacher_coeff") == 0) {
       // EXPERIMENTAL: "teacher_coeff <n> <arg1> ... <argN>", passed to
       // teacher_pair->coeff() verbatim in init() (e.g.
       // "5 * * mace-mp-0b3-medium-1-46.json H Pd"). Same leading-count
       // convention as teacher_style, for the same reason.
-      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether teacher_coeff", error);
-      int n = utils::inumeric(FLERR, arg[iarg + 1], false, lmp);
-      if (n < 1) error->all(FLERR, iarg + 1, "Fix baoab/tether teacher_coeff count must be >= 1");
-      if (iarg + 2 + n > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether teacher_coeff", error);
-      teacher_coeff_args.clear();
-      for (int k = 0; k < n; k++) teacher_coeff_args.emplace_back(arg[iarg + 2 + k]);
-      iarg += 2 + n;
+      iarg = parse_counted_args(narg, arg, iarg, teacher_coeff_args);
     } else if (strcmp(arg[iarg], "teacher_every") == 0) {
       // EXPERIMENTAL: the D.14 outer ratio "m". 0 (default) = disabled.
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "fix baoab/tether teacher_every", error);
@@ -793,25 +783,9 @@ void FixBAOABTether::init()
     // the teacher takes the active suffix like any pair_style command, so
     // "-sf kk" (or an explicit symmetrix/mace/kk) runs it on the GPU while
     // the student and this fix stay on the host
-    if (!teacher_pair) {
-      int sflag;
-      teacher_pair = force->new_pair(teacher_style_name, lmp->suffix_enable, sflag);
-
-      std::vector<char *> settings_argv;
-      for (auto &s : teacher_settings_args) settings_argv.push_back(const_cast<char *>(s.c_str()));
-      teacher_pair->settings((int) settings_argv.size(), settings_argv.data());
-
-      std::vector<char *> coeff_argv;
-      for (auto &s : teacher_coeff_args) coeff_argv.push_back(const_cast<char *>(s.c_str()));
-      teacher_pair->coeff((int) coeff_argv.size(), coeff_argv.data());
-
-      if (comm->me == 0) {
-        std::string tname = teacher_style_name;
-        if (sflag) tname += fmt::format("/{}", (sflag == 1) ? lmp->suffix : lmp->suffix2);
-        utils::logmesg(lmp, "Fix baoab/tether teacher pair style: {} ({})\n", tname,
-                       teacher_pair->kokkosable ? "KOKKOS" : "not KOKKOS, runs on the host");
-      }
-    }
+    if (!teacher_pair)
+      teacher_pair = create_aux_pair(teacher_style_name, teacher_settings_args, teacher_coeff_args,
+                                     "teacher");
     teacher_pair->init();
   }
 

@@ -750,3 +750,81 @@ void FixBAOABTetherBase::collect_partners(const double (*H)[3], int jnum, const 
     for (int s = 0; s < 9; s++) X[p * 9 + s] += Hc[(size_t) k * 9 + s];
   }
 }
+
+/* ----------------------------------------------------------------------
+   second, standalone pair style
+------------------------------------------------------------------------- */
+
+int FixBAOABTetherBase::parse_counted_args(int narg, char **arg, int iarg,
+                                           std::vector<std::string> &out)
+{
+  std::string kw = fmt::format("{} {}", utils::lowercase(style_name), arg[iarg]);
+  if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, kw, error);
+  int n = utils::inumeric(FLERR, arg[iarg + 1], false, lmp);
+  if (n < 1) error->all(FLERR, iarg + 1, "{} {} count must be >= 1", style_name, arg[iarg]);
+  if (iarg + 2 + n > narg) utils::missing_cmd_args(FLERR, kw, error);
+  out.clear();
+  for (int k = 0; k < n; k++) out.emplace_back(arg[iarg + 2 + k]);
+  return iarg + 2 + n;
+}
+
+Pair *FixBAOABTetherBase::create_aux_pair(const std::string &name,
+                                          const std::vector<std::string> &settings,
+                                          const std::vector<std::string> &coeff, const char *role)
+{
+  // the pair style takes the active suffix like any pair_style command
+  int sflag;
+  Pair *p = force->new_pair(name, lmp->suffix_enable, sflag);
+  if (!p) error->all(FLERR, "{}: unknown {} pair style {}", style_name, role, name);
+
+  std::vector<char *> settings_argv;
+  for (auto &s : settings) settings_argv.push_back(const_cast<char *>(s.c_str()));
+  p->settings((int) settings_argv.size(), settings_argv.data());
+
+  // some pair styles (eam/alloy, eam/fs, ...) set the per-type masses in coeff(): those of the
+  // system (set by the input, possibly different from the potential file's) must stay in effect
+  int ntypes = atom->ntypes;
+  std::vector<double> msave;
+  std::vector<int> msetsave;
+  if (atom->mass) {
+    msave.assign(atom->mass, atom->mass + ntypes + 1);
+    msetsave.assign(atom->mass_setflag, atom->mass_setflag + ntypes + 1);
+  }
+  std::vector<char *> coeff_argv;
+  for (auto &s : coeff) coeff_argv.push_back(const_cast<char *>(s.c_str()));
+  p->coeff((int) coeff_argv.size(), coeff_argv.data());
+  if (atom->mass) {
+    for (int t = 1; t <= ntypes; t++)
+      if (msetsave[t] && (atom->mass[t] != msave[t])) {
+        if (comm->me == 0)
+          utils::logmesg(lmp, "{} {} pair style: keeping the mass {} of atom type {} (the "
+                         "potential file's is {})\n", style_name, role, msave[t], t,
+                         atom->mass[t]);
+        atom->mass[t] = msave[t];
+      }
+    for (int t = 1; t <= ntypes; t++) atom->mass_setflag[t] = msetsave[t] | atom->mass_setflag[t];
+  }
+
+  if (comm->me == 0) {
+    std::string pname = name;
+    if (sflag) pname += fmt::format("/{}", (sflag == 1) ? lmp->suffix : lmp->suffix2);
+    utils::logmesg(lmp, "{} {} pair style: {} ({})\n", style_name, role, pname,
+                   p->kokkosable ? "KOKKOS" : "not KOKKOS, runs on the host");
+  }
+  return p;
+}
+
+void FixBAOABTetherBase::aux_pair_force(Pair *p, std::vector<double> &out)
+{
+  double **f = atom->f;
+  int nlocal = atom->nlocal;
+  int ntotal = nlocal + atom->nghost;
+  std::vector<double> fsave(3 * ntotal);
+  if (ntotal) memcpy(fsave.data(), &f[0][0], 3 * ntotal * sizeof(double));
+  force_clear_local();
+  p->compute(0, 0);
+  if (force->newton_pair) comm->reverse_comm();
+  out.resize(3 * nlocal);
+  if (nlocal) memcpy(out.data(), &f[0][0], 3 * nlocal * sizeof(double));
+  if (ntotal) memcpy(&f[0][0], fsave.data(), 3 * ntotal * sizeof(double));
+}

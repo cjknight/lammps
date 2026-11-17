@@ -15,6 +15,7 @@
 
 #include "fix_baoab.h"
 
+#include <string>
 #include <vector>
 
 namespace LAMMPS_NS {
@@ -128,6 +129,18 @@ class FixBAOABTetherBase : public FixBAOAB {
   // neighbor clamping used by partial_force() with live_neighbor_positions = false
   virtual bool clamp_neighbor(int) const { return false; }
   virtual double **clamp_centers() const { return nullptr; }
+
+  // ---- a second, standalone pair style (the teacher of baoab/tether, the student of
+  // baoab/hrespa): never assigned to force->pair, its own neighbor list and per-atom caches ----
+  // "<keyword> <n> <word1> ... <wordn>" (an explicit count, since a pair style's own arguments
+  // vary in number): parse the n words at arg[iarg + 2 ...]; returns the next iarg
+  int parse_counted_args(int narg, char **arg, int iarg, std::vector<std::string> &out);
+  // construct it (pair_style name + settings, then pair_coeff); role is for the log message
+  class Pair *create_aux_pair(const std::string &name, const std::vector<std::string> &settings,
+                              const std::vector<std::string> &coeff, const char *role);
+  // its whole-system force on the owned atoms at the current positions (ghosts must be current)
+  // into out (3 per owned atom); atom->f is left unchanged
+  void aux_pair_force(class Pair *p, std::vector<double> &out);
 
   // pair and kspace energies and virials (thermo output of the current step)
   static constexpr int NACCUM = 2 + 6 + 1 + 6;

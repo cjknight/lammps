@@ -16,7 +16,7 @@ Syntax
 * damp = damping parameter (time units)
 * seed = random number seed (positive integer)
 * zero or more keyword/value pairs may be appended
-* keyword = *inner* or *cut* or *eps* or *read* or *write*
+* keyword = *inner* or *cut* or *eps* or *read* or *write* or *student_style* or *student_coeff* or *inner_force*
 
   .. parsed-literal::
 
@@ -28,6 +28,16 @@ Syntax
          building the harmonic model, must be > 0
        *read* value = file to read the harmonic model from
        *write* value = file to write the harmonic model to
+       *student_style* values = N style args
+         N = number of words that follow
+         style = pair style of the student (a cheaper approximation of the
+           pair style of the system)
+         args = arguments of that pair style
+       *student_coeff* values = N args
+         N = number of words that follow
+         args = arguments of the :doc:`pair_coeff <pair_coeff>` command for
+           the student
+       *inner_force* value = *harmonic* or *student* or *graft*
 
 Examples
 """"""""
@@ -39,6 +49,9 @@ Examples
    run 100000
 
    fix 1 all baoab/hrespa 300.0 300.0 1.0e9 12345 read hfo2.model inner 0
+
+   fix 1 all baoab/hrespa 300.0 300.0 0.1 12345 student_style 1 eam/fs &
+         student_coeff 5 * * student.eam.fs H Pd
 
 Description
 """""""""""
@@ -86,6 +99,35 @@ with the fastest vibrations (about one third of the shortest vibrational
 period), so this fix is accurate when the anharmonic part of the forces
 is small, e.g. a solid at moderate temperature.
 
+.. versionadded:: TBD
+
+The *student_style* and *student_coeff* keywords add a second, cheaper
+pair style, the "student", which this fix creates and evaluates on its
+own; it does not replace the pair style of the system (the "teacher"),
+which still gives the full force.  The *inner_force* keyword selects the
+force of the fast level:
+
+* *harmonic*: :math:`\mathbf{F}_h` as above (the default without a
+  student).
+* *student*: the student's force :math:`\mathbf{F}_s`.  No harmonic model
+  of the teacher is built.
+* *graft*: :math:`\mathbf{F}_h + \mathbf{F}_s - \mathbf{F}_{hs}`, where
+  :math:`\mathbf{F}_{hs}` is the student's own harmonic model at the same
+  reference (built the same way, from the student's forces).  This keeps the
+  teacher's harmonic forces exactly and takes only the anharmonic part
+  from the student (the default with a student).
+
+With a student, the student is evaluated once per substep, and the slow
+force is the teacher's force minus the fast one.  For *student* and
+*graft* the automatic number of substeps uses the student's harmonic
+model or the teacher's, respectively.  The masses set in the input are
+kept, even if the student's :doc:`pair_coeff <pair_coeff>` sets others
+(as *eam/alloy* does from its potential file).  The student has its own
+neighbor list and must run on the host (not a KOKKOS style).  *read*
+applies to the teacher's harmonic model only, and the run must start
+within half the neighbor skin of its reference positions when the
+student's model is built there.
+
 Pair styles that set atom charges at every force evaluation (such as
 latent-Ewald machine-learned potentials) are supported: the charges of
 the actual configuration are restored after each finite-difference
@@ -126,4 +168,5 @@ Default
 """""""
 
 *inner* = 0, *cut* = the pair style cutoff, *eps* = 0.001 Angstrom,
-no *read* or *write* file.
+no *read* or *write* file, no student, *inner_force* = *harmonic*
+without a student and *graft* with one.
