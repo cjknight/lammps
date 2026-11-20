@@ -252,6 +252,14 @@ cdef public void MLIAPPYKokkos_compute_gradients(MLIAPModelPythonKokkosDevice * 
     if (mode == "nvidia"):
         torch.cuda.nvtx.range_pop()
 
+    # For MTP_LES_DEBUG=2 timing, fence async XPU kernels so C++ model timer is accurate
+    import os as _os3
+    if int(_os3.getenv("MTP_LES_DEBUG", "0")) >= 2 and mode == "intel":
+        try:
+            torch.xpu.synchronize()
+        except Exception:
+            pass
+
     # Charge bookkeeping
     data.update_charges()
 

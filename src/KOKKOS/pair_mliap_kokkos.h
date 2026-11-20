@@ -98,6 +98,11 @@ public:
 
   void compute_charge_response_forces(typename AT::t_double_1d d_phi);
 
+  // MTP_LES_DEBUG=2 intra-Pair timing (device-fenced, summary at end)
+  double mtp_time_neigh = 0.0, mtp_time_desc = 0.0, mtp_time_model = 0.0, mtp_time_fwd = 0.0,
+         mtp_time_force = 0.0, mtp_time_total = 0.0;
+  long mtp_ncalls = 0;
+
   // Variables to store to/from pointers and types between
   // forward_comm/reverse_comm and virutal functions. Ugly work-around which
   // could be partially be removed by templating LAMMPS comms on float type

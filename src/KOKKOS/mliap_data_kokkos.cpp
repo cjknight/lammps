@@ -82,17 +82,15 @@ void MLIAPDataKokkos<DeviceType>::generate_neighdata(class NeighList *list_in, i
     memoryKK->destroy_kokkos(k_elems,elems);
     memoryKK->create_kokkos(k_elems, elems, nmax, "mliap_data:elems");  }
 
-  // clear gradforce and elems arrays
-
   int nall = atom->nlocal + atom->nghost;
   nlocal = atom->nlocal;
   ntotal = nall;
-  if (gradgradflag > -1){
+  if (gradgradflag > -1) {
     auto d_gradforce = k_gradforce.template view<DeviceType>();
     Kokkos::deep_copy(d_gradforce, 0.);
   }
   auto d_elems = k_elems.template view<DeviceType>();
-  Kokkos::deep_copy(d_elems, 0.);
+  // zero removed: elems fully overwritten below via map[itype] for all nmax (dead D->D)
 
   // grow arrays if necessary
 
@@ -231,8 +229,7 @@ void MLIAPDataKokkos<DeviceType>::grow_neigharrays() {
 
   auto x = atomKK->k_x.view<DeviceType>();
   auto type = atomKK->k_type.view<DeviceType>();
-  auto d_cutsq=k_pairmliap->k_cutsq.template view<DeviceType>();
-  auto h_cutsq=k_pairmliap->k_cutsq.view_host();
+  auto d_cutsq = k_pairmliap->k_cutsq.template view<DeviceType>();
   auto d_numneighs = k_numneighs.template view<DeviceType>();
   Kokkos::parallel_reduce(Kokkos::RangePolicy<DeviceType>(0,natomneigh), KOKKOS_LAMBDA (int ii, int &contrib) {
     const int i = d_ilist[ii];

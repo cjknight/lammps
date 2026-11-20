@@ -31,6 +31,7 @@
 #include "lammps.h"
 #include "kokkos.h"
 #include "pointers.h"
+#include "update.h"
 
 #include "mliap_descriptor_mtp_kokkos.h"
 
@@ -54,6 +55,22 @@ PairMLIAPKokkos<DeviceType>::PairMLIAPKokkos(class LAMMPS *lmp) : PairMLIAP(lmp)
 template<class DeviceType>
 PairMLIAPKokkos<DeviceType>::~PairMLIAPKokkos()
 {
+  if (mtp_ncalls > 0 && comm->me == 0) {
+    const char *dbg = std::getenv("MTP_LES_DEBUG");
+    int dbg_lvl = dbg ? std::atoi(dbg) : 0;
+    if (dbg_lvl >= 2) {
+      utils::logmesg(lmp,
+                     "MTP/KK breakdown (avg over {} calls, device-fenced): "
+                     "neigh {:.3f} ms desc {:.3f} ms model {:.3f} ms fwd {:.3f} ms force {:.3f} ms "
+                     "total {:.3f} ms  [Pair {:.3f} ms]\n",
+                     mtp_ncalls, mtp_time_neigh * 1000.0 / mtp_ncalls,
+                     mtp_time_desc * 1000.0 / mtp_ncalls, mtp_time_model * 1000.0 / mtp_ncalls,
+                     mtp_time_fwd * 1000.0 / mtp_ncalls, mtp_time_force * 1000.0 / mtp_ncalls,
+                     mtp_time_total * 1000.0 / mtp_ncalls,
+                     (mtp_time_neigh + mtp_time_desc + mtp_time_model + mtp_time_fwd + mtp_time_force) *
+                         1000.0 / mtp_ncalls);
+    }
+  }
   memoryKK->destroy_kokkos(k_map, map);
   memoryKK->destroy_kokkos(k_cutsq, cutsq);
   memoryKK->destroy_kokkos(k_setflag, setflag);
@@ -62,8 +79,8 @@ PairMLIAPKokkos<DeviceType>::~PairMLIAPKokkos()
   if (ghostneigh) memoryKK->destroy_kokkos(k_cutghost, cutghost);
   delete model;
   delete descriptor;
-  model=nullptr;
-  descriptor=nullptr;
+  model = nullptr;
+  descriptor = nullptr;
   allocated = 0;
 }
 
@@ -72,8 +89,15 @@ PairMLIAPKokkos<DeviceType>::~PairMLIAPKokkos()
 template<class DeviceType>
 void PairMLIAPKokkos<DeviceType>::compute(int eflag, int vflag)
 {
-  atomKK->sync(execution_space,X_MASK | TYPE_MASK );
-  MLIAPDataKokkos<DeviceType> *k_data = (MLIAPDataKokkos<DeviceType>*)(data);
+  const char *dbg_env = std::getenv("MTP_LES_DEBUG");
+  int dbg_lvl = dbg_env ? std::atoi(dbg_env) : 0;
+  double t0_total = 0, t0 = 0;
+  if (dbg_lvl >= 2) {
+    Kokkos::fence();
+    t0_total = MPI_Wtime();
+  }
+  atomKK->sync(execution_space, X_MASK | TYPE_MASK);
+  MLIAPDataKokkos<DeviceType> *k_data = (MLIAPDataKokkos<DeviceType> *)(data);
 
   int is_kokkos_model = (dynamic_cast<MLIAPModelKokkos<DeviceType>*>(model)) != nullptr;
   int is_kokkos_descriptor = (dynamic_cast<MLIAPDescriptorKokkos<DeviceType>*>(descriptor)) != nullptr;
@@ -109,9 +133,16 @@ void PairMLIAPKokkos<DeviceType>::compute(int eflag, int vflag)
     }
   }
 
+  if (dbg_lvl >= 2) Kokkos::fence();
+  if (dbg_lvl >= 2) t0 = MPI_Wtime();
   data->generate_neighdata(list, eflag, vflag);
+  if (dbg_lvl >= 2) {
+    Kokkos::fence();
+    mtp_time_neigh += MPI_Wtime() - t0;
+  }
 
   // compute descriptors, if needed
+  if (dbg_lvl >= 2) t0 = MPI_Wtime();
   if (model->nonlinearflag || eflag) {
     k_data->sync(descriptor_space,
                  NUMNEIGHS_MASK | IATOMS_MASK | IELEMS_MASK | ELEMS_MASK | JATOMS_MASK |
@@ -120,37 +151,66 @@ void PairMLIAPKokkos<DeviceType>::compute(int eflag, int vflag)
     descriptor->compute_descriptors(data);
     if (!is_kokkos_descriptor) k_data->modified(descriptor_space, DESCRIPTORS_MASK, true);
   }
+  if (dbg_lvl >= 2) {
+    Kokkos::fence();
+    mtp_time_desc += MPI_Wtime() - t0;
+  }
 
   // compute E_i and beta_i = dE_i/dB_i for all i in list
+  if (dbg_lvl >= 2) t0 = MPI_Wtime();
   k_data->sync(model_space, IELEMS_MASK | DESCRIPTORS_MASK, true);
   model->compute_gradients(data);
   k_data->modified(model_space, BETAS_MASK, true);
   if (eflag_atom) { k_data->modified(model_space, EATOMS_MASK, true); }
+  if (dbg_lvl >= 2) {
+    // model includes async XPU kernels; Python side will synchronize when dbg>=2
+    Kokkos::fence();
+    mtp_time_model += MPI_Wtime() - t0;
+  }
 
+  if (dbg_lvl >= 2) t0 = MPI_Wtime();
   comm->forward_comm();
-
+  if (dbg_lvl >= 2) mtp_time_fwd += MPI_Wtime() - t0;
 
   // calculate force contributions beta_i*dB_i/dR_j
+  if (dbg_lvl >= 2) t0 = MPI_Wtime();
   atomKK->sync(descriptor_space, F_MASK);
   k_data->sync(descriptor_space,
                NUMNEIGHS_MASK | IATOMS_MASK | IELEMS_MASK | ELEMS_MASK | BETAS_MASK | JATOMS_MASK |
                    PAIR_I_MASK | JELEMS_MASK | RIJ_MASK,
                true);
   descriptor->compute_forces(data);
+  if (dbg_lvl >= 2) {
+    Kokkos::fence();
+    mtp_time_force += MPI_Wtime() - t0;
+  }
 
   e_tally(data);
 
   if (evflag) {
-    atomKK->modified(descriptor_space,F_MASK | ENERGY_MASK | VIRIAL_MASK);
-    atomKK->sync(execution_space,F_MASK | ENERGY_MASK | VIRIAL_MASK);
+    atomKK->modified(descriptor_space, F_MASK | ENERGY_MASK | VIRIAL_MASK);
+    atomKK->sync(execution_space, F_MASK | ENERGY_MASK | VIRIAL_MASK);
   } else {
-    atomKK->modified(descriptor_space,F_MASK);
-    atomKK->sync(execution_space,F_MASK);
+    atomKK->modified(descriptor_space, F_MASK);
+    atomKK->sync(execution_space, F_MASK);
   }
 
   // calculate stress
-  if (vflag_fdotr) {
-    pair_virial_fdotr_compute(this);
+  if (vflag_fdotr) { pair_virial_fdotr_compute(this); }
+
+  if (dbg_lvl >= 2) {
+    Kokkos::fence();
+    mtp_time_total += MPI_Wtime() - t0_total;
+    mtp_ncalls++;
+    // per-step line (rank 0 only) — fence already done, so times include async kernels
+    if (comm->me == 0 && (update->ntimestep % 10 == 0 || update->ntimestep == update->endstep)) {
+      double t_neigh = mtp_time_neigh / mtp_ncalls, t_desc = mtp_time_desc / mtp_ncalls,
+             t_model = mtp_time_model / mtp_ncalls, t_fwd = mtp_time_fwd / mtp_ncalls,
+             t_force = mtp_time_force / mtp_ncalls;
+      utils::logmesg(lmp, "MTP/KK step {} breakdown (fenced): neigh {:.3f} ms desc {:.3f} ms model {:.3f} ms fwd {:.3f} ms force {:.3f} ms total {:.3f} ms\n",
+                     update->ntimestep, t_neigh * 1000, t_desc * 1000, t_model * 1000, t_fwd * 1000, t_force * 1000,
+                     (t_neigh + t_desc + t_model + t_fwd + t_force) * 1000);
+    }
   }
 }
 
