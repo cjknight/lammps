@@ -112,27 +112,30 @@ void PairMLIAPKokkos<DeviceType>::compute(int eflag, int vflag)
   data->generate_neighdata(list, eflag, vflag);
 
   // compute descriptors, if needed
-  if (model->nonlinearflag || eflag)  {
-    k_data->sync(descriptor_space, NUMNEIGHS_MASK | IATOMS_MASK | IELEMS_MASK | ELEMS_MASK | JATOMS_MASK | PAIR_I_MASK | JELEMS_MASK | RIJ_MASK );
+  if (model->nonlinearflag || eflag) {
+    k_data->sync(descriptor_space,
+                 NUMNEIGHS_MASK | IATOMS_MASK | IELEMS_MASK | ELEMS_MASK | JATOMS_MASK |
+                     PAIR_I_MASK | JELEMS_MASK | RIJ_MASK,
+                 true);
     descriptor->compute_descriptors(data);
-    if (!is_kokkos_descriptor)
-      k_data->modified(descriptor_space, DESCRIPTORS_MASK);
+    if (!is_kokkos_descriptor) k_data->modified(descriptor_space, DESCRIPTORS_MASK, true);
   }
 
   // compute E_i and beta_i = dE_i/dB_i for all i in list
-  k_data->sync(model_space, IELEMS_MASK | DESCRIPTORS_MASK);
+  k_data->sync(model_space, IELEMS_MASK | DESCRIPTORS_MASK, true);
   model->compute_gradients(data);
-  k_data->modified(model_space, BETAS_MASK);
-  if (eflag_atom) {
-    k_data->modified(model_space, EATOMS_MASK);
-  }
+  k_data->modified(model_space, BETAS_MASK, true);
+  if (eflag_atom) { k_data->modified(model_space, EATOMS_MASK, true); }
 
   comm->forward_comm();
 
 
   // calculate force contributions beta_i*dB_i/dR_j
-  atomKK->sync(descriptor_space,F_MASK);
-  k_data->sync(descriptor_space, NUMNEIGHS_MASK | IATOMS_MASK | IELEMS_MASK | ELEMS_MASK | BETAS_MASK | JATOMS_MASK | PAIR_I_MASK | JELEMS_MASK | RIJ_MASK );
+  atomKK->sync(descriptor_space, F_MASK);
+  k_data->sync(descriptor_space,
+               NUMNEIGHS_MASK | IATOMS_MASK | IELEMS_MASK | ELEMS_MASK | BETAS_MASK | JATOMS_MASK |
+                   PAIR_I_MASK | JELEMS_MASK | RIJ_MASK,
+               true);
   descriptor->compute_forces(data);
 
   e_tally(data);

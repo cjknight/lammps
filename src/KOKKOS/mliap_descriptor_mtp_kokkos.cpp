@@ -375,10 +375,8 @@ void MLIAPDescriptorMTPKokkos<DeviceType>::compute_forces_from_coeffs(
 
   Kokkos::View<double[6], DeviceType> virial("mtp_virial");
 
-  if (vflag_atom) {
-    data->k_pairmliap->k_vatom.modify_host();
+  if (vflag_atom && data->k_pairmliap->k_vatom.need_sync_device())
     data->k_pairmliap->k_vatom.template sync<DeviceType>();
-  }
 
   auto d_force_coeffs = coeffs.template view<DeviceType>();
   const bool have_phi = (phi.data() != nullptr);

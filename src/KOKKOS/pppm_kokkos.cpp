@@ -313,8 +313,40 @@ void PPPMKokkos<DeviceType>::init()
 template<class DeviceType>
 void PPPMKokkos<DeviceType>::qsum_qsq(int warning_flag)
 {
-  if (atomKK->k_q.need_sync_host())
-    atomKK->sync(Host, Q_MASK);
+  // Device path: q is already Device-resident after mliap_data_kokkos device neutralize
+  // (modified(Device,Q) without host sync). Avoid mandatory D->H.
+  if (execution_space == Device && !atomKK->k_q.need_sync_device()) {
+    auto d_q = atomKK->k_q.template view<DeviceType>();
+    const int nlocal = atom->nlocal;
+    double qsum_local = 0.0;
+    double qsqsum_local = 0.0;
+    if (nlocal > 0) {
+      Kokkos::parallel_reduce(
+          "PPPMKokkos::qsum_qsq:qsum", Kokkos::RangePolicy<DeviceType>(0, nlocal),
+          KOKKOS_LAMBDA(const int i, double &lsum) { lsum += d_q(i); }, qsum_local);
+      Kokkos::parallel_reduce(
+          "PPPMKokkos::qsum_qsq:qsq", Kokkos::RangePolicy<DeviceType>(0, nlocal),
+          KOKKOS_LAMBDA(const int i, double &lsum) { lsum += d_q(i) * d_q(i); }, qsqsum_local);
+      Kokkos::fence();
+    }
+    MPI_Allreduce(&qsum_local, &qsum, 1, MPI_DOUBLE, MPI_SUM, world);
+    MPI_Allreduce(&qsqsum_local, &qsqsum, 1, MPI_DOUBLE, MPI_SUM, world);
+    warn_nocharge = 0;
+    if ((qsqsum == 0.0) && (comm->me == 0) && warn_nocharge && warning_flag) {
+      error->warning(FLERR, "Using kspace solver on system with no charge");
+      warn_nocharge = 0;
+    }
+    q2 = qsqsum * force->qqrd2e;
+    if (fabs(qsum) > SMALL) {
+      std::string message = fmt::format("System is not charge neutral, net charge = {:.8}{}", qsum,
+                                        utils::errorurl(29));
+      if (!warn_nonneutral) error->all(FLERR, message);
+      if (warn_nonneutral == 1 && comm->me == 0) error->warning(FLERR, message);
+      warn_nonneutral = 2;
+    }
+    return;
+  }
+  if (atomKK->k_q.need_sync_host()) atomKK->sync(Host, Q_MASK);
   KSpace::qsum_qsq(warning_flag);
 }
 
