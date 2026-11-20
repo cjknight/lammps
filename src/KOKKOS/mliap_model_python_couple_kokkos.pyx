@@ -111,6 +111,13 @@ cdef public int MLIAPPYKokkos_load_model(MLIAPModelPythonKokkosDevice * c_model,
             model.model = model.model.to(device)
             if mode == "intel" or mode == "nvidia":
                 model.device_arrays = True
+            import os
+            if int(os.getenv("MTP_LES_DEBUG", "0")):
+                try:
+                    pdev = next(model.model.parameters()).device
+                except Exception:
+                    pdev = device
+                print(f"[mliap/kk] mode={mode} device={model.device} dev_arrays={getattr(model,'device_arrays',False)} param_dev={pdev} fname={str_fname}", flush=True)
 
         else:
             with open(str_fname,'rb') as pfile:
@@ -219,6 +226,19 @@ cdef public void MLIAPPYKokkos_compute_gradients(MLIAPModelPythonKokkosDevice * 
     desc_cp = create_array(data.descriptors, (n_a, n_d), False, q)
     charges_cp = create_array(data.charges, (n_a,), False, q)
     charge_beta_cp = create_array(data.charge_betas, (n_a, n_d), False, q)
+
+    import os as _os2
+    if int(_os2.getenv("MTP_LES_DEBUG", "0")):
+        try:
+            _md = getattr(retrieve(c_model), 'device', mode)
+            _pd = next(retrieve(c_model).model.parameters()).device if hasattr(retrieve(c_model), 'model') else _md
+        except Exception:
+            _md = mode; _pd = mode
+        # dpnp arrays expose .device, numpy does not — handle both
+        def _dev(a):
+            try: return a.device
+            except AttributeError: return "cpu(host)"
+        print(f"[mliap/kk] n_a={n_a} n_d={n_d} mode={mode} model_dev={_md} param_dev={_pd} desc_dev={_dev(desc_cp)} beta_dev={_dev(beta_cp)} q_dev={_dev(charges_cp)}", flush=True)
 
     if (mode == "nvidia"):
         torch.cuda.nvtx.range_pop()
