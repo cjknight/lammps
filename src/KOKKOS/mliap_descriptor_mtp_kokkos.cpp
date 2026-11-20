@@ -317,8 +317,10 @@ void MLIAPDescriptorMTPKokkos<DeviceType>::compute_descriptors(
       });
 
   Kokkos::fence();
-
-  Kokkos::deep_copy(data->k_descriptors.view_host(), d_desc);
+  // GPU-resident: descriptors produced on Device. Mark Device as modified so
+  // PairMLIAPKokkos::compute() sync(model_space, DESCRIPTORS) does the right
+  // single transfer (or zero if model is also Device). No unconditional Host copy.
+  data->k_descriptors.template modify<DeviceType>();
 }
 
 /* ---------------------------------------------------------------------- */

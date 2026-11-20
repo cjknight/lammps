@@ -380,14 +380,37 @@ template <class DeviceType>
 void MLIAPDataKokkos<DeviceType>::update_charges()
 {
   AtomKokkos *atomKK = (AtomKokkos *) atom;
-  atomKK->modified(execution_space, Q_MASK);
-  atomKK->sync(Host, Q_MASK);
-  // the model wrote raw charges; make them neutral over the whole system (collective), on the
-  // host copy just synced, and mark the host copy as the current one
-  neutralize_charges(atomKK->k_q.view_hostkk().data(), nlistatoms);
-  atomKK->modified(Host, Q_MASK);
-  if (force->kspace)
-    force->kspace->qsum_qsq(1);
+  // GPU-resident path: if we are executing on Device (SYCL) and the model
+  // wrote charges directly to Device USM (dpnp), keep q on Device.
+  // Host path is retained for non-Kokkos or host execution.
+  if (execution_space == Device) {
+    auto d_q = atomKK->k_q.template view<DeviceType>();
+    const int n = nlistatoms;
+    double loc_sum = 0.0;
+    if (n > 0) {
+      Kokkos::parallel_reduce("MLIAPDataKokkos::qsum",
+        Kokkos::RangePolicy<DeviceType>(0, n),
+        KOKKOS_LAMBDA(const int i, double &sum) { sum += d_q(i); }, loc_sum);
+      Kokkos::fence();
+    }
+    double loc[2] = {loc_sum, (double)n};
+    double tot[2];
+    MPI_Allreduce(loc, tot, 2, MPI_DOUBLE, MPI_SUM, world);
+    const double qbar = (tot[1] > 0.0) ? tot[0] / tot[1] : 0.0;
+    if (n > 0) {
+      Kokkos::parallel_for("MLIAPDataKokkos::neutralize",
+        Kokkos::RangePolicy<DeviceType>(0, n),
+        KOKKOS_LAMBDA(const int i) { d_q(i) -= qbar; });
+    }
+    atomKK->modified(Device, Q_MASK);
+    if (force->kspace) force->kspace->qsum_qsq(1);
+  } else {
+    atomKK->modified(execution_space, Q_MASK);
+    atomKK->sync(Host, Q_MASK);
+    neutralize_charges(atomKK->k_q.view_hostkk().data(), nlistatoms);
+    atomKK->modified(Host, Q_MASK);
+    if (force->kspace) force->kspace->qsum_qsq(1);
+  }
 }
 
 /* ---------------------------------------------------------------------- */
